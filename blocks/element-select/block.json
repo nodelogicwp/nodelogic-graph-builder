@@ -1,0 +1,36 @@
+{
+    "apiVersion":  3,
+    "name":  "custom/element-select",
+    "title":  "Select",
+    "category":  "advanced-blocks-calculator",
+    "icon":  "arrow-down-alt2",
+    "description":  "Dropdown select element.",
+    "attributes":  {
+                       "editorId":  {
+                                        "type":  "string"
+                                    },
+                       "sliderId":  {
+                                        "type":  "string",
+                                        "default":  "select_1"
+                                    },
+                       "value":  {
+                                     "type":  "string",
+                                     "default":  ""
+                                 },
+                       "options":  {
+                                       "type":  "array",
+                                       "default":  [
+                                                       {
+                                                           "label":  "Option A",
+                                                           "value":  "A"
+                                                       },
+                                                       {
+                                                           "label":  "Option B",
+                                                           "value":  "B"
+                                                       }
+                                                   ]
+                                   }
+                   },
+    "editorScript":  "file:../../build/index.js",
+    "render":  "file:./render.php"
+}

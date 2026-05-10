@@ -1,0 +1,25 @@
+{
+  "apiVersion": 3,
+  "name": "custom/button-group",
+  "title": "Button Group",
+  "category": "advanced-blocks-calculator",
+  "icon": "button",
+  "description": "Choice button group with heading.",
+  "attributes": {
+    "title": { "type": "string", "default": "Choose industry" },
+    "buttons": {
+      "type": "array",
+      "default": [
+        { "id": "", "label": "Option 1", "value": "" },
+        { "id": "", "label": "Option 2", "value": "" }
+      ]
+    },
+    "groupId": { "type": "string", "default": "button-group" },
+    "buttonBackground": { "type": "string", "default": "#1d4ed8" },
+    "buttonHover": { "type": "string", "default": "#2563eb" },
+    "buttonText": { "type": "string", "default": "#ffffff" },
+    "buttonSpacing": { "type": "number", "default": 8 }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./buttons-render.php"
+}

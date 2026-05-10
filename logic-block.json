@@ -1,0 +1,24 @@
+{
+  "apiVersion": 3,
+  "name": "custom/nodelogic-logic",
+  "title": "NodeLogic Graph Builder Logic",
+  "category": "advanced-blocks-calculator",
+  "icon": "networking",
+  "description": "Node-based logic graph that controls multiple HTML elements on the page.",
+  "attributes": {
+    "editorId": { "type": "string" },
+    "graphState": {
+      "type": "object",
+      "default": {
+        "elements": [],
+        "connections": [],
+        "formula": "",
+        "updatedAt": 0
+      }
+    },
+    "formula": { "type": "string", "default": "" },
+    "outputConfigs": { "type": "object", "default": {} }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./logic-render.php"
+}

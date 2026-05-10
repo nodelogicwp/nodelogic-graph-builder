@@ -1,0 +1,23 @@
+{
+    "apiVersion":  3,
+    "name":  "custom/element-text",
+    "title":  "Text Input",
+    "category":  "advanced-blocks-calculator",
+    "icon":  "editor-textcolor",
+    "description":  "Text input element.",
+    "attributes":  {
+                       "editorId":  {
+                                        "type":  "string"
+                                    },
+                       "sliderId":  {
+                                        "type":  "string",
+                                        "default":  "text_1"
+                                    },
+                       "value":  {
+                                     "type":  "string",
+                                     "default":  ""
+                                 }
+                   },
+    "editorScript":  "file:../../build/index.js",
+    "render":  "file:./render.php"
+}

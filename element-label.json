@@ -1,0 +1,17 @@
+{
+  "apiVersion": 3,
+  "name": "custom/element-label",
+  "title": "Label",
+  "category": "advanced-blocks-calculator",
+  "icon": "tag",
+  "description": "Static label / text output element.",
+  "attributes": {
+    "editorId": { "type": "string" },
+    "sliderId": { "type": "string", "default": "label_1" },
+    "nodelogicLabel": { "type": "string", "default": "" }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./element-label-render.php"
+}
+
+

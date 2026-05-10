@@ -1,0 +1,31 @@
+{
+    "apiVersion":  3,
+    "name":  "custom/element-number",
+    "title":  "Number Input",
+    "category":  "advanced-blocks-calculator",
+    "icon":  "editor-ol",
+    "description":  "Numeric input element.",
+    "attributes":  {
+                       "editorId":  {
+                                        "type":  "string"
+                                    },
+                       "sliderId":  {
+                                        "type":  "string",
+                                        "default":  "number_1"
+                                    },
+                       "min":  {
+                                   "type":  "number",
+                                   "default":  0
+                               },
+                       "max":  {
+                                   "type":  "number",
+                                   "default":  100
+                               },
+                       "value":  {
+                                     "type":  "number",
+                                     "default":  0
+                                 }
+                   },
+    "editorScript":  "file:../../build/index.js",
+    "render":  "file:./render.php"
+}

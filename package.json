@@ -1,0 +1,22 @@
+{
+  "name": "nodelogic",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "wp-scripts build",
+    "start": "wp-scripts start"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@wordpress/scripts": "^31.6.0",
+    "ajv": "^8.20.0",
+    "esbuild": "^0.19.0",
+    "reactflow": "^11.10.1"
+  },
+  "dependencies": {
+    "react": "^18.3.1"
+  }
+}

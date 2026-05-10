@@ -1,0 +1,24 @@
+{
+  "apiVersion": 3,
+  "name": "custom/element-radio",
+  "title": "Radio Group",
+  "category": "advanced-blocks-calculator",
+  "icon": "marker",
+  "description": "Radio button group element.",
+  "attributes": {
+    "editorId": { "type": "string" },
+    "sliderId": { "type": "string", "default": "radio_1" },
+    "value": { "type": "string", "default": "" },
+    "options": {
+      "type": "array",
+      "default": [
+        { "label": "Option A", "value": "A" },
+        { "label": "Option B", "value": "B" }
+      ]
+    }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./element-radio-render.php"
+}
+
+

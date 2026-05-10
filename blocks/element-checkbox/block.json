@@ -1,0 +1,31 @@
+{
+    "apiVersion":  3,
+    "name":  "custom/element-checkbox",
+    "title":  "Checkbox",
+    "category":  "advanced-blocks-calculator",
+    "icon":  "yes",
+    "description":  "Checkbox element.",
+    "attributes":  {
+                       "editorId":  {
+                                        "type":  "string"
+                                    },
+                       "sliderId":  {
+                                        "type":  "string",
+                                        "default":  "checkbox_1"
+                                    },
+                       "checkboxOnValue":  {
+                                               "type":  "string",
+                                               "default":  "1"
+                                           },
+                       "checkboxOffValue":  {
+                                                "type":  "string",
+                                                "default":  "0"
+                                            },
+                       "value":  {
+                                     "type":  "string",
+                                     "default":  "0"
+                                 }
+                   },
+    "editorScript":  "file:../../build/index.js",
+    "render":  "file:./render.php"
+}

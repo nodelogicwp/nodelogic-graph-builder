@@ -25,14 +25,15 @@ You create your setup directly in Gutenberg:
 
 * Visual drag-and-drop node graph editor
 * Gutenberg blocks for inputs/outputs and page logic
-* Supports number, string, boolean, color, CSS, and event flows
+* Supports number, string, boolean, color, and basic CSS logic flows in the free version
 * Logic Block for page-level runtime behavior
+* Advanced node packs (events, memory, advanced string/math helpers, and premium templates/custom nodes) are available in Pro plans
 * Works locally inside WordPress (no license endpoint required)
 
 **Node Types Included:**
 
 * Element blocks: Seekbar, Number Input, Text Input, Radio Group, Select, Checkbox, Label, Button Group
-* Graph nodes: Calculation, Condition, Switch/If, Boolean Logic, Math helpers, String Logic, Colors, CSS, Events, Outputs
+* Graph nodes (free): Calculation, Condition, Switch/If, Boolean Logic, Math helpers, core String Logic, Colors, CSS, Outputs
 
 Source: https://github.com/nodelogicwp/nodelogic-graph-builder
 

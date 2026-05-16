@@ -10,8 +10,6 @@ export const TREE_DATA = [
             { id: '6', name: 'Case Value', type: 'case-value' },
             { id: '7', name: 'Switch Node', type: 'switch' },
             { id: '8', name: 'If Node', type: 'node' },
-            { id: '31', name: 'Count True Node', type: 'bool-count' },
-            { id: '32', name: 'Unzip Node', type: 'unzip' },
         ],
     },
     {
@@ -52,23 +50,17 @@ export const TREE_DATA = [
         name: 'String Logic',
         type: 'folder',
         children: [
-            { id: '15', name: 'Regex Node', type: 'regex' },
             { id: '16', name: 'Concat Node', type: 'concat' },
-            { id: '69', name: 'Multi Concat', type: 'multi-concat' },
             { id: '17', name: 'Cut A Node', type: 'cut-a' },
             { id: '18', name: 'Cut B Node', type: 'cut-b' },
             { id: '19', name: 'Cut C Node', type: 'cut-c' },
             { id: '20', name: 'Count Characters', type: 'string-count-chars' },
             { id: '26', name: 'String To Number', type: 'string-to-number' },
             { id: '27', name: 'Number To String', type: 'number-to-string' },
-            { id: '41', name: 'Split', type: 'string-split' },
-            { id: '42', name: 'Replace', type: 'string-replace' },
             { id: '43', name: 'Trim', type: 'string-trim' },
             { id: '44', name: 'Uppercase', type: 'string-upper' },
             { id: '45', name: 'Lowercase', type: 'string-lower' },
             { id: '46', name: 'Includes', type: 'string-includes' },
-            { id: '47', name: 'Parse Number', type: 'number-parse' },
-            { id: '68', name: 'Number To Base', type: 'number-to-base' },
         ],
     },
     {
@@ -77,7 +69,6 @@ export const TREE_DATA = [
         type: 'folder',
         children: [
             { id: '29', name: 'Color Node', type: 'color' },
-            { id: '30', name: 'Gradient Node', type: 'gradient' },
         ],
     },
     {
@@ -85,28 +76,15 @@ export const TREE_DATA = [
         name: 'CSS',
         type: 'folder',
         children: [
-            { id: '49', name: 'CSS Unit (px/%/em…)', type: 'css-unit' },
+            { id: '49', name: 'CSS Unit (px/%/em...)', type: 'css-unit' },
+            { id: '71', name: 'CSS Margin', type: 'css-margin' },
+            { id: '72', name: 'CSS Padding', type: 'css-padding' },
+            { id: '73', name: 'CSS Width', type: 'css-width' },
+            { id: '74', name: 'CSS Height', type: 'css-height' },
             { id: '50', name: 'CSS Display', type: 'css-display' },
             { id: '51', name: 'CSS Color', type: 'css-color' },
             { id: '52', name: 'CSS Text', type: 'css-text' },
-        ],
-    },
-    {
-        id: '61',
-        name: 'Events',
-        type: 'folder',
-        children: [
-            { id: '62', name: 'Event Element Node', type: 'event-element' },
-            { id: '63', name: 'Event ID Node', type: 'event-id' },
-            { id: '64', name: 'Event Processor', type: 'event-processor' },
-        ],
-    },
-    {
-        id: '67',
-        name: 'Outputs',
-        type: 'folder',
-        children: [
-            { id: '66', name: 'Output ID Node', type: 'output-id' },
+            { id: '70', name: 'CSS Join', type: 'css-join' },
         ],
     },
 ];

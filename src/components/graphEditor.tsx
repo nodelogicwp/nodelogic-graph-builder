@@ -56,6 +56,15 @@ interface TreeItem {
         | 'memory-write-number'
         | 'memory-write-string'
         | 'memory-write-boolean'
+        | 'css-unit'
+        | 'css-display'
+        | 'css-color'
+        | 'css-text'
+        | 'css-join'
+        | 'css-margin'
+        | 'css-padding'
+        | 'css-width'
+        | 'css-height'
         | 'event-element'
         | 'event-id'
         | 'event-processor';
@@ -115,6 +124,11 @@ interface CanvasElement {
         | 'css-display'
         | 'css-color'
         | 'css-text'
+        | 'css-join'
+        | 'css-margin'
+        | 'css-padding'
+        | 'css-width'
+        | 'css-height'
         | 'operator'
         | 'math'
         | 'comparison'
@@ -221,12 +235,13 @@ interface CanvasElement {
         outputCssProperty?: string;
         // For css-unit node: unit selector
         cssUnit?: string;
+        cssUnitValue?: string;
         // For css-display node: display value
         cssDisplay?: string;
         // For css-text node: raw CSS text
         cssText?: string;
     };
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'event';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event';
     connections?: Connection[];
 }
 
@@ -237,7 +252,7 @@ interface Connection {
     toId: string;
     toInput: string;
     operation?: '+' | '-' | '*' | '/' | '**' | '===' | '!==' | '>' | '<' | '>=' | '<=';
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'event';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event';
     connectionType?: 'normal' | 'case'; // New type for case connections
 }
 
@@ -366,6 +381,33 @@ const GRADIENT_MIN_COLORS = 2;
 const GRADIENT_MAX_COLORS = 8;
 const GRADIENT_DEFAULT_COLORS = ['#ef4444', '#facc15', '#22c55e'];
 
+const PIN_TYPE_COLORS: Record<string, string> = {
+    number: '#2196f3',
+    string: '#4caf50',
+    boolean: '#e100ff',
+    case: '#ff5100',
+    color: '#00c7be',
+    zip: '#f59e0b',
+    css: '#a855f7',
+    'css-unit': '#7c3aed',
+};
+
+const getConnectionLookupKey = (toId: string, toInput: string): string => `${toId}:${toInput}`;
+
+const buildPinStyle = (types: string[]): PinStyle => {
+    if (!types.length) return {};
+
+    const step = 100 / types.length;
+    const extended = [...types, types[0]];
+    const gradient = `conic-gradient(${extended
+        .map((type, index) => `${PIN_TYPE_COLORS[type] || '#000'} ${index * step}%`)
+        .join(', ')})`;
+
+    return {
+        '--pin-gradient': gradient
+    };
+};
+
 const GraphEditor: React.FC<GraphEditorProps> = ({
     editorId,
     onFormulaChange,
@@ -405,7 +447,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [selected, setSelected] = useState<string | null>('main-block');
     const [draggedItem, setDraggedItem] = useState<TreeItem | null>(null);
     const [isPanning, setIsPanning] = useState(false);
-    const [lastPanPoint, setLastPanPoint] = useState({ x: 0, y: 0 });
     const [isDraggingFromSidebar, setIsDraggingFromSidebar] = useState(false);
     const [isDraggingElement, setIsDraggingElement] = useState(false);
     const [draggedElementId, setDraggedElementId] = useState<string | null>(null);
@@ -453,6 +494,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         startY: number;
         item: TreeItem;
     } | null>(null);
+    const lastPanPointRef = useRef({ x: 0, y: 0 });
+    const draggedItemRef = useRef<TreeItem | null>(draggedItem);
+    const canvasMouseMoveRafRef = useRef<number | null>(null);
+    const pendingCanvasMouseRef = useRef<{ x: number; y: number } | null>(null);
 
     const buttonStyle = {
         width: '100%',
@@ -502,6 +547,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     })();
     const templateToolsEnabled = Boolean(showTemplateTools && runtimeConfig.enableTemplates);
     const customNodeLibraryEnabled = Boolean(customNodeMode || enableCustomNodes || runtimeConfig.enableCustomNodes);
+    const outputPropertyNames = ['value', 'background', 'color', 'disabled', 'custom-css'];
+    const outputInputLabels = ['Value', 'Background', 'Color', 'Disabled', 'CSS'];
+    const elementsById = React.useMemo(() => {
+        const map = new Map<string, CanvasElement>();
+        elements.forEach((element) => {
+            map.set(element.id, element);
+        });
+        return map;
+    }, [elements]);
+    const connectionsByTargetInput = React.useMemo(() => {
+        const map = new Map<string, Connection>();
+        connections.forEach((connection) => {
+            map.set(getConnectionLookupKey(connection.toId, connection.toInput), connection);
+        });
+        return map;
+    }, [connections]);
+    const getPinStyleByTypes = React.useCallback((types: string[]): PinStyle => buildPinStyle(types), []);
     const configuredTreeData = Array.isArray(runtimeConfig.treeData) && runtimeConfig.treeData.length > 0
         ? runtimeConfig.treeData
         : (TREE_DATA as TreeItem[]);
@@ -580,7 +642,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const getAcceptedTypesForPin = (
         element: CanvasElement,
         inputIndex: number
-    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'event'> => {
+    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'> => {
         // Event nodes can only connect to other event nodes
         if (element.type === 'event-processor' && inputIndex === 0) {
             return ['event'];
@@ -607,23 +669,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
 
         if (element.type === 'output') {
-            const outputAccepted: Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css'>> = [
+            const outputAccepted: Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit'>> = [
                 ['number', 'string', 'boolean', 'color', 'zip'], // 0: value
                 ['color', 'string'],                              // 1: background
                 ['color', 'string'],                              // 2: color (text)
                 ['boolean'],                                      // 3: disabled
-                ['css', 'string', 'number'],                      // 4: font-size
-                ['css', 'string', 'number'],                      // 5: border-radius
-                ['color', 'css', 'string'],                       // 6: border-color
-                ['css', 'string', 'number'],                      // 7: margin
-                ['css', 'string', 'number'],                      // 8: padding
-                ['number', 'string'],                             // 9: opacity
-                ['css', 'string'],                                // 10: display
-                ['css', 'string', 'number'],                      // 11: width
-                ['css', 'string', 'number'],                      // 12: height
-                ['css', 'string'],                                // 13: custom CSS
+                ['css', 'string'],                                // 4: custom CSS
             ];
-            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip'>;
+            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit'>;
         }
 
         if (element.type === 'main') {
@@ -656,10 +709,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const accepted = acceptedByIndex[inputIndex]
             || acceptedByIndex[acceptedByIndex.length - 1]
             || ['number'];
-        return accepted as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'event'>;
+        return accepted as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'>;
     };
 
-    const acceptedTypes: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'event'>>> = {
+    const acceptedTypes: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'>>> = {
         calculation: [
             ['number'] // one static input
         ],
@@ -819,22 +872,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         'number-to-base': [['number']],
         'multi-concat': [['string', 'number', 'boolean'], ['string', 'number', 'boolean'], ['string', 'number', 'boolean']],
         'css-unit': [['number']],
+        'css-margin': [['css-unit'], ['css-unit'], ['css-unit'], ['css-unit']],
+        'css-padding': [['css-unit'], ['css-unit'], ['css-unit'], ['css-unit']],
+        'css-width': [['css-unit']],
+        'css-height': [['css-unit']],
         'css-color': [['color', 'string']],
+        'css-join': [['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean']],
         output: [
             ['number', 'string', 'boolean', 'color', 'zip'], // 0: value
             ['color', 'string'],                              // 1: background
             ['color', 'string'],                              // 2: color (text)
             ['boolean'],                                      // 3: disabled
-            ['css', 'string', 'number'],                      // 4: font-size
-            ['css', 'string', 'number'],                      // 5: border-radius
-            ['color', 'css', 'string'],                       // 6: border-color
-            ['css', 'string', 'number'],                      // 7: margin
-            ['css', 'string', 'number'],                      // 8: padding
-            ['number', 'string'],                             // 9: opacity
-            ['css', 'string'],                                // 10: display
-            ['css', 'string', 'number'],                      // 11: width
-            ['css', 'string', 'number'],                      // 12: height
-            ['css', 'string'],                                // 13: custom CSS
+            ['css', 'string'],                                // 4: custom CSS
         ],
     };
 
@@ -996,14 +1045,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { parseRadix: 16 };
             case 'multi-concat':
                 return { inputCount: 3 };
+            case 'css-join':
+                return { inputCount: 3 };
             case 'css-unit':
-                return { cssUnit: 'px' };
+                return { cssUnit: 'px', cssUnitValue: '0' };
             case 'css-display':
                 return { cssDisplay: 'block' };
             case 'css-color':
-                return {};
+                return { colorValue: '#2563eb' };
             case 'css-text':
                 return { cssText: '' };
+            case 'css-margin':
+            case 'css-padding':
+            case 'css-width':
+            case 'css-height':
+                return {};
             default:
                 return { operation: '+' };
         }
@@ -1054,9 +1110,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         'number-to-base',
         'multi-concat',
         'css-unit',
+        'css-margin',
+        'css-padding',
+        'css-width',
+        'css-height',
         'css-display',
         'css-color',
         'css-text',
+        'css-join',
         'operator',
         'math',
         'comparison',
@@ -1171,6 +1232,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     || valueTypeRaw === 'case'
                     || valueTypeRaw === 'color'
                     || valueTypeRaw === 'zip'
+                    || valueTypeRaw === 'css'
+                    || valueTypeRaw === 'css-unit'
+                    || valueTypeRaw === 'event'
                 ) {
                     element.valueType = valueTypeRaw;
                 }
@@ -1222,7 +1286,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const toInput = normalizePinName(toInputRaw, 'input');
 
                 const valueTypeRaw = raw.valueType;
-                const valueType = valueTypeRaw === 'number' || valueTypeRaw === 'string' || valueTypeRaw === 'boolean' || valueTypeRaw === 'case' || valueTypeRaw === 'color' || valueTypeRaw === 'zip'
+                const valueType = valueTypeRaw === 'number' || valueTypeRaw === 'string' || valueTypeRaw === 'boolean' || valueTypeRaw === 'case' || valueTypeRaw === 'color' || valueTypeRaw === 'zip' || valueTypeRaw === 'css' || valueTypeRaw === 'css-unit' || valueTypeRaw === 'event'
                     ? valueTypeRaw
                     : undefined;
 
@@ -1614,6 +1678,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     React.useEffect(() => {
         isDraggingFromSidebarRef.current = isDraggingFromSidebar;
     }, [isDraggingFromSidebar]);
+
+    React.useEffect(() => {
+        draggedItemRef.current = draggedItem;
+    }, [draggedItem]);
     
     React.useEffect(() => {
         isDraggingCanvasElementRef.current = isDraggingCanvasElement;
@@ -2037,7 +2105,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (canvasElement && !target.closest('.pin') && !target.closest('.operation-input')) {
             const elementId = canvasElement.getAttribute('data-element-id');
             if (elementId) {
-                const element = elements.find(el => el.id === elementId);
+                const element = elementsById.get(elementId);
                 if (element) {
                     elementDragRef.current = {
                         elementId: elementId,
@@ -2058,44 +2126,65 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (e.button === 1 || e.button === 0) {
             e.preventDefault();
             setIsPanning(true);
-            setLastPanPoint({ x: e.clientX, y: e.clientY });
+            lastPanPointRef.current = { x: e.clientX, y: e.clientY };
         }
     };
 
-    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-        // Update connection in progress
-        if (connectionInProgress) {
+    const processCanvasMouseMove = React.useCallback((clientX: number, clientY: number) => {
+        if (connectionInProgressRef.current) {
             setConnectionInProgress(prev =>
-                prev ? { ...prev, x: e.clientX, y: e.clientY } : null
+                prev ? { ...prev, x: clientX, y: clientY } : null
             );
         }
-        
-        // Only pan if currently panning
-        if (isPanning) {
-            const deltaX = e.clientX - lastPanPoint.x;
-            const deltaY = e.clientY - lastPanPoint.y;
-            setOffsetX(offsetX + deltaX);
-            setOffsetY(offsetY + deltaY);
-            setLastPanPoint({ x: e.clientX, y: e.clientY });
+
+        if (isPanningRef.current) {
+            const deltaX = clientX - lastPanPointRef.current.x;
+            const deltaY = clientY - lastPanPointRef.current.y;
+            if (deltaX !== 0 || deltaY !== 0) {
+                setOffsetX(prev => prev + deltaX);
+                setOffsetY(prev => prev + deltaY);
+                lastPanPointRef.current = { x: clientX, y: clientY };
+            }
         }
-        
-        // Update drag preview cursor position for sidebar drag
-        if (isDraggingFromSidebar && draggedItem) {
+
+        if (isDraggingFromSidebarRef.current && draggedItemRef.current) {
             const rect = canvasRef.current?.getBoundingClientRect();
             if (rect) {
                 setDragPreview({
-                    x: e.clientX - rect.left,
-                    y: e.clientY - rect.top,
-                    name: draggedItem.name
+                    x: clientX - rect.left,
+                    y: clientY - rect.top,
+                    name: draggedItemRef.current.name
                 });
             }
         }
+    }, []);
+
+    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+        pendingCanvasMouseRef.current = { x: e.clientX, y: e.clientY };
+        if (canvasMouseMoveRafRef.current !== null) {
+            return;
+        }
+        canvasMouseMoveRafRef.current = window.requestAnimationFrame(() => {
+            canvasMouseMoveRafRef.current = null;
+            const pending = pendingCanvasMouseRef.current;
+            if (!pending) return;
+            processCanvasMouseMove(pending.x, pending.y);
+        });
     };
 
     const handleMouseUp = () => {
         // Only stop panning on canvas mouse up, not drag from sidebar
         setIsPanning(false);
     };
+
+    React.useEffect(() => {
+        return () => {
+            if (canvasMouseMoveRafRef.current !== null) {
+                window.cancelAnimationFrame(canvasMouseMoveRafRef.current);
+                canvasMouseMoveRafRef.current = null;
+            }
+        };
+    }, []);
 
     // Helper function to find item by ID
     const findItemById = (items: TreeItem[], id: string | null): TreeItem | null => {
@@ -2195,7 +2284,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return isMainInputType ? 4 : 3;
         }
         if (element.type === 'constant' || element.type === 'variable') return 0;
-        if (element.type === 'output') return 14; // value, background, color, disabled, font-size, border-radius, border-color, margin, padding, opacity, display, width, height, custom-css
+        if (element.type === 'output') return outputPropertyNames.length;
         if (element.type === 'not') return 1;
         if (element.type === 'and' || element.type === 'or') return 2;
         if (element.type === 'clamp') return 3; // value, min, max
@@ -2209,7 +2298,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'multi-concat') {
             return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
         }
+        if (element.type === 'css-join') {
+            return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
+        }
         if (element.type === 'css-unit') return 1;   // number input
+        if (element.type === 'css-margin') return 4;
+        if (element.type === 'css-padding') return 4;
+        if (element.type === 'css-width') return 1;
+        if (element.type === 'css-height') return 1;
         if (element.type === 'css-display') return 0; // no inputs, just a selector
         if (element.type === 'css-color') return 1;   // color or string
         if (element.type === 'css-text') return 0;    // no inputs, just text field
@@ -2267,7 +2363,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const updateElementValueTypes = (nextElements: CanvasElement[], nextConnections: Connection[] = connectionsRef.current): CanvasElement[] => {
         const elementMap = new Map(nextElements.map(el => [el.id, el]));
 
-        const getConnectedType = (toId: string, toInput: string): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | null => {
+        const getConnectedType = (toId: string, toInput: string): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | null => {
             const conn = nextConnections.find(c => c.toId === toId && c.toInput === toInput);
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
@@ -2275,7 +2371,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
 
         return nextElements.map(el => {
-            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' = 'number';
+            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' = 'number';
 
             switch (el.type) {
                 case 'number':
@@ -2424,9 +2520,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'string';
                     break;
                 case 'css-unit':
+                    valueType = 'css-unit';
+                    break;
+                case 'css-margin':
+                case 'css-padding':
+                case 'css-width':
+                case 'css-height':
                 case 'css-display':
                 case 'css-color':
                 case 'css-text':
+                case 'css-join':
                     valueType = 'css';
                     break;
                 case 'string-split':
@@ -2497,6 +2600,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         let result = '';
         const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const customPlaceholderForNode = (nodeId: string): string => `__customIn("${nodeId}")`;
+        const elementById = new Map<string, CanvasElement>();
+        const connectionsByTargetInput = new Map<string, Connection>();
+        const connectionsByTargetId = new Map<string, Connection[]>();
+
+        elements.forEach((element) => {
+            elementById.set(element.id, element);
+        });
+        connections.forEach((connection) => {
+            connectionsByTargetInput.set(getConnectionLookupKey(connection.toId, connection.toInput), connection);
+            const targetConnections = connectionsByTargetId.get(connection.toId);
+            if (targetConnections) {
+                targetConnections.push(connection);
+            } else {
+                connectionsByTargetId.set(connection.toId, [connection]);
+            }
+        });
+
+        const getConnectionToInput = (toId: string, toInput: string): Connection | undefined => {
+            return connectionsByTargetInput.get(getConnectionLookupKey(toId, toInput));
+        };
+        const getConnectionsToElement = (toId: string): Connection[] => {
+            return connectionsByTargetId.get(toId) || [];
+        };
 
         // Helper: build expression from a connection, passing the correct output pin index
         const buildFromConn = (conn: Connection, depth: number): string => {
@@ -2505,13 +2631,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
 
         const buildExpression = (elementId: string, depth: number = 0, outputIndex: number = 0): string => {
-            const element = elements.find(el => el.id === elementId);
+            const element = elementById.get(elementId);
             if (!element) return '';
 
             const indent = '  '.repeat(depth);
 
             const getInputConnection = (inputName: string): Connection | undefined =>
-                connections.find(c => c.toId === element.id && c.toInput === inputName);
+                getConnectionToInput(element.id, inputName);
             
             switch (element.type) {
                 case 'number': {
@@ -2720,8 +2846,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                     steps.push(`${indent}  on value: ${switchValue}`);
 
-                    const caseConnections = connections
-                        .filter(c => c.toId === element.id && getInputIndex(c.toInput) > 0)
+                    const caseConnections = getConnectionsToElement(element.id)
+                        .filter(c => getInputIndex(c.toInput) > 0)
                         .sort((a, b) =>
                             getInputIndex(a.toInput) - getInputIndex(b.toInput)
                         );
@@ -2729,22 +2855,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const caseClauses: Array<{ condition: string; result: string }> = [];
 
                     for (const conn of caseConnections) {
-                        const caseElement = elements.find(el => el.id === conn.fromId);
+                        const caseElement = elementById.get(conn.fromId);
                         if (!caseElement) continue;
 
                         // CASE-VALUE
                         if (caseElement.type === 'case-value') {
-                            const valConn = connections.find(
-                                c => c.toId === caseElement.id && c.toInput === 'input0'
-                            );
+                            const valConn = getConnectionToInput(caseElement.id, 'input0');
 
                             const val = valConn
                                 ? buildExpression(valConn.fromId, depth + 1)
                                 : toFormulaLiteral(caseElement.data?.caseValue ?? 0);
 
-                            const outConn = connections.find(
-                                c => c.toId === caseElement.id && c.toInput === 'input1'
-                            );
+                            const outConn = getConnectionToInput(caseElement.id, 'input1');
 
                             const outVal = outConn
                                 ? buildExpression(outConn.fromId, depth + 1)
@@ -2758,23 +2880,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                         // CASE-RANGE
                         if (caseElement.type === 'case-range') {
-                            const minConn = connections.find(
-                                c => c.toId === caseElement.id && c.toInput === 'input0'
-                            );
+                            const minConn = getConnectionToInput(caseElement.id, 'input0');
                             const minVal = minConn
                                 ? buildExpression(minConn.fromId, depth + 1)
                                 : toFormulaLiteral(caseElement.data?.min ?? 0);
 
-                            const maxConn = connections.find(
-                                c => c.toId === caseElement.id && c.toInput === 'input1'
-                            );
+                            const maxConn = getConnectionToInput(caseElement.id, 'input1');
                             const maxVal = maxConn
                                 ? buildExpression(maxConn.fromId, depth + 1)
                                 : toFormulaLiteral(caseElement.data?.max ?? 0);
 
-                            const outConn = connections.find(
-                                c => c.toId === caseElement.id && c.toInput === 'input2'
-                            );
+                            const outConn = getConnectionToInput(caseElement.id, 'input2');
                             const outVal = outConn
                                 ? buildExpression(outConn.fromId, depth + 1)
                                 : toFormulaLiteral(caseElement.data?.out ?? 0);
@@ -2800,13 +2916,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                 case 'case-range': {
                     // input0 = min
-                    const minConn = connections.find(c => c.toId === element.id && c.toInput === 'input0');
+                    const minConn = getConnectionToInput(element.id, 'input0');
                     const minVal = minConn
                         ? buildExpression(minConn.fromId, depth + 1)
                         : toFormulaLiteral(element.data?.min ?? 0);
 
                     // input1 = max
-                    const maxConn = connections.find(c => c.toId === element.id && c.toInput === 'input1');
+                    const maxConn = getConnectionToInput(element.id, 'input1');
                     const maxVal = maxConn
                         ? buildExpression(maxConn.fromId, depth + 1)
                         : toFormulaLiteral(element.data?.max ?? 0);
@@ -2818,7 +2934,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                 case 'case-value': {
                     // input0 = case value
-                    const valConn = connections.find(c => c.toId === element.id && c.toInput === 'input0');
+                    const valConn = getConnectionToInput(element.id, 'input0');
                     const val = valConn
                         ? buildExpression(valConn.fromId, depth + 1)
                         : toFormulaLiteral(element.data?.caseValue ?? 0);
@@ -3169,21 +3285,73 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const minLen = Number.isFinite(Number(element.data?.minLength)) ? Number(element.data.minLength) : 0;
                     return `(__nodeToBase(${srcExpr}, ${radix}, ${minLen}))`;
                 }
+                case 'css-join': {
+                    const inputCount = Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
+                    const parts = Array.from({ length: inputCount }, (_, i) => {
+                        const conn = getInputConnection(`input${i}`);
+                        return conn ? buildFromConn(conn, depth + 1) : '""';
+                    });
+                    return `(__nodeCssJoin(${parts.join(', ')}))`;
+                }
 
                 case 'css-unit': {
                     const src = getInputConnection('input0');
-                    const numExpr = src ? buildFromConn(src, depth + 1) : '0';
+                    const fallbackValueRaw = String(element.data?.cssUnitValue ?? '0').trim();
+                    const fallbackValue = Number.isFinite(Number(fallbackValueRaw)) ? fallbackValueRaw : '0';
+                    const numExpr = src ? buildFromConn(src, depth + 1) : fallbackValue;
                     const unit = JSON.stringify(String(element.data?.cssUnit || 'px'));
                     return `(__nodeToString(${numExpr}) + ${unit})`;
                 }
 
+                case 'css-margin': {
+                    const top = getInputConnection('input0');
+                    const right = getInputConnection('input1');
+                    const bottom = getInputConnection('input2');
+                    const left = getInputConnection('input3');
+                    const topExpr = top ? buildFromConn(top, depth + 1) : '"0px"';
+                    const rightExpr = right ? buildFromConn(right, depth + 1) : '"0px"';
+                    const bottomExpr = bottom ? buildFromConn(bottom, depth + 1) : '"0px"';
+                    const leftExpr = left ? buildFromConn(left, depth + 1) : '"0px"';
+                    return `(__nodeConcat("margin: ", __nodeToString(${topExpr}).trim(), " ", __nodeToString(${rightExpr}).trim(), " ", __nodeToString(${bottomExpr}).trim(), " ", __nodeToString(${leftExpr}).trim()))`;
+                }
+
+                case 'css-padding': {
+                    const top = getInputConnection('input0');
+                    const right = getInputConnection('input1');
+                    const bottom = getInputConnection('input2');
+                    const left = getInputConnection('input3');
+                    const topExpr = top ? buildFromConn(top, depth + 1) : '"0px"';
+                    const rightExpr = right ? buildFromConn(right, depth + 1) : '"0px"';
+                    const bottomExpr = bottom ? buildFromConn(bottom, depth + 1) : '"0px"';
+                    const leftExpr = left ? buildFromConn(left, depth + 1) : '"0px"';
+                    return `(__nodeConcat("padding: ", __nodeToString(${topExpr}).trim(), " ", __nodeToString(${rightExpr}).trim(), " ", __nodeToString(${bottomExpr}).trim(), " ", __nodeToString(${leftExpr}).trim()))`;
+                }
+
+                case 'css-width': {
+                    const src = getInputConnection('input0');
+                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"0px"';
+                    return `(__nodeConcat("width: ", __nodeToString(${valueExpr}).trim()))`;
+                }
+
+                case 'css-height': {
+                    const src = getInputConnection('input0');
+                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"0px"';
+                    return `(__nodeConcat("height: ", __nodeToString(${valueExpr}).trim()))`;
+                }
+
                 case 'css-display': {
-                    return JSON.stringify(String(element.data?.cssDisplay || 'block'));
+                    const display = String(element.data?.cssDisplay || 'block').trim() || 'block';
+                    return JSON.stringify(`display: ${display}`);
                 }
 
                 case 'css-color': {
                     const src = getInputConnection('input0');
-                    return src ? buildFromConn(src, depth + 1) : '""';
+                    if (src) {
+                        const srcExpr = buildFromConn(src, depth + 1);
+                        return `(__nodeConcat("color: ", __nodeToString(${srcExpr}).trim()))`;
+                    }
+                    const fallbackColor = String(element.data?.colorValue || '#2563eb').trim() || '#2563eb';
+                    return JSON.stringify(`color: ${fallbackColor}`);
                 }
 
                 case 'css-text': {
@@ -3201,8 +3369,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (mainBlock || outputNodeForCustom) {
             const sinkBlock = mainBlock || outputNodeForCustom!;
             if (customNodeMode) {
-                const outputConnections = connections
-                    .filter(c => c.toId === sinkBlock.id && c.toInput.startsWith('input'))
+                const outputConnections = getConnectionsToElement(sinkBlock.id)
+                    .filter(c => c.toInput.startsWith('input'))
                     .map((conn) => {
                         const idx = getInputIndex(conn.toInput);
                         return { conn, idx: idx >= 0 ? idx : 0 };
@@ -3222,10 +3390,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { formula: result, steps };
             }
 
-            const valueConn = connections.find(c => c.toId === sinkBlock.id && c.toInput === 'input0');
-            const backgroundConn = connections.find(c => c.toId === sinkBlock.id && c.toInput === 'input1');
-            const colorConn = connections.find(c => c.toId === sinkBlock.id && c.toInput === 'input2');
-            const disabledConn = connections.find(c => c.toId === sinkBlock.id && c.toInput === 'input3');
+            const valueConn = getConnectionToInput(sinkBlock.id, 'input0');
+            const backgroundConn = getConnectionToInput(sinkBlock.id, 'input1');
+            const colorConn = getConnectionToInput(sinkBlock.id, 'input2');
+            const disabledConn = getConnectionToInput(sinkBlock.id, 'input3');
+            const cssConn = getConnectionToInput(sinkBlock.id, 'input4');
 
             if (valueConn) {
                 steps.push('=== Formula Generation ===');
@@ -3233,13 +3402,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const backgroundExpr = backgroundConn ? buildFromConn(backgroundConn, 0) : '';
                 const colorExpr = colorConn ? buildFromConn(colorConn, 0) : '';
                 const disabledExpr = disabledConn ? buildFromConn(disabledConn, 0) : '';
+                const cssExpr = cssConn ? buildFromConn(cssConn, 0) : '';
 
-                const hasPresentation = Boolean(backgroundExpr || colorExpr || disabledExpr);
+                const hasPresentation = Boolean(backgroundExpr || colorExpr || disabledExpr || cssExpr);
                 if (hasPresentation) {
                     const backgroundPart = backgroundExpr ? `background: (${backgroundExpr}), ` : '';
                     const colorPart = colorExpr ? `color: (${colorExpr}), ` : '';
                     const disabledPart = disabledExpr ? `disabled: (${disabledExpr}), ` : '';
-                    result = `({ value: (${valueExpr}), ${backgroundPart}${colorPart}${disabledPart} })`;
+                    const cssPart = cssExpr ? `"custom-css": (${cssExpr}), ` : '';
+                    result = `({ value: (${valueExpr}), ${backgroundPart}${colorPart}${disabledPart}${cssPart} })`;
                 } else {
                     result = valueExpr;
                 }
@@ -3261,12 +3432,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const targetId = String(outNode.data?.selectedElement || '').trim();
                 if (!targetId) continue;
 
-                const getConn = (idx: number) => connections.find(c => c.toId === outNode.id && c.toInput === `input${idx}`);
-                const propNames = ['value', 'background', 'color', 'disabled', 'font-size', 'border-radius', 'border-color', 'margin', 'padding', 'opacity', 'display', 'width', 'height', 'custom-css'];
+                const getConn = (idx: number) => getConnectionToInput(outNode.id, `input${idx}`);
 
                 const parts: string[] = [];
                 let hasAny = false;
-                propNames.forEach((prop, i) => {
+                outputPropertyNames.forEach((prop, i) => {
                     const conn = getConn(i);
                     if (conn) {
                         hasAny = true;
@@ -3387,11 +3557,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 3) return 'Disabled';
                 return '';
             case 'output': {
-                const labels = ['Value', 'Background', 'Color', 'Disabled', 'Font Size', 'Border Radius', 'Border Color', 'Margin', 'Padding', 'Opacity', 'Display', 'Width', 'Height', 'Custom CSS'];
                 if (customNodeMode && element.data?.outputLabels) {
-                    return element.data.outputLabels[index] || labels[index] || '';
+                    return element.data.outputLabels[index] || outputInputLabels[index] || '';
                 }
-                return labels[index] || '';
+                return outputInputLabels[index] || '';
             }
             case 'node':
                 if (index === 0) return 'Condition';
@@ -3399,6 +3568,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 2) return 'False';
                 return '';
             case 'css-unit': return 'Number';
+            case 'css-margin':
+            case 'css-padding':
+                if (index === 0) return 'Top';
+                if (index === 1) return 'Right';
+                if (index === 2) return 'Bottom';
+                return 'Left';
+            case 'css-width': return 'Value';
+            case 'css-height': return 'Value';
             case 'css-color': return 'Color';
             case 'css-text': return '';
             case 'css-display': return '';
@@ -3420,6 +3597,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'number-parse': return 'Text';
             case 'number-to-base': return 'Number';
             case 'multi-concat': return `Text ${index + 1}`;
+            case 'css-join': return `CSS ${index + 1}`;
             default:
                 return `Input ${index + 1}`;
         }
@@ -3514,9 +3692,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'variable':
                 return 'Value';
             case 'css-unit':
+            case 'css-margin':
+            case 'css-padding':
+            case 'css-width':
+            case 'css-height':
             case 'css-display':
             case 'css-color':
             case 'css-text':
+            case 'css-join':
                 return 'CSS';
             case 'not': return 'Result';
             case 'and': return 'Result';
@@ -3534,6 +3717,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'number-parse': return 'Number';
             case 'number-to-base': return 'String';
             case 'multi-concat': return 'Text';
+            case 'css-join': return 'CSS';
             default:
                 return `Output-${index + 1}`;
         }
@@ -3639,9 +3823,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'multi-concat':
                 return 1;
             case 'css-unit':
+            case 'css-margin':
+            case 'css-padding':
+            case 'css-width':
+            case 'css-height':
             case 'css-display':
             case 'css-color':
             case 'css-text':
+            case 'css-join':
                 return 1;
             case 'unzip': {
                 const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
@@ -4210,6 +4399,68 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return null;
             case 'multi-concat':
                 return null;
+            case 'css-color': {
+                if (index !== 0) return null;
+                const hasColorConnection = connections.some(
+                    c => c.toId === element.id && c.toInput === 'input0'
+                );
+                if (hasColorConnection) {
+                    return <div className="input-placeholder"></div>;
+                }
+                const currentColor = String(element.data?.colorValue || '#2563eb');
+                return (
+                    <div
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            width: '100%'
+                        }}
+                    >
+                        <input
+                            type="color"
+                            className="input-control"
+                            value={currentColor}
+                            onChange={(e) => {
+                                const colorValue = e.target.value;
+                                setElements(prev =>
+                                    updateElementValueTypes(
+                                        prev.map(elem =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, colorValue } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ width: '34px', maxWidth: '34px', padding: '1px' }}
+                        />
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={currentColor}
+                            onChange={(e) => {
+                                const colorValue = e.target.value;
+                                setElements(prev =>
+                                    updateElementValueTypes(
+                                        prev.map(elem =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, colorValue } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="#2563eb"
+                            style={{ maxWidth: '80px' }}
+                        />
+                    </div>
+                );
+            }
+            case 'css-join':
+                return null;
             case 'output':
                 if (index === 0) {
                     return (
@@ -4399,7 +4650,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     
     // Handle global mouse move for connection drawing
     React.useEffect(() => {
-        const handleGlobalMouseMove = (e: MouseEvent) => {
+        const processGlobalMouseMove = (e: MouseEvent) => {
             // Update connection in progress
             if (connectionInProgressRef.current) {
                 const rect = canvasRef.current?.getBoundingClientRect();
@@ -4451,6 +4702,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     });
                 }
             }
+        };
+
+        let pendingMouseMoveEvent: MouseEvent | null = null;
+        let mouseMoveRafId: number | null = null;
+        const handleGlobalMouseMove = (e: MouseEvent) => {
+            pendingMouseMoveEvent = e;
+            if (mouseMoveRafId !== null) {
+                return;
+            }
+            mouseMoveRafId = window.requestAnimationFrame(() => {
+                mouseMoveRafId = null;
+                if (!pendingMouseMoveEvent) return;
+                processGlobalMouseMove(pendingMouseMoveEvent);
+            });
         };
         
         const handleGlobalMouseUp = (e: MouseEvent) => {
@@ -4705,6 +4970,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         document.addEventListener('mouseup', handleGlobalMouseUp);
         
         return () => {
+            if (mouseMoveRafId !== null) {
+                window.cancelAnimationFrame(mouseMoveRafId);
+                mouseMoveRafId = null;
+            }
             document.removeEventListener('mousemove', handleGlobalMouseMove);
             document.removeEventListener('mouseup', handleGlobalMouseUp);
         };
@@ -4960,7 +5229,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 };
             }
 
-            const expectedType = el.valueType && el.valueType !== 'case' ? el.valueType : undefined;
+            const expectedType =
+                el.valueType === 'number'
+                || el.valueType === 'string'
+                || el.valueType === 'boolean'
+                || el.valueType === 'color'
+                    ? el.valueType
+                    : undefined;
             const picked = pickDetectedElement(expectedType);
 
             if (!picked) {
@@ -5618,8 +5893,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     {/* Render connections */}
                     <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                         {connections.map(conn => {
-                            const fromElement = elements.find(el => el.id === conn.fromId);
-                            const toElement = elements.find(el => el.id === conn.toId);
+                            const fromElement = elementsById.get(conn.fromId);
+                            const toElement = elementsById.get(conn.toId);
                             
                             if (!fromElement || !toElement) return null;
                             
@@ -5646,7 +5921,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         
                         {/* Connection in progress */}
                         {connectionInProgress && (() => {
-                            const element = elements.find(el => el.id === connectionInProgress.elementId);
+                            const element = elementsById.get(connectionInProgress.elementId);
                             if (!element) return null;
                             
                             const fromPin = getPinPosition(
@@ -5729,45 +6004,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'number-to-base'
                             || el.type === 'multi-concat'
                             || el.type === 'css-unit'
+                            || el.type === 'css-margin'
+                            || el.type === 'css-padding'
+                            || el.type === 'css-width'
+                            || el.type === 'css-height'
                             || el.type === 'css-display'
                             || el.type === 'css-text';
 
 
-                        function getColorForType(type: string) {
-                            switch (type) {
-                                case 'number': return '#2196f3';
-                                case 'string': return '#4caf50';
-                                case 'boolean': return '#e100ff';
-                                case 'case': return '#ff5100';
-                                case 'color': return '#00c7be';
-                                case 'zip': return '#f59e0b';
-                                case 'css': return '#a855f7';
-                                default: return '#000';
-                            }
-                        }
-
-                        function getTypesForPin(element: CanvasElement, i: number): string[] {
-                            return getAcceptedTypesForPin(element, i);
-                        }
-
-                        function getPinStyle(types: string[]) {
-                            if (!types.length) return {};
-
-                            const step = 100 / types.length;
-
-                            // close the loop by appending the first color at the end
-                            const extended = [...types, types[0]];
-
-                            const gradient = `conic-gradient(${extended
-                                .map((t, idx) => `${getColorForType(t)} ${idx * step}%`)
-                                .join(', ')})`;
-
-                            return {
-                                '--pin-gradient': gradient
-                            };
-                        }
-
-                        
                         return (
                             <div
                                 key={el.id}
@@ -5803,7 +6047,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                         {inputCount > 0 && (
                                             <div className="labels-column">
                                                 {Array.from({ length: inputCount }).map((_, i) => {
-                                                    const types = getTypesForPin(el, i);
+                                                    const types = getAcceptedTypesForPin(el, i);
                                                     return (
                                                         <div key={`label-row-${i}`} className="label-row">
                                                             <div className="input-label">
@@ -5812,23 +6056,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             <div
                                                                 className={
                                                                     `pin input ` +
-                                                                    types
+                                                                types
                                                                         .map(t => `type-${t}`)
                                                                         .join(' ')
                                                                 }
-                                                                style={getPinStyle(types) as PinStyle}
+                                                                style={getPinStyleByTypes(types) as PinStyle}
                                                                 data-pin-id={`input-${i}`}
                                                                 data-element-id={el.id}
                                                                 onMouseDown={(e) => {
                                                                     e.stopPropagation();
                                                                     const pinPos = getPinPosition(el, 'input', i);
 
-                                                                    const existingConnection = connections.find(conn =>
-                                                                        conn.toId === el.id && conn.toInput === `input${i}`
-                                                                    );
+                                                                    const existingConnection = connectionsByTargetInput.get(getConnectionLookupKey(el.id, `input${i}`));
 
                                                                     if (existingConnection) {
-                                                                        const fromElement = elements.find(elem => elem.id === existingConnection.fromId);
+                                                                        const fromElement = elementsById.get(existingConnection.fromId);
                                                                         if (fromElement) {
                                                                             const fromPinIndex = parseInt(existingConnection.fromOutput.replace('output', ''), 10) || 0;
                                                                             const fromPinPos = getPinPosition(fromElement, 'output', fromPinIndex);
@@ -6245,7 +6487,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     )}
                                                     {customNodeMode && (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }} onClick={(e) => e.stopPropagation()}>
-                                                            {['Value', 'Background', 'Color', 'Disabled'].map((defaultLabel, i) => (
+                                                            {outputInputLabels.map((defaultLabel, i) => (
                                                                 <input
                                                                     key={i}
                                                                     type="text"
@@ -6256,7 +6498,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                         const val = e.target.value;
                                                                         setElements(prev => prev.map(elem => {
                                                                             if (elem.id !== el.id) return elem;
-                                                                            const labels = [...(elem.data?.outputLabels || ['Value', 'Background', 'Color', 'Disabled'])];
+                                                                            const labels = [...(elem.data?.outputLabels || outputInputLabels)];
                                                                             labels[i] = val;
                                                                             return { ...elem, data: { ...elem.data, outputLabels: labels } };
                                                                         }));
@@ -6309,8 +6551,32 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="8">8 inputs</option>
                                                     </select>
                                                 </div>
+                                            ) : el.type === 'css-join' ? (
+                                                <div onClick={(e) => e.stopPropagation()}>
+                                                    <select className="input-control" value={String(el.data?.inputCount ?? 3)} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
+                                                        <option value="2">2 inputs</option>
+                                                        <option value="3">3 inputs</option>
+                                                        <option value="4">4 inputs</option>
+                                                        <option value="5">5 inputs</option>
+                                                        <option value="6">6 inputs</option>
+                                                        <option value="7">7 inputs</option>
+                                                        <option value="8">8 inputs</option>
+                                                    </select>
+                                                </div>
                                             ) : el.type === 'css-unit' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
+                                                    <input
+                                                        type="number"
+                                                        className="input-control"
+                                                        value={String(el.data?.cssUnitValue ?? '0')}
+                                                        onChange={(e) => {
+                                                            const next = e.target.value;
+                                                            setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, cssUnitValue: next } } : em));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        placeholder="Value"
+                                                        style={{ marginBottom: '4px' }}
+                                                    />
                                                     <select className="input-control" value={el.data?.cssUnit ?? 'px'} onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, cssUnit: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
                                                         <option value="px">px</option>
                                                         <option value="%">%</option>
@@ -6388,7 +6654,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                             <div className="inputs-column">
                                                 {/* Input pins and controls */}
                                                 {Array.from({ length: inputCount }).map((_, i) => {
-                                                    const types = getTypesForPin(el, i);
+                                                    const types = getAcceptedTypesForPin(el, i);
                                                     return (
                                                     <div key={`input-row-${i}`} className="input-row">
                                                         <div className="input-label">
@@ -6404,19 +6670,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     .map(t => `type-${t}`)
                                                                     .join(' ')
                                                             }
-                                                            style={getPinStyle(types) as PinStyle}
+                                                            style={getPinStyleByTypes(types) as PinStyle}
                                                             data-pin-id={`input-${i}`}
                                                             data-element-id={el.id}
                                                             onMouseDown={(e) => {
                                                                 e.stopPropagation();
                                                                 const pinPos = getPinPosition(el, 'input', i);
 
-                                                                const existingConnection = connections.find(conn =>
-                                                                    conn.toId === el.id && conn.toInput === `input${i}`
-                                                                );
+                                                                const existingConnection = connectionsByTargetInput.get(getConnectionLookupKey(el.id, `input${i}`));
 
                                                                 if (existingConnection) {
-                                                                    const fromElement = elements.find(elem => elem.id === existingConnection.fromId);
+                                                                    const fromElement = elementsById.get(existingConnection.fromId);
                                                                     if (fromElement) {
                                                                         const fromPinIndex = parseInt(existingConnection.fromOutput.replace('output', ''), 10) || 0;
                                                                         const fromPinPos = getPinPosition(fromElement, 'output', fromPinIndex);

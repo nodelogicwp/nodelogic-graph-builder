@@ -185,6 +185,7 @@
       "__nodeFindEnd",
       "__nodeToNumber",
       "__nodeToString",
+      "__nodeCssJoin",
       "__nodeCountTrue",
       "__nodeGradient",
       "__nodeUnzip",
@@ -456,6 +457,16 @@
     if (typeof value === "boolean") return value ? "true" : "false";
     if (typeof value === "number" && Number.isFinite(value)) return String(value);
     return toSafeString(value);
+  }
+
+  function __nodeCssJoin(...values) {
+    const parts = [];
+    values.forEach((value) => {
+      const text = __nodeToString(value).trim();
+      if (!text) return;
+      parts.push(text.replace(/;+$/g, ""));
+    });
+    return parts.join("; ");
   }
 
   function __nodeToBase(value, radix, minLength) {
@@ -1289,8 +1300,773 @@
     });
 
     prepared = replaceCaretsOutsideStrings(prepared);
+    // Backward compatibility: migrate legacy CSS Join formulas generated with map/filter/arrow.
+    prepared = prepared.replace(
+      /\(\[([\s\S]*?)\]\.map\(\(v\) => __nodeToString\(v\)\.trim\(\)\)\.filter\(\(v\) => v\.length > 0\)\.join\(';\s*'\)\)/g,
+      "(__nodeCssJoin($1))"
+    );
 
     return prepared;
+  }
+
+  // Parse/evaluate prepared formulas without dynamic code execution.
+  const FORMULA_AST_CACHE_MAX = 250;
+  const formulaAstCache = new Map();
+
+  const FORMULA_FORBIDDEN_MEMBER_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+  const FORMULA_SAFE_STRING_MEMBERS = new Set([
+    "split",
+    "join",
+    "trim",
+    "toUpperCase",
+    "toLowerCase",
+    "includes",
+    "indexOf",
+    "slice",
+    "length"
+  ]);
+  const FORMULA_SAFE_ARRAY_MEMBERS = new Set([
+    "join",
+    "includes",
+    "indexOf",
+    "slice",
+    "length"
+  ]);
+  const FORMULA_SAFE_NUMBER_MEMBERS = new Set([
+    "toString",
+    "toFixed",
+    "toLocaleString"
+  ]);
+  const FORMULA_SAFE_MATH_MEMBERS = new Set([
+    "sin", "cos", "tan", "asin", "acos", "atan",
+    "sqrt", "abs", "log", "exp", "floor", "ceil", "round",
+    "min", "max", "pow"
+  ]);
+  const FORMULA_MAX_AST_DEPTH = 160;
+
+  function decodeFormulaEscape(char, source, indexRef) {
+    switch (char) {
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      case "0":
+        return "\0";
+      case "\"":
+      case "'":
+      case "\\":
+        return char;
+      case "x": {
+        const hex = source.slice(indexRef.value + 1, indexRef.value + 3);
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+          indexRef.value += 2;
+          return String.fromCharCode(parseInt(hex, 16));
+        }
+        return "x";
+      }
+      case "u": {
+        const hex = source.slice(indexRef.value + 1, indexRef.value + 5);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          indexRef.value += 4;
+          return String.fromCharCode(parseInt(hex, 16));
+        }
+        return "u";
+      }
+      default:
+        return char;
+    }
+  }
+
+  function tokenizeFormulaExpression(expr) {
+    const tokens = [];
+    const source = String(expr || "");
+    let i = 0;
+
+    const numberPattern = /^(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/;
+    const identifierPattern = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+    const operators = [
+      "!==", "===", "<=", ">=", "&&", "||", "??", "==", "!=", "**",
+      "+", "-", "*", "/", "%", "<", ">", "!"
+    ];
+    const punctuators = new Set(["(", ")", "{", "}", "[", "]", ".", ",", ":", "?"]);
+
+    while (i < source.length) {
+      const ch = source[i];
+
+      if (/\s/.test(ch)) {
+        i += 1;
+        continue;
+      }
+
+      const numberMatch = source.slice(i).match(numberPattern);
+      if (numberMatch) {
+        const raw = numberMatch[0];
+        tokens.push({ type: "number", value: Number(raw), raw });
+        i += raw.length;
+        continue;
+      }
+
+      if (ch === "\"" || ch === "'") {
+        const quote = ch;
+        let value = "";
+        i += 1;
+        while (i < source.length) {
+          const current = source[i];
+          if (current === "\\") {
+            i += 1;
+            if (i >= source.length) {
+              throw new Error("Unterminated string escape sequence");
+            }
+            const indexRef = { value: i };
+            value += decodeFormulaEscape(source[i], source, indexRef);
+            i = indexRef.value + 1;
+            continue;
+          }
+          if (current === quote) {
+            i += 1;
+            break;
+          }
+          value += current;
+          i += 1;
+        }
+        if (source[i - 1] !== quote) {
+          throw new Error("Unterminated string literal");
+        }
+        tokens.push({ type: "string", value });
+        continue;
+      }
+
+      const identMatch = source.slice(i).match(identifierPattern);
+      if (identMatch) {
+        const ident = identMatch[0];
+        tokens.push({ type: "identifier", value: ident });
+        i += ident.length;
+        continue;
+      }
+
+      let matchedOperator = "";
+      for (const op of operators) {
+        if (source.startsWith(op, i)) {
+          matchedOperator = op;
+          break;
+        }
+      }
+      if (matchedOperator) {
+        tokens.push({ type: "operator", value: matchedOperator });
+        i += matchedOperator.length;
+        continue;
+      }
+
+      if (punctuators.has(ch)) {
+        tokens.push({ type: "punct", value: ch });
+        i += 1;
+        continue;
+      }
+
+      throw new Error(`Unsupported token "${ch}"`);
+    }
+
+    tokens.push({ type: "eof", value: "" });
+    return tokens;
+  }
+
+  function createFormulaParser(tokens) {
+    let pos = 0;
+
+    const current = () => tokens[pos] || tokens[tokens.length - 1];
+    const consume = () => {
+      const token = current();
+      pos += 1;
+      return token;
+    };
+
+    const matchOperator = (op) => {
+      const token = current();
+      if (token.type === "operator" && token.value === op) {
+        consume();
+        return true;
+      }
+      return false;
+    };
+
+    const matchPunct = (p) => {
+      const token = current();
+      if (token.type === "punct" && token.value === p) {
+        consume();
+        return true;
+      }
+      return false;
+    };
+
+    const expectPunct = (p) => {
+      if (!matchPunct(p)) {
+        throw new Error(`Expected "${p}"`);
+      }
+    };
+
+    const parseExpression = () => parseConditionalExpression();
+
+    const parseConditionalExpression = () => {
+      const test = parseNullishExpression();
+      if (matchPunct("?")) {
+        const consequent = parseExpression();
+        expectPunct(":");
+        const alternate = parseExpression();
+        return { type: "ConditionalExpression", test, consequent, alternate };
+      }
+      return test;
+    };
+
+    const parseNullishExpression = () => {
+      let left = parseLogicalOrExpression();
+      while (matchOperator("??")) {
+        const right = parseLogicalOrExpression();
+        left = { type: "BinaryExpression", operator: "??", left, right };
+      }
+      return left;
+    };
+
+    const parseLogicalOrExpression = () => {
+      let left = parseLogicalAndExpression();
+      while (matchOperator("||")) {
+        const right = parseLogicalAndExpression();
+        left = { type: "BinaryExpression", operator: "||", left, right };
+      }
+      return left;
+    };
+
+    const parseLogicalAndExpression = () => {
+      let left = parseEqualityExpression();
+      while (matchOperator("&&")) {
+        const right = parseEqualityExpression();
+        left = { type: "BinaryExpression", operator: "&&", left, right };
+      }
+      return left;
+    };
+
+    const parseEqualityExpression = () => {
+      let left = parseRelationalExpression();
+      while (true) {
+        if (matchOperator("===")) {
+          left = { type: "BinaryExpression", operator: "===", left, right: parseRelationalExpression() };
+        } else if (matchOperator("!==")) {
+          left = { type: "BinaryExpression", operator: "!==", left, right: parseRelationalExpression() };
+        } else if (matchOperator("==")) {
+          left = { type: "BinaryExpression", operator: "==", left, right: parseRelationalExpression() };
+        } else if (matchOperator("!=")) {
+          left = { type: "BinaryExpression", operator: "!=", left, right: parseRelationalExpression() };
+        } else {
+          break;
+        }
+      }
+      return left;
+    };
+
+    const parseRelationalExpression = () => {
+      let left = parseAdditiveExpression();
+      while (true) {
+        if (matchOperator("<=")) {
+          left = { type: "BinaryExpression", operator: "<=", left, right: parseAdditiveExpression() };
+        } else if (matchOperator(">=")) {
+          left = { type: "BinaryExpression", operator: ">=", left, right: parseAdditiveExpression() };
+        } else if (matchOperator("<")) {
+          left = { type: "BinaryExpression", operator: "<", left, right: parseAdditiveExpression() };
+        } else if (matchOperator(">")) {
+          left = { type: "BinaryExpression", operator: ">", left, right: parseAdditiveExpression() };
+        } else {
+          break;
+        }
+      }
+      return left;
+    };
+
+    const parseAdditiveExpression = () => {
+      let left = parseMultiplicativeExpression();
+      while (true) {
+        if (matchOperator("+")) {
+          left = { type: "BinaryExpression", operator: "+", left, right: parseMultiplicativeExpression() };
+        } else if (matchOperator("-")) {
+          left = { type: "BinaryExpression", operator: "-", left, right: parseMultiplicativeExpression() };
+        } else {
+          break;
+        }
+      }
+      return left;
+    };
+
+    const parseMultiplicativeExpression = () => {
+      let left = parseExponentExpression();
+      while (true) {
+        if (matchOperator("*")) {
+          left = { type: "BinaryExpression", operator: "*", left, right: parseExponentExpression() };
+        } else if (matchOperator("/")) {
+          left = { type: "BinaryExpression", operator: "/", left, right: parseExponentExpression() };
+        } else if (matchOperator("%")) {
+          left = { type: "BinaryExpression", operator: "%", left, right: parseExponentExpression() };
+        } else {
+          break;
+        }
+      }
+      return left;
+    };
+
+    const parseExponentExpression = () => {
+      let left = parseUnaryExpression();
+      if (matchOperator("**")) {
+        const right = parseExponentExpression();
+        left = { type: "BinaryExpression", operator: "**", left, right };
+      }
+      return left;
+    };
+
+    const parseUnaryExpression = () => {
+      if (matchOperator("!")) {
+        return { type: "UnaryExpression", operator: "!", argument: parseUnaryExpression() };
+      }
+      if (matchOperator("+")) {
+        return { type: "UnaryExpression", operator: "+", argument: parseUnaryExpression() };
+      }
+      if (matchOperator("-")) {
+        return { type: "UnaryExpression", operator: "-", argument: parseUnaryExpression() };
+      }
+      return parsePostfixExpression();
+    };
+
+    const parsePostfixExpression = () => {
+      let expr = parsePrimaryExpression();
+
+      while (true) {
+        if (matchPunct(".")) {
+          const token = consume();
+          if (token.type !== "identifier") {
+            throw new Error("Expected member identifier");
+          }
+          expr = {
+            type: "MemberExpression",
+            object: expr,
+            property: { type: "Identifier", name: token.value },
+            computed: false
+          };
+          continue;
+        }
+
+        if (matchPunct("[")) {
+          const property = parseExpression();
+          expectPunct("]");
+          expr = {
+            type: "MemberExpression",
+            object: expr,
+            property,
+            computed: true
+          };
+          continue;
+        }
+
+        if (matchPunct("(")) {
+          const args = [];
+          if (!matchPunct(")")) {
+            do {
+              args.push(parseExpression());
+            } while (matchPunct(","));
+            expectPunct(")");
+          }
+          expr = {
+            type: "CallExpression",
+            callee: expr,
+            arguments: args
+          };
+          continue;
+        }
+
+        break;
+      }
+
+      return expr;
+    };
+
+    const parseObjectExpression = () => {
+      const properties = [];
+      if (matchPunct("}")) {
+        return { type: "ObjectExpression", properties };
+      }
+
+      while (true) {
+        const keyToken = consume();
+        let key;
+        if (keyToken.type === "identifier") {
+          key = keyToken.value;
+        } else if (keyToken.type === "string" || keyToken.type === "number") {
+          key = String(keyToken.value);
+        } else {
+          throw new Error("Invalid object key");
+        }
+
+        expectPunct(":");
+        const value = parseExpression();
+        properties.push({ key, value });
+
+        if (matchPunct("}")) {
+          break;
+        }
+        expectPunct(",");
+      }
+
+      return { type: "ObjectExpression", properties };
+    };
+
+    const parseArrayExpression = () => {
+      const elements = [];
+      if (matchPunct("]")) {
+        return { type: "ArrayExpression", elements };
+      }
+
+      while (true) {
+        elements.push(parseExpression());
+        if (matchPunct("]")) {
+          break;
+        }
+        expectPunct(",");
+      }
+
+      return { type: "ArrayExpression", elements };
+    };
+
+    const parsePrimaryExpression = () => {
+      const token = current();
+
+      if (token.type === "number") {
+        consume();
+        return { type: "Literal", value: token.value };
+      }
+      if (token.type === "string") {
+        consume();
+        return { type: "Literal", value: token.value };
+      }
+      if (token.type === "identifier") {
+        consume();
+        switch (token.value) {
+          case "true":
+            return { type: "Literal", value: true };
+          case "false":
+            return { type: "Literal", value: false };
+          case "null":
+            return { type: "Literal", value: null };
+          case "undefined":
+            return { type: "Literal", value: undefined };
+          case "NaN":
+            return { type: "Literal", value: NaN };
+          case "Infinity":
+            return { type: "Literal", value: Infinity };
+          default:
+            return { type: "Identifier", name: token.value };
+        }
+      }
+      if (matchPunct("(")) {
+        const inner = parseExpression();
+        expectPunct(")");
+        return inner;
+      }
+      if (matchPunct("{")) {
+        return parseObjectExpression();
+      }
+      if (matchPunct("[")) {
+        return parseArrayExpression();
+      }
+
+      throw new Error(`Unexpected token "${token.value}"`);
+    };
+
+    return {
+      parse() {
+        const ast = parseExpression();
+        const tail = current();
+        if (tail.type !== "eof") {
+          throw new Error("Unexpected trailing tokens");
+        }
+        return ast;
+      }
+    };
+  }
+
+  function getCachedFormulaAst(expr) {
+    if (formulaAstCache.has(expr)) {
+      return formulaAstCache.get(expr);
+    }
+
+    let ast = null;
+    try {
+      const tokens = tokenizeFormulaExpression(expr);
+      const parser = createFormulaParser(tokens);
+      ast = parser.parse();
+    } catch (e) {
+      ast = null;
+    }
+
+    if (formulaAstCache.size >= FORMULA_AST_CACHE_MAX) {
+      const oldestKey = formulaAstCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        formulaAstCache.delete(oldestKey);
+      }
+    }
+
+    formulaAstCache.set(expr, ast);
+    return ast;
+  }
+
+  function createFormulaEvalContext() {
+    return {
+      Math,
+      Number,
+      parseInt,
+      String,
+      __nodeRegex,
+      __nodeConcat,
+      __nodeCutA,
+      __nodeCutB,
+      __nodeCutC,
+      __nodeCountChars,
+      __nodeCountWords,
+      __nodeFindStart,
+      __nodeFindEnd,
+      __nodeToNumber,
+      __nodeToString,
+      __nodeCssJoin,
+      __nodeToBase,
+      __nodeCountTrue,
+      __nodeGradient,
+      __nodeUnzip,
+      __nodeCaseEquals,
+      __nodeMemoryGet,
+      __nodeMemorySet,
+      __nodeEvent,
+      __nodeEventProcessor,
+      __nodeFallback
+    };
+  }
+
+  function resolveFormulaIdentifier(name, context) {
+    if (Object.prototype.hasOwnProperty.call(context, name)) {
+      return context[name];
+    }
+    if (/^o\d+$/.test(name)) {
+      return undefined;
+    }
+    throw new Error(`Identifier "${name}" is not allowed`);
+  }
+
+  function normalizeFormulaMemberKey(rawKey) {
+    const key = String(rawKey);
+    if (FORMULA_FORBIDDEN_MEMBER_KEYS.has(key)) {
+      throw new Error(`Property "${key}" is not allowed`);
+    }
+    return key;
+  }
+
+  function getFormulaMember(baseValue, rawKey) {
+    if (baseValue === null || baseValue === undefined) {
+      throw new Error("Cannot access member of null/undefined");
+    }
+
+    const key = normalizeFormulaMemberKey(rawKey);
+
+    if (baseValue === Math) {
+      if (!FORMULA_SAFE_MATH_MEMBERS.has(key)) {
+        throw new Error(`Math member "${key}" is not allowed`);
+      }
+      return baseValue[key];
+    }
+
+    if (typeof baseValue === "string") {
+      if (/^\d+$/.test(key)) {
+        const idx = Number(key);
+        return idx >= 0 && idx < baseValue.length ? baseValue[idx] : undefined;
+      }
+      if (!FORMULA_SAFE_STRING_MEMBERS.has(key)) {
+        throw new Error(`String member "${key}" is not allowed`);
+      }
+      if (key === "length") {
+        return baseValue.length;
+      }
+      return String.prototype[key];
+    }
+
+    if (Array.isArray(baseValue)) {
+      if (/^\d+$/.test(key)) {
+        return baseValue[Number(key)];
+      }
+      if (!FORMULA_SAFE_ARRAY_MEMBERS.has(key)) {
+        throw new Error(`Array member "${key}" is not allowed`);
+      }
+      if (key === "length") {
+        return baseValue.length;
+      }
+      return Array.prototype[key];
+    }
+
+    if (typeof baseValue === "number") {
+      if (!FORMULA_SAFE_NUMBER_MEMBERS.has(key)) {
+        throw new Error(`Number member "${key}" is not allowed`);
+      }
+      return Number.prototype[key];
+    }
+
+    if (typeof baseValue === "boolean") {
+      if (key === "toString") {
+        return Boolean.prototype.toString;
+      }
+      throw new Error(`Boolean member "${key}" is not allowed`);
+    }
+
+    if (typeof baseValue === "object") {
+      if (!Object.prototype.hasOwnProperty.call(baseValue, key)) {
+        return undefined;
+      }
+      return baseValue[key];
+    }
+
+    throw new Error("Unsupported member base type");
+  }
+
+  function evalFormulaNode(node, context, depth = 0) {
+    if (!node || typeof node !== "object") {
+      throw new Error("Invalid AST node");
+    }
+    if (depth > FORMULA_MAX_AST_DEPTH) {
+      throw new Error("Expression too deep");
+    }
+
+    switch (node.type) {
+      case "Literal":
+        return node.value;
+
+      case "Identifier":
+        return resolveFormulaIdentifier(node.name, context);
+
+      case "UnaryExpression": {
+        const value = evalFormulaNode(node.argument, context, depth + 1);
+        switch (node.operator) {
+          case "!":
+            return !value;
+          case "+":
+            return +value;
+          case "-":
+            return -value;
+          default:
+            throw new Error(`Unsupported unary operator "${node.operator}"`);
+        }
+      }
+
+      case "BinaryExpression": {
+        if (node.operator === "&&") {
+          const left = evalFormulaNode(node.left, context, depth + 1);
+          return left ? evalFormulaNode(node.right, context, depth + 1) : left;
+        }
+        if (node.operator === "||") {
+          const left = evalFormulaNode(node.left, context, depth + 1);
+          return left ? left : evalFormulaNode(node.right, context, depth + 1);
+        }
+        if (node.operator === "??") {
+          const left = evalFormulaNode(node.left, context, depth + 1);
+          return left === null || left === undefined
+            ? evalFormulaNode(node.right, context, depth + 1)
+            : left;
+        }
+
+        const left = evalFormulaNode(node.left, context, depth + 1);
+        const right = evalFormulaNode(node.right, context, depth + 1);
+
+        switch (node.operator) {
+          case "+":
+            return left + right;
+          case "-":
+            return left - right;
+          case "*":
+            return left * right;
+          case "/":
+            return left / right;
+          case "%":
+            return left % right;
+          case "**":
+            return left ** right;
+          case "===":
+            return left === right;
+          case "!==":
+            return left !== right;
+          case "==":
+            return left == right; // eslint-disable-line eqeqeq
+          case "!=":
+            return left != right; // eslint-disable-line eqeqeq
+          case "<":
+            return left < right;
+          case "<=":
+            return left <= right;
+          case ">":
+            return left > right;
+          case ">=":
+            return left >= right;
+          default:
+            throw new Error(`Unsupported binary operator "${node.operator}"`);
+        }
+      }
+
+      case "ConditionalExpression":
+        return evalFormulaNode(node.test, context, depth + 1)
+          ? evalFormulaNode(node.consequent, context, depth + 1)
+          : evalFormulaNode(node.alternate, context, depth + 1);
+
+      case "ObjectExpression": {
+        const out = {};
+        for (const prop of node.properties || []) {
+          const key = normalizeFormulaMemberKey(prop.key);
+          out[key] = evalFormulaNode(prop.value, context, depth + 1);
+        }
+        return out;
+      }
+
+      case "ArrayExpression":
+        return (node.elements || []).map((el) => evalFormulaNode(el, context, depth + 1));
+
+      case "MemberExpression": {
+        const base = evalFormulaNode(node.object, context, depth + 1);
+        const rawKey = node.computed
+          ? evalFormulaNode(node.property, context, depth + 1)
+          : node.property.name;
+        return getFormulaMember(base, rawKey);
+      }
+
+      case "CallExpression": {
+        const args = (node.arguments || []).map((arg) => evalFormulaNode(arg, context, depth + 1));
+
+        if (node.callee?.type === "MemberExpression") {
+          const base = evalFormulaNode(node.callee.object, context, depth + 1);
+          const rawKey = node.callee.computed
+            ? evalFormulaNode(node.callee.property, context, depth + 1)
+            : node.callee.property.name;
+          const fn = getFormulaMember(base, rawKey);
+          if (typeof fn !== "function") {
+            throw new Error("Attempt to call a non-function member");
+          }
+          return fn.apply(base, args);
+        }
+
+        const fn = evalFormulaNode(node.callee, context, depth + 1);
+        if (typeof fn !== "function") {
+          throw new Error("Attempt to call a non-function");
+        }
+        return fn(...args);
+      }
+
+      default:
+        throw new Error(`Unsupported AST node type "${node.type}"`);
+    }
   }
 
   function safeEvaluateExpression(expr) {
@@ -1299,35 +2075,12 @@
         return { valid: false, value: undefined };
       }
 
-      const evaluator = Function(
-        "__helpers",
-        `"use strict"; const { __nodeRegex, __nodeConcat, __nodeCutA, __nodeCutB, __nodeCutC, __nodeCountChars, __nodeCountWords, __nodeFindStart, __nodeFindEnd, __nodeToNumber, __nodeToString, __nodeToBase, __nodeCountTrue, __nodeGradient, __nodeUnzip, __nodeCaseEquals, __nodeMemoryGet, __nodeMemorySet, __nodeEvent, __nodeEventProcessor, __nodeFallback } = __helpers; return (${expr});`
-      );
+      const ast = getCachedFormulaAst(expr);
+      if (!ast) {
+        return { valid: false, value: undefined };
+      }
 
-      const value = evaluator({
-        __nodeRegex,
-        __nodeConcat,
-        __nodeCutA,
-        __nodeCutB,
-        __nodeCutC,
-        __nodeCountChars,
-        __nodeCountWords,
-        __nodeFindStart,
-        __nodeFindEnd,
-        __nodeToNumber,
-        __nodeToString,
-        __nodeToBase,
-        __nodeCountTrue,
-        __nodeGradient,
-        __nodeUnzip,
-        __nodeCaseEquals,
-        __nodeMemoryGet,
-        __nodeMemorySet,
-        __nodeEvent,
-        __nodeEventProcessor,
-        __nodeFallback
-      });
-
+      const value = evalFormulaNode(ast, createFormulaEvalContext(), 0);
       return { valid: true, value };
     } catch (e) {
       return { valid: false, value: undefined };
@@ -1436,7 +2189,7 @@
 
   function setBlockHTML(block, selector, html) {
     const el = block.querySelector(selector);
-    if (el) el.innerHTML = html;
+    if (el) el.textContent = html;
   }
 
   // =====================
@@ -1805,7 +2558,9 @@
         tableEl.appendChild(table);
       }
 
-      table.innerHTML = "";
+      while (table.firstChild) {
+        table.removeChild(table.firstChild);
+      }
 
       // Optional title
       if (title) {
@@ -1853,7 +2608,6 @@
 
       // Evaluate the formula
       const evaluation = evaluateFormulaExpression(formula, values);
-      console.log('[NodeLogic DEBUG] formula:', formula);
       if (!evaluation.valid || !evaluation.value || typeof evaluation.value !== "object") {
         return;
       }
@@ -1909,7 +2663,9 @@
 
         // --- color (text color) ---
         if (payload.color !== undefined) {
-          const cl = toSafeString(payload.color).trim();
+          const rawColor = toSafeString(payload.color).trim();
+          const colorDecl = rawColor.match(/^color\s*:\s*(.+)$/i);
+          const cl = colorDecl ? String(colorDecl[1] || "").replace(/;+\s*$/, "").trim() : rawColor;
           if (isLabelEl) { target.style.color = cl; }
           else { applyFormulaPresentation(inputEl, { value: undefined, background: undefined, color: cl, disabled: undefined }, false); }
         }
@@ -1971,10 +2727,21 @@
           const css = toSafeString(raw["custom-css"]).trim();
           if (css) {
             css.split(";").forEach(rule => {
-              const colonIdx = rule.indexOf(":");
-              if (colonIdx === -1) return;
-              const prop = rule.slice(0, colonIdx).trim();
-              const val = rule.slice(colonIdx + 1).trim();
+              const token = rule.trim();
+              if (!token) return;
+              const colonIdx = token.indexOf(":");
+              if (colonIdx === -1) {
+                // Backward-compatible fallback: allow bare color tokens.
+                if (/^(#|rgb\(|rgba\(|hsl\(|hsla\(|[a-z])/i.test(token)) {
+                  try {
+                    target.style.color = token;
+                    if (inputEl !== target) inputEl.style.color = token;
+                  } catch {}
+                }
+                return;
+              }
+              const prop = token.slice(0, colonIdx).trim();
+              const val = token.slice(colonIdx + 1).trim();
               if (prop && val) {
                 // Convert kebab-case to camelCase
                 const camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());

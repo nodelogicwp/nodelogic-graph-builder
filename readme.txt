@@ -27,7 +27,7 @@ You create your setup directly in Gutenberg:
 * Gutenberg blocks for inputs/outputs and page logic
 * Supports number, string, boolean, color, and basic CSS logic flows in the free version
 * Logic Block for page-level runtime behavior
-* Advanced node packs (events, memory, advanced string/math helpers, and premium templates/custom nodes) are available in Pro plans
+* Additional advanced node packs (events, memory, advanced string/math helpers, templates, and custom nodes) are available in a separate Pro extension
 * Works locally inside WordPress (no license endpoint required)
 
 **Node Types Included:**
@@ -55,6 +55,10 @@ Open Gutenberg, add the plugin input/output blocks to your page, then add the **
 = Does this plugin make external HTTP requests? =
 
 No. This plugin works locally in WordPress and does not require a license activation endpoint.
+
+= Where can I find optional Pro plans? =
+
+Optional Pro plan details are available at https://nodelogicwp.com.
 
 = Where is the JavaScript source code? =
 

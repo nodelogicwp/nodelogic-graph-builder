@@ -65,6 +65,7 @@ interface TreeItem {
         | 'css-padding'
         | 'css-width'
         | 'css-height'
+        | 'css-font-size'
         | 'event-element'
         | 'event-id'
         | 'event-processor';
@@ -129,6 +130,7 @@ interface CanvasElement {
         | 'css-padding'
         | 'css-width'
         | 'css-height'
+        | 'css-font-size'
         | 'operator'
         | 'math'
         | 'comparison'
@@ -366,6 +368,7 @@ interface GraphEditorProps {
     templateMode?: boolean;
     customNodeMode?: boolean;
     editingNodeId?: string;
+    liveStateSync?: boolean;
     mainElementType?: 'range' | 'seekbar' | 'number' | 'checkbox' | 'info' | 'template' | 'logic';
 }
 
@@ -419,6 +422,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     templateMode = false,
     customNodeMode = false,
     editingNodeId = '',
+    liveStateSync = true,
     mainElementType = 'info',
 }) => {
     const SAVE_KEY = `formulaEditor.save.${editorId}`;
@@ -876,6 +880,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         'css-padding': [['css-unit'], ['css-unit'], ['css-unit'], ['css-unit']],
         'css-width': [['css-unit']],
         'css-height': [['css-unit']],
+        'css-font-size': [['css-unit']],
         'css-color': [['color', 'string']],
         'css-join': [['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean']],
         output: [
@@ -1059,6 +1064,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'css-padding':
             case 'css-width':
             case 'css-height':
+            case 'css-font-size':
                 return {};
             default:
                 return { operation: '+' };
@@ -1114,6 +1120,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         'css-padding',
         'css-width',
         'css-height',
+        'css-font-size',
         'css-display',
         'css-color',
         'css-text',
@@ -1503,6 +1510,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return connectionsCount === 0 && elementsCount <= 1 && !hasFormula;
     };
 
+    const areSnapshotsEquivalent = (left: SavedState | null, right: SavedState | null): boolean => {
+        if (!left || !right) {
+            return false;
+        }
+        const normalizeForCompare = (snapshot: SavedState): string => JSON.stringify({
+            elements: Array.isArray(snapshot.elements) ? snapshot.elements : [],
+            connections: Array.isArray(snapshot.connections) ? snapshot.connections : [],
+            formula: typeof snapshot.formula === 'string' ? snapshot.formula : '',
+        });
+        return normalizeForCompare(left) === normalizeForCompare(right);
+    };
+
     useEffect(() => {
         if (hasInitializedRef.current) {
             return;
@@ -1550,7 +1569,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 updatedAt: typeof snapshotToLoad.updatedAt === 'number' ? snapshotToLoad.updatedAt : Date.now(),
             };
             localStorage.setItem(SAVE_KEY, JSON.stringify(synced));
-            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(synced));
+
+            // Preserve draft autosave when it differs from saved snapshot.
+            if (!autosave || areSnapshotsEquivalent(autosave as SavedState, synced)) {
+                localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(synced));
+                setAutosaveState(synced);
+            }
         }
 
         setIsStateLoaded(true);
@@ -1562,13 +1586,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const data: SavedState = { elements, connections, formula, updatedAt: Date.now() };
         localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
         setAutosaveState(data);
-        // Keep parent in sync so saving custom node always has latest state+formula
-        onStateChange?.(data);
     }, [elements, connections, formula, AUTOSAVE_KEY, isStateLoaded]);
 
 
     useEffect(() => {
-        if (!isStateLoaded || !onStateChangeRef.current) return;
+        if (!liveStateSync || !isStateLoaded || !onStateChangeRef.current) return;
 
         // In customNodeMode fire immediately so the parent always has the latest state
         const delay = customNodeMode ? 0 : 150;
@@ -1582,11 +1604,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }, delay);
 
         return () => window.clearTimeout(timeoutId);
-    }, [elements, connections, formula, isStateLoaded, customNodeMode]);
+    }, [elements, connections, formula, isStateLoaded, customNodeMode, liveStateSync]);
 
     useEffect(() => {
         return () => {
-            if (!onStateChangeRef.current || !isStateLoadedRef.current) return;
+            if (!liveStateSync || !onStateChangeRef.current || !isStateLoadedRef.current) return;
             onStateChangeRef.current({
                 elements: elementsRef.current,
                 connections: connectionsRef.current,
@@ -1594,7 +1616,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 updatedAt: Date.now(),
             });
         };
-    }, []);
+    }, [liveStateSync]);
 
 
 
@@ -1610,6 +1632,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const changed = JSON.stringify(current) !== JSON.stringify(savedState);
         setUnsavedChanges(changed);
     }, [elements, connections, formula]);
+
+    const hasRecoverableAutosave = Boolean(
+        autosaveState
+        && (
+            !savedState
+            || !areSnapshotsEquivalent(autosaveState, savedState)
+        )
+    );
 
 
     const handleSave = () => {
@@ -2306,6 +2336,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'css-padding') return 4;
         if (element.type === 'css-width') return 1;
         if (element.type === 'css-height') return 1;
+        if (element.type === 'css-font-size') return 1;
         if (element.type === 'css-display') return 0; // no inputs, just a selector
         if (element.type === 'css-color') return 1;   // color or string
         if (element.type === 'css-text') return 0;    // no inputs, just text field
@@ -2526,6 +2557,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'css-padding':
                 case 'css-width':
                 case 'css-height':
+                case 'css-font-size':
                 case 'css-display':
                 case 'css-color':
                 case 'css-text':
@@ -3339,6 +3371,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `(__nodeConcat("height: ", __nodeToString(${valueExpr}).trim()))`;
                 }
 
+                case 'css-font-size': {
+                    const src = getInputConnection('input0');
+                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"16px"';
+                    return `(__nodeConcat("font-size: ", __nodeToString(${valueExpr}).trim()))`;
+                }
+
                 case 'css-display': {
                     const display = String(element.data?.cssDisplay || 'block').trim() || 'block';
                     return JSON.stringify(`display: ${display}`);
@@ -3576,6 +3614,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Left';
             case 'css-width': return 'Value';
             case 'css-height': return 'Value';
+            case 'css-font-size': return 'Value';
             case 'css-color': return 'Color';
             case 'css-text': return '';
             case 'css-display': return '';
@@ -3696,6 +3735,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'css-padding':
             case 'css-width':
             case 'css-height':
+            case 'css-font-size':
             case 'css-display':
             case 'css-color':
             case 'css-text':
@@ -3827,6 +3867,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'css-padding':
             case 'css-width':
             case 'css-height':
+            case 'css-font-size':
             case 'css-display':
             case 'css-color':
             case 'css-text':
@@ -5359,6 +5400,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 </>
                             )}
 
+                            {!unsavedChanges && hasRecoverableAutosave && !templateMode && !customNodeMode && (
+                                <button
+                                    onClick={handleRestoreUnsaved}
+                                    style={{
+                                        ...buttonStyle,
+                                        backgroundColor: '#3b82f6',
+                                        marginTop: '6px',
+                                    }}
+                                >
+                                    Restore Unsaved Draft
+                                </button>
+                            )}
+
                             {selected && (selected !== 'main-block' || customNodeMode) && (() => {
                                 const selEl = elements.find(e => e.id === selected);
                                 if (!selEl) return null;
@@ -6008,6 +6062,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'css-padding'
                             || el.type === 'css-width'
                             || el.type === 'css-height'
+                            || el.type === 'css-font-size'
                             || el.type === 'css-display'
                             || el.type === 'css-text';
 

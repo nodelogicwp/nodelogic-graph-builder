@@ -2,6 +2,7 @@
 /**
  * Plugin Name: NodeLogic Graph Builder
  * Description: Visual no-code graph editor for dynamic HTML element logic.
+ * Plugin URI: https://nodelogicwp.com
  * Version: 1.4.0
  * Author: Volodymyr Diadiunov
  * Author URI: https://nodelogicwp.com

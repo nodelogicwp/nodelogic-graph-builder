@@ -73,12 +73,14 @@ export default function Edit({ attributes, setAttributes }) {
                 <Modal
                     title="Formula Editor"
                     onRequestClose={() => setIsModalOpen(false)}
+                    shouldCloseOnClickOutside={false}
                     style={{ width: '100vw', height: '100vh', 'max-height': 'calc(100vh - 16px)', 'max-width': 'calc(100vw - 12px)' }}
                 >
                     <GraphEditor
                         editorId={editorId}
                         initialState={graphState}
                         forceInitialState
+                        liveStateSync={false}
                         mainElementType="info"
                         showTemplateTools={templatesEnabled}
                         enableCustomNodes={customNodesEnabled}

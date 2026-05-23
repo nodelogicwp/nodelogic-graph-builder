@@ -81,6 +81,7 @@ export const TREE_DATA = [
             { id: '72', name: 'CSS Padding', type: 'css-padding' },
             { id: '73', name: 'CSS Width', type: 'css-width' },
             { id: '74', name: 'CSS Height', type: 'css-height' },
+            { id: '75', name: 'CSS Font Size', type: 'css-font-size' },
             { id: '50', name: 'CSS Display', type: 'css-display' },
             { id: '51', name: 'CSS Color', type: 'css-color' },
             { id: '52', name: 'CSS Text', type: 'css-text' },

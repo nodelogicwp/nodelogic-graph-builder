@@ -56,12 +56,14 @@ export default function LogicEdit({ attributes = {}, setAttributes }) {
                 <Modal
                     title="Logic Graph Editor"
                     onRequestClose={() => setIsModalOpen(false)}
+                    shouldCloseOnClickOutside={false}
                     style={{ width: '100vw', height: '100vh', maxHeight: 'calc(100vh - 16px)', maxWidth: 'calc(100vw - 12px)' }}
                 >
                     <GraphEditor
                         editorId={editorId}
                         initialState={graphState}
                         forceInitialState
+                        liveStateSync={false}
                         mainElementType="logic"
                         showTemplateTools={templatesEnabled}
                         enableCustomNodes={customNodesEnabled}
@@ -73,5 +75,4 @@ export default function LogicEdit({ attributes = {}, setAttributes }) {
         </>
     );
 }
-
 

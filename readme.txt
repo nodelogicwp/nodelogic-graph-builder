@@ -4,7 +4,7 @@ Tags: calculator, logic, no-code, graph, blocks
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.4.0
+Stable tag: 1.4.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 
 == Changelog ==
 
+= 1.4.1 =
+* Improved calculation flow visualization with clearer numbered markers and curved input mapping arrows
+* Added dynamic input-gap validation with node error highlighting and save blocking for invalid graphs
+* Fixed sidebar icon/text rendering issues and general graph editor UI polish
+
 = 1.4.0 =
 * Renamed plugin to NodeLogic Graph Builder
 * Updated slug/text domain and main plugin file naming
@@ -78,5 +83,5 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 
 == Upgrade Notice ==
 
-= 1.4.0 =
-This release aligns naming and WordPress.org compliance requirements.
+= 1.4.1 =
+This release improves graph editor flow clarity and adds stronger validation for dynamic input chains.

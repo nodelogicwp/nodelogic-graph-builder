@@ -1,5 +1,5 @@
-import * as React from 'react';
-import { useState, useRef, useEffect } from 'react';
+﻿import * as React from 'react';
+import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 // @ts-ignore: allow importing CSS in this environment without type declarations
 // import './graphEditor.css';
 import { TREE_DATA } from './graphEditor/treeData';
@@ -258,6 +258,14 @@ interface Connection {
     connectionType?: 'normal' | 'case'; // New type for case connections
 }
 
+interface CalcFlowSegment {
+    key: string;
+    d: string;
+    step: number;
+    badgeX: number;
+    badgeY: number;
+}
+
 interface DetectedElement {
     id: string;
     type: 'slider' | 'input-number' | 'input-string' | 'checkbox' | 'radio' | 'select' | 'button-group';
@@ -333,10 +341,10 @@ const TreeNode: React.FC<{
                         }}
                         style={{ pointerEvents: 'auto' }}
                     >
-                        {isExpanded ? '▼' : '▶'}
+                        {isExpanded ? '\u25BE' : '\u25B8'}
                     </button>
                 )}
-                {item.type === 'folder' ? '📁' : '🔧'} {item.name}{isLocked ? ' (Locked)' : ''}
+                {item.type === 'folder' ? '\u{1F4C1}' : '\u{1F527}'} {item.name}{isLocked ? ' (Locked)' : ''}
             </div>
             {isExpanded && item.children && (
                 <div className="tree-children">
@@ -362,6 +370,7 @@ interface GraphEditorProps {
     onFormulaChange?: (formula: string) => void;
     initialState?: SavedState | null;
     onStateChange?: (state: SavedState) => void;
+    onUnsavedChange?: (hasUnsaved: boolean) => void;
     forceInitialState?: boolean;
     showTemplateTools?: boolean;
     enableCustomNodes?: boolean;
@@ -416,6 +425,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     onFormulaChange,
     initialState = null,
     onStateChange,
+    onUnsavedChange,
     forceInitialState = false,
     showTemplateTools = false,
     enableCustomNodes = false,
@@ -484,6 +494,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [templateInfo, setTemplateInfo] = useState('');
     const [isTemplateBusy, setIsTemplateBusy] = useState(false);
     const [cssEditorNodeId, setCssEditorNodeId] = useState<string | null>(null);
+    const [recoverableDraftState, setRecoverableDraftState] = useState<SavedState | null>(null);
+    const [pendingDraftRecovery, setPendingDraftRecovery] = useState<SavedState | null>(null);
+    const [showDraftRecoveryNotice, setShowDraftRecoveryNotice] = useState(false);
+    const [calcFlowByNode, setCalcFlowByNode] = useState<Record<string, CalcFlowSegment[]>>({});
 
     const canvasRef = useRef<HTMLDivElement>(null);
     const elementDragRef = useRef<{
@@ -1522,6 +1536,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return normalizeForCompare(left) === normalizeForCompare(right);
     };
 
+    const toComparableSnapshot = (snapshot: Partial<SavedState> | null) => ({
+        elements: Array.isArray(snapshot?.elements) ? snapshot.elements : [],
+        connections: Array.isArray(snapshot?.connections) ? snapshot.connections : [],
+        formula: typeof snapshot?.formula === 'string' ? snapshot.formula : '',
+    });
+
     useEffect(() => {
         if (hasInitializedRef.current) {
             return;
@@ -1532,28 +1552,34 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const saved = normalizeSnapshot(localStorage.getItem(SAVE_KEY));
         const autosave = normalizeSnapshot(localStorage.getItem(AUTOSAVE_KEY));
 
-        if (attributeState) {
-            setSavedState(attributeState as SavedState);
-        } else if (saved) {
-            setSavedState(saved as SavedState);
-        }
-
         if (autosave) {
             setAutosaveState(autosave as SavedState);
         }
 
-        const fallbackSnapshot = resolveInitialSnapshot(saved, autosave);
-        let snapshotToLoad = resolveInitialSnapshot(attributeState, saved, autosave);
+        const autosaveCandidate = autosave as SavedState | null;
+        const savedCandidate = saved as SavedState | null;
+        const attributeCandidate = attributeState as SavedState | null;
+        const hasMeaningfulAttribute = Boolean(
+            attributeCandidate
+            && !isSnapshotEffectivelyEmpty(attributeCandidate)
+        );
 
+        let snapshotToLoad: SavedState | null = null;
         if (forceInitialState) {
-            // When forceInitialState is true, always use the provided initialState,
-            // even if it's effectively empty (for new templates/custom nodes).
-            snapshotToLoad = attributeState || fallbackSnapshot;
-        } else if (attributeState && !isSnapshotEffectivelyEmpty(attributeState as SavedState)) {
-            // Block attribute is canonical when non-empty; storage stays fallback.
-            snapshotToLoad = attributeState;
+            // Force mode: prefer provided state, then explicit saved state.
+            snapshotToLoad = attributeCandidate || savedCandidate;
+        } else if (hasMeaningfulAttribute) {
+            // Block attribute is canonical when non-empty.
+            snapshotToLoad = attributeCandidate;
+        } else {
+            snapshotToLoad = savedCandidate;
         }
 
+        if (!snapshotToLoad) {
+            snapshotToLoad = resolveInitialSnapshot(attributeCandidate, savedCandidate, null) as SavedState | null;
+        }
+
+        let synced: SavedState | null = null;
         if (snapshotToLoad) {
             const loaded = applyLoadedState({
                 elements: snapshotToLoad.elements || [],
@@ -1562,19 +1588,49 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             });
 
             // Keep storage aligned with the loaded canonical state to avoid future conflicts.
-            const synced: SavedState = {
+            synced = {
                 elements: loaded.elements,
                 connections: loaded.connections,
                 formula: loaded.formula,
                 updatedAt: typeof snapshotToLoad.updatedAt === 'number' ? snapshotToLoad.updatedAt : Date.now(),
             };
             localStorage.setItem(SAVE_KEY, JSON.stringify(synced));
+            setSavedState(synced);
 
             // Preserve draft autosave when it differs from saved snapshot.
-            if (!autosave || areSnapshotsEquivalent(autosave as SavedState, synced)) {
+            if (!autosaveCandidate || areSnapshotsEquivalent(autosaveCandidate, synced)) {
                 localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(synced));
                 setAutosaveState(synced);
             }
+        }
+
+        const baselineSnapshot = synced || snapshotToLoad || savedCandidate || attributeCandidate;
+        const autosaveUpdatedAt = Number(autosaveCandidate?.updatedAt || 0);
+        const baselineUpdatedAt = Number((baselineSnapshot as SavedState | null)?.updatedAt || 0);
+        const hasReliableTimestamps = autosaveUpdatedAt > 0 && baselineUpdatedAt > 0;
+        const isDraftNewerOrTimestampUnknown = !hasReliableTimestamps || autosaveUpdatedAt > baselineUpdatedAt;
+
+        const hasRecoverableDraft = Boolean(
+            autosaveCandidate
+            && !isSnapshotEffectivelyEmpty(autosaveCandidate)
+            && (
+                !baselineSnapshot
+                || !areSnapshotsEquivalent(autosaveCandidate, baselineSnapshot)
+            )
+            && (
+                !baselineSnapshot
+                || isDraftNewerOrTimestampUnknown
+            )
+        );
+
+        if (hasRecoverableDraft && autosaveCandidate) {
+            setRecoverableDraftState(autosaveCandidate);
+            setPendingDraftRecovery(autosaveCandidate);
+            setShowDraftRecoveryNotice(true);
+        } else {
+            setRecoverableDraftState(null);
+            setPendingDraftRecovery(null);
+            setShowDraftRecoveryNotice(false);
         }
 
         setIsStateLoaded(true);
@@ -1583,10 +1639,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     useEffect(() => {
         if (!isStateLoaded) return;
+        if (showDraftRecoveryNotice && pendingDraftRecovery) return;
         const data: SavedState = { elements, connections, formula, updatedAt: Date.now() };
         localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
         setAutosaveState(data);
-    }, [elements, connections, formula, AUTOSAVE_KEY, isStateLoaded]);
+    }, [elements, connections, formula, AUTOSAVE_KEY, isStateLoaded, showDraftRecoveryNotice, pendingDraftRecovery]);
 
 
     useEffect(() => {
@@ -1621,30 +1678,51 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
 
     useEffect(() => {
-        if (!savedState) return;
-
-        const current: SavedState = {
+        const currentComparable = toComparableSnapshot({
             elements,
             connections,
             formula
-        };
+        });
 
-        const changed = JSON.stringify(current) !== JSON.stringify(savedState);
+        if (!savedState) {
+            const hasData = connections.length > 0
+                || elements.length > 1
+                || (typeof formula === 'string' && formula.trim() !== '');
+            setUnsavedChanges(hasData);
+            return;
+        }
+
+        const savedComparable = toComparableSnapshot(savedState);
+        const changed = JSON.stringify(currentComparable) !== JSON.stringify(savedComparable);
         setUnsavedChanges(changed);
-    }, [elements, connections, formula]);
+    }, [elements, connections, formula, savedState]);
 
-    const hasRecoverableAutosave = Boolean(
-        autosaveState
-        && (
-            !savedState
-            || !areSnapshotsEquivalent(autosaveState, savedState)
-        )
-    );
+    useEffect(() => {
+        onUnsavedChange?.(unsavedChanges);
+    }, [unsavedChanges, onUnsavedChange]);
+
+    const pendingDraftLabel = React.useMemo(() => {
+        const updatedAt = pendingDraftRecovery?.updatedAt;
+        if (!updatedAt || !Number.isFinite(updatedAt)) {
+            return '';
+        }
+        try {
+            return new Date(updatedAt).toLocaleString();
+        } catch (_error) {
+            return '';
+        }
+    }, [pendingDraftRecovery]);
 
 
     const handleSave = () => {
         const currentElements = elementsRef.current;
         const currentConnections = connectionsRef.current;
+        const blockingErrors = getDynamicInputGapErrors(currentElements, currentConnections);
+        if (Object.keys(blockingErrors).length > 0) {
+            const firstError = Object.values(blockingErrors)[0];
+            setTemplateInfo(`Save blocked: ${firstError}`);
+            return;
+        }
         const { formula: generatedFormula } = generateFormula(currentElements, currentConnections);
         const nextFormula = generatedFormula || formulaRef.current;
         const data: SavedState = {
@@ -1660,16 +1738,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         setSavedState(data);
         setAutosaveState(data);
         setUnsavedChanges(false);
+        setRecoverableDraftState(null);
+        setPendingDraftRecovery(null);
+        setShowDraftRecoveryNotice(false);
         onFormulaChange?.(nextFormula);
         onStateChange?.(data);
     };
 
 
     const handleRestore = () => {
-        const raw = localStorage.getItem(SAVE_KEY);
-        if (!raw) return;
-
-        const data = normalizeSnapshot(raw);
+        const data = savedState || normalizeSnapshot(localStorage.getItem(SAVE_KEY));
         if (!data) return;
 
         applyLoadedState({
@@ -1677,17 +1755,48 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connections: data.connections || [],
             formula: data.formula || '',
         });
+        setSavedState({
+            elements: data.elements || [],
+            connections: data.connections || [],
+            formula: data.formula || '',
+            updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : Date.now(),
+        });
         setUnsavedChanges(false);
     };
 
     const handleRestoreUnsaved = () => {
-        if (!autosaveState) return;
+        const source = pendingDraftRecovery || recoverableDraftState || autosaveState;
+        if (!source) return;
 
         applyLoadedState({
-            elements: autosaveState.elements || [],
-            connections: autosaveState.connections || [],
-            formula: autosaveState.formula || '',
+            elements: source.elements || [],
+            connections: source.connections || [],
+            formula: source.formula || '',
         });
+        setShowDraftRecoveryNotice(false);
+        setPendingDraftRecovery(null);
+        setRecoverableDraftState(null);
+    };
+
+    const handleDismissDraftRecovery = () => {
+        const currentDraft = pendingDraftRecovery || recoverableDraftState || autosaveState;
+        if (!currentDraft) {
+            setShowDraftRecoveryNotice(false);
+            setPendingDraftRecovery(null);
+            return;
+        }
+
+        setShowDraftRecoveryNotice(false);
+        setPendingDraftRecovery(null);
+        setRecoverableDraftState(null);
+
+        if (savedState) {
+            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(savedState));
+            setAutosaveState(savedState);
+        } else {
+            localStorage.removeItem(AUTOSAVE_KEY);
+            setAutosaveState(null);
+        }
     };
 
     // Initialize canvas to be centered
@@ -2228,6 +2337,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return null;
     };
 
+    const getConnectedInputIndexesForElement = (
+        elementId: string,
+        sourceConnections: Connection[] = connections
+    ): number[] => {
+        return Array.from(new Set(
+            sourceConnections
+                .filter((c) => c.toId === elementId && c.toInput.startsWith('input'))
+                .map((c) => getInputIndex(c.toInput))
+                .filter((i) => Number.isFinite(i) && i >= 0)
+        )).sort((a, b) => a - b);
+    };
+
     // Get input pins count for element
     const getInputCount = (element: CanvasElement): number => {
         if (element.type === 'number') return 0; // Number has no input
@@ -2261,12 +2382,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'string-to-number') return 1; // Text
         if (element.type === 'number-to-string') return 1; // Number
         if (element.type === 'bool-count') {
-            const connectedInputIndexes = Array.from(new Set(connections
-                .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
-                .map(c => getInputIndex(c.toInput))
-                .filter(i => !isNaN(i))
-            ));
-            return Math.max(1, connectedInputIndexes.length + 1);
+            const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
+            const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
+            return highestConnected >= 0 ? highestConnected + 2 : 1;
         }
         if (element.type === 'color') return 0; // Color constant
         if (element.type === 'gradient') return getGradientColorCount(element) + 1; // Colors + Angle
@@ -2274,37 +2392,27 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
             return schema.length; // 0 is valid - no inputs when all are hidden
         }
-        if (element.type === 'unzip') return 1; // Always unzips all — only zip input needed
+        if (element.type === 'unzip') return 1; // Always unzips all - only zip input needed
         if (element.type === 'math') return 1; // Numeric input
         if (element.type === 'case-range') return 3; // Min, Max, Out
         if (element.type === 'case-value') return 2; // Value, Out
         if (element.type === 'switch') {
-            const caseConnections = connections.filter(c =>
-                c.toId === element.id
-                && c.toInput.startsWith('input')
-                && getInputIndex(c.toInput) > 0
-            ).length;
-            // 1 value + at least one case input + dynamic additional case inputs
-            return 2 + caseConnections;
+            const caseIndexes = getConnectedInputIndexesForElement(element.id).filter((index) => index > 0);
+            const highestCase = caseIndexes.length > 0 ? caseIndexes[caseIndexes.length - 1] : 0;
+            // input0 = value, input1..inputN = cases, plus one trailing empty case pin
+            return highestCase > 0 ? highestCase + 2 : 2;
         }
         if (element.type === 'node') return 3; // condition, true, false
         if (element.type === 'calculation') {
-            const connectedInputIndexes = Array.from(new Set(connections
-                .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
-                .map(c => getInputIndex(c.toInput))
-                .filter(i => !isNaN(i))
-            ));
-            const inputCount = Math.max(1, connectedInputIndexes.length + 1);
-            return inputCount;
+            const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
+            const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
+            return highestConnected >= 0 ? highestConnected + 2 : 1;
         }
         if (element.type === 'main') {
             if (customNodeMode) {
-                const connectedInputIndexes = Array.from(new Set(connections
-                    .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
-                    .map(c => getInputIndex(c.toInput))
-                    .filter(i => !isNaN(i))
-                ));
-                return Math.max(1, connectedInputIndexes.length + 1);
+                const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
+                const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
+                return highestConnected >= 0 ? highestConnected + 2 : 1;
             }
             if (mainElementType === 'logic') {
                 const targets = Array.isArray(element.data?.logicTargets) ? element.data.logicTargets : [''];
@@ -2345,6 +2453,61 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return 1;
     };
 
+    const getDynamicInputGapErrors = (
+        sourceElements: CanvasElement[],
+        sourceConnections: Connection[]
+    ): Record<string, string> => {
+        const errors: Record<string, string> = {};
+
+        sourceElements.forEach((element) => {
+            const dynamicConfig = (() => {
+                if (element.type === 'calculation') {
+                    return { startIndex: 0, label: 'Input' };
+                }
+                if (element.type === 'bool-count') {
+                    return { startIndex: 0, label: 'Bool' };
+                }
+                if (element.type === 'switch') {
+                    return { startIndex: 1, label: 'Case' };
+                }
+                if (element.type === 'main' && customNodeMode) {
+                    return { startIndex: 0, label: 'Input' };
+                }
+                return null;
+            })();
+
+            if (!dynamicConfig) {
+                return;
+            }
+
+            const connectedIndexes = getConnectedInputIndexesForElement(element.id, sourceConnections)
+                .filter((index) => index >= dynamicConfig.startIndex);
+
+            if (connectedIndexes.length === 0) {
+                return;
+            }
+
+            const highestConnected = connectedIndexes[connectedIndexes.length - 1];
+            for (let index = dynamicConfig.startIndex; index <= highestConnected; index += 1) {
+                if (!connectedIndexes.includes(index)) {
+                    const labelNumber = dynamicConfig.label === 'Case'
+                        ? index
+                        : index + 1;
+                    errors[element.id] = `${dynamicConfig.label} ${labelNumber} is missing while lower pins are connected.`;
+                    break;
+                }
+            }
+        });
+
+        return errors;
+    };
+
+    const dynamicInputGapErrors = React.useMemo(
+        () => getDynamicInputGapErrors(elements, connections),
+        [elements, connections, customNodeMode]
+    );
+    const hasDynamicInputGapErrors = Object.keys(dynamicInputGapErrors).length > 0;
+
     // Walk the connection graph backwards from elementId to find the customOutputSchema
     // of the originating custom-node, even if zip passes through switch/case/if nodes.
     const resolveZipSchema = (
@@ -2357,15 +2520,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const el = elements.find(e => e.id === elementId);
         if (!el) return [];
 
-        // Found the source — return its schema
+        // Found the source - return its schema
         if (el.type === 'custom-node') {
             return Array.isArray(el.data?.customOutputSchema) ? el.data.customOutputSchema : [];
         }
 
-        // Passthrough nodes — trace back through their value inputs
+        // Passthrough nodes - trace back through their value inputs
         const inputsToTrace: string[] = [];
         if (el.type === 'switch') {
-            // switch output comes from case out-values — trace input0 (the value) and case inputs
+            // switch output comes from case out-values - trace input0 (the value) and case inputs
             inputsToTrace.push('input0');
             const caseConns = connections.filter(c => c.toId === el.id && getInputIndex(c.toInput) > 0);
             caseConns.forEach(c => inputsToTrace.push(c.toInput));
@@ -2486,7 +2649,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
                 }
                 case 'unzip': {
-                    // Unzip always exposes all outputs — element-level valueType is number (per-pin types handled separately)
+                    // Unzip always exposes all outputs - element-level valueType is number (per-pin types handled separately)
                     valueType = 'number';
                     break;
                 }
@@ -2600,6 +2763,125 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         setFormula((prev) => (prev === normalizedFormula ? prev : normalizedFormula));
         formulaRef.current = normalizedFormula;
     }, [connections, customNodeMode, mainElementType, elements]);
+
+    useLayoutEffect(() => {
+        const rafId = window.requestAnimationFrame(() => {
+            const next: Record<string, CalcFlowSegment[]> = {};
+            const calcNodes = elements.filter((el) => el.type === 'calculation');
+
+            calcNodes.forEach((node) => {
+                const connectedCalcInputs = getConnectedInputIndexesForElement(node.id, connections);
+                if (connectedCalcInputs.length === 0) {
+                    next[node.id] = [];
+                    return;
+                }
+
+                const nodeEl = document.querySelector(`.canvas-element[data-element-id="${node.id}"]`) as HTMLElement | null;
+                if (!nodeEl) {
+                    return;
+                }
+                const nodeRect = nodeEl.getBoundingClientRect();
+                const safeWidth = Math.max(1, getNodeWidth(node));
+                const safeHeight = Math.max(1, getNodeHeight(node));
+                const scaleX = nodeRect.width > 0 ? (nodeRect.width / safeWidth) : 1;
+                const scaleY = nodeRect.height > 0 ? (nodeRect.height / safeHeight) : 1;
+
+                const getInputPinPoint = (inputIndex: number): { x: number; y: number } | null => {
+                    const pinEl = nodeEl.querySelector(`.pin.input[data-pin-id="input-${inputIndex}"]`) as HTMLElement | null;
+                    if (!pinEl) return null;
+                    const pinRect = pinEl.getBoundingClientRect();
+                    return {
+                        x: (pinRect.right - nodeRect.left) / scaleX,
+                        y: ((pinRect.top + (pinRect.height / 2)) - nodeRect.top) / scaleY,
+                    };
+                };
+
+                const getOperatorPoints = (
+                    operatorIndex: number
+                ): {
+                    left: { x: number; y: number };
+                    right: { x: number; y: number };
+                    top: { x: number; y: number };
+                    bottom: { x: number; y: number };
+                    centerX: number;
+                } | null => {
+                    const opEl = nodeEl.querySelector(`select.calc-op-control[data-calc-op-index="${operatorIndex}"]`) as HTMLElement | null;
+                    if (!opEl) return null;
+                    const opRect = opEl.getBoundingClientRect();
+                    const centerY = ((opRect.top + (opRect.height / 2)) - nodeRect.top) / scaleY;
+                    const centerX = ((opRect.left + (opRect.width / 2)) - nodeRect.left) / scaleX;
+                    const topY = (opRect.top - nodeRect.top) / scaleY;
+                    const bottomY = (opRect.bottom - nodeRect.top) / scaleY;
+                    return {
+                        left: { x: (opRect.left - nodeRect.left) / scaleX, y: centerY },
+                        right: { x: (opRect.right - nodeRect.left) / scaleX, y: centerY },
+                        top: { x: centerX, y: topY },
+                        bottom: { x: centerX, y: bottomY },
+                        centerX,
+                    };
+                };
+
+                const segments: CalcFlowSegment[] = [];
+                const operatorPoints = connectedCalcInputs
+                    .map((_, operatorIndex) => getOperatorPoints(operatorIndex))
+                    .filter((point): point is {
+                        left: { x: number; y: number };
+                        right: { x: number; y: number };
+                        top: { x: number; y: number };
+                        bottom: { x: number; y: number };
+                        centerX: number;
+                    } => Boolean(point));
+
+                const fallbackOperatorX = safeWidth * 0.58;
+                const fallbackTopY = safeHeight * 0.42;
+                const fallbackBottomY = safeHeight * 0.58;
+
+                connectedCalcInputs.forEach((sourceInputIndex, activeIndex) => {
+                    const inputPoint = getInputPinPoint(sourceInputIndex);
+                    if (!inputPoint) {
+                        return;
+                    }
+
+                    const targetOperatorIndex = activeIndex <= 1
+                        ? 0
+                        : Math.min(operatorPoints.length - 1, activeIndex - 1);
+                    const targetOperator = operatorPoints[targetOperatorIndex];
+                    const badgeX = targetOperator?.left.x ?? fallbackOperatorX;
+                    const badgeY = activeIndex === 0
+                        ? (targetOperator?.top.y ?? fallbackTopY)
+                        : (targetOperator?.bottom.y ?? fallbackBottomY);
+                    const leftToRight = inputPoint.x <= badgeX;
+                    const lineEndX = badgeX + (leftToRight ? -8 : 8);
+                    const lineEndY = badgeY;
+                    const spanX = Math.max(14, Math.abs(lineEndX - inputPoint.x));
+                    const spanY = lineEndY - inputPoint.y;
+                    const wobble = activeIndex % 2 === 0 ? -12 : 12;
+                    const c1x = inputPoint.x + ((leftToRight ? 1 : -1) * Math.max(12, spanX * 0.4));
+                    const c1y = inputPoint.y + (spanY * 0.2) + wobble;
+                    const c2x = lineEndX - ((leftToRight ? 1 : -1) * Math.max(10, spanX * 0.2));
+                    const c2y = lineEndY - (spanY * 0.15) - wobble;
+
+                    segments.push({
+                        key: `input-flow-${sourceInputIndex}`,
+                        d: `M ${inputPoint.x} ${inputPoint.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${lineEndX} ${lineEndY}`,
+                        step: activeIndex + 1,
+                        badgeX,
+                        badgeY,
+                    });
+                });
+
+                next[node.id] = segments;
+            });
+
+            setCalcFlowByNode((prev) => {
+                const prevJson = JSON.stringify(prev);
+                const nextJson = JSON.stringify(next);
+                return prevJson === nextJson ? prev : next;
+            });
+        });
+
+        return () => window.cancelAnimationFrame(rafId);
+    }, [elements, connections]);
 
     // Check if connection types are compatible
     const areTypesCompatible = (fromElement: CanvasElement, toElement: CanvasElement, fromOutputIndex: number, toInputIndex: number, connectionType?: 'normal' | 'case'): boolean => {
@@ -3213,7 +3495,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'unzip': {
                     const zipConn = getInputConnection('input0');
                     const zipExpr = zipConn ? buildFromConn(zipConn, depth + 1) : '({})';
-                    // Always unzip all — each output pin extracts by its index
+                    // Always unzip all - each output pin extracts by its index
                     const expr = `__nodeUnzip(${zipExpr}, ${outputIndex})`;
                     steps.push(`${indent}unzip node "${element.name}" [output ${outputIndex}]: ${expr}`);
                     return expr;
@@ -3884,7 +4166,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'main':
                 return 0; // Main calculator has no output, generates formula
             case 'output':
-                return 0; // Output node is a sink — no output pins
+                return 0; // Output node is a sink - no output pins
             case 'calculation':
                 return 1; // Calculation nodes output result
             case 'condition':
@@ -3907,13 +4189,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return element.valueType || 'number';
     };
 
+    const NODE_FIXED_WIDTH = 220;
+
+    // Keep node width stable to avoid layout shifts and pin drift.
+    const getNodeWidth = (_element: CanvasElement): number => NODE_FIXED_WIDTH;
+
     // Get node height based on content
+    const getCenterControlRowCount = (element: CanvasElement): number => {
+        switch (element.type) {
+            case 'css-unit':
+            case 'number-to-base':
+                return 2;
+            default:
+                return 1;
+        }
+    };
+
     const getNodeHeight = (element: CanvasElement): number => {
         const inputCount = getInputCount(element);
         const outputCount = getOutputCount(element);
-        const maxRows = Math.max(inputCount, outputCount);
+        const centerRows = getCenterControlRowCount(element);
+        const maxRows = Math.max(inputCount, outputCount, centerRows);
         // Header (24px) + padding (16px) + rows (32px each) + bottom padding (8px)
-        return 24 + 16 + (maxRows * 32) + 8;
+        return 26 + 16 + (maxRows * 34) + 10;
     };
 
     // Calculate pin position purely from node geometry fallback (if DOM not available)
@@ -3924,7 +4222,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     ): { x: number; y: number } => {
         const nodeX = element.x * zoomRef.current + offsetXRef.current;
         const nodeY = element.y * zoomRef.current + offsetYRef.current;
-        const nodeWidth = element.data?.nodeWidth || 200;
+        const nodeWidth = getNodeWidth(element);
         const rowHeight = 32;
         const headerHeight = 24;
         const paddingTop = 16;
@@ -3966,7 +4264,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         
         const nodeX = elementX * currentZoom + currentOffsetX;
         const nodeY = elementY * currentZoom + currentOffsetY;
-        const nodeWidth = element.data?.nodeWidth || 200;
+        const nodeWidth = getNodeWidth(element);
         const rowHeight = 32;
         const headerHeight = 24;
         const paddingTop = 16;
@@ -4523,7 +4821,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             }}
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <option value="">— Target Element —</option>
+                            <option value="">-- Target Element --</option>
                             {detectedElements.map(detectedEl => (
                                 <option key={detectedEl.id} value={detectedEl.id}>
                                     {detectedEl.name} ({detectedEl.type})
@@ -4564,7 +4862,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             }}
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <option value="">— Target Element —</option>
+                            <option value="">-- Target Element --</option>
                             {detectedElements.map(detectedEl => (
                                 <option key={detectedEl.id} value={detectedEl.id}>
                                     {detectedEl.name} ({detectedEl.type})
@@ -5338,9 +5636,69 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     return (
         <div className="graph-editor">
+            {showDraftRecoveryNotice && pendingDraftRecovery && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        top: '12px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 7000,
+                        width: 'min(760px, calc(100vw - 32px))',
+                        background: '#0f172a',
+                        color: '#e2e8f0',
+                        border: '1px solid #334155',
+                        borderRadius: '10px',
+                        boxShadow: '0 12px 28px rgba(2, 6, 23, 0.45)',
+                        padding: '12px 14px',
+                    }}
+                >
+                    <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: '6px' }}>
+                        Unsaved graph draft found
+                    </div>
+                    <div style={{ fontSize: '12px', lineHeight: '1.35', color: '#cbd5e1', marginBottom: '10px' }}>
+                        {pendingDraftLabel
+                            ? `There is an unsaved draft from ${pendingDraftLabel}.`
+                            : 'There is an unsaved draft for this graph.'}
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                        <button
+                            type="button"
+                            onClick={handleDismissDraftRecovery}
+                            style={{
+                                padding: '6px 12px',
+                                background: '#334155',
+                                color: '#e2e8f0',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                            }}
+                        >
+                            Dismiss
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleRestoreUnsaved}
+                            style={{
+                                padding: '6px 12px',
+                                background: '#2563eb',
+                                color: '#fff',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                fontWeight: 600,
+                            }}
+                        >
+                            Restore draft
+                        </button>
+                    </div>
+                </div>
+            )}
             <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
                 <button className="toggle-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
-                    {sidebarOpen ? '◀' : '▶'}
+                    {sidebarOpen ? '\u25C0' : '\u25B6'}
                 </button>
                 {sidebarOpen && (
                     <div className="tree-container">
@@ -5365,6 +5723,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             {!templateMode && !customNodeMode && (
                                 <button
                                     onClick={() => {
+                                        if (hasDynamicInputGapErrors) {
+                                            const firstError = Object.values(dynamicInputGapErrors)[0];
+                                            setTemplateInfo(`Save blocked: ${firstError}`);
+                                            return;
+                                        }
                                         try {
                                             handleSaveFormula();
                                         } catch (err) {
@@ -5376,11 +5739,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                     }}
                                     style={{
                                         ...buttonStyle,
-                                        backgroundColor: '#4caf50'
+                                        backgroundColor: hasDynamicInputGapErrors ? '#9e9e9e' : '#4caf50',
+                                        cursor: hasDynamicInputGapErrors ? 'not-allowed' : 'pointer',
+                                        opacity: hasDynamicInputGapErrors ? 0.85 : 1
                                     }}
+                                    title={hasDynamicInputGapErrors ? 'Fix dynamic input gaps before saving.' : 'Save current graph'}
                                 >
                                     Save Graph
                                 </button>
+                            )}
+
+                            {hasDynamicInputGapErrors && !templateMode && !customNodeMode && (
+                                <div style={{ color: '#ef4444', fontSize: '11px', marginTop: '4px', lineHeight: '1.35' }}>
+                                    {Object.values(dynamicInputGapErrors)[0]}
+                                </div>
                             )}
 
                             {unsavedChanges && !templateMode && !customNodeMode && (
@@ -5400,7 +5772,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 </>
                             )}
 
-                            {!unsavedChanges && hasRecoverableAutosave && !templateMode && !customNodeMode && (
+                            {!unsavedChanges && recoverableDraftState && !showDraftRecoveryNotice && !templateMode && !customNodeMode && (
                                 <button
                                     onClick={handleRestoreUnsaved}
                                     style={{
@@ -5534,30 +5906,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                             </label>
                                         )}
 
-                                        <div>
-                                            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Node Width (px)</div>
-                                            <input
-                                                type="number"
-                                                className="input-control"
-                                                min={100}
-                                                max={800}
-                                                step={10}
-                                                value={String(selEl.data?.nodeWidth || 200)}
-                                                onChange={(e) => {
-                                                    const raw = parseInt(e.target.value, 10);
-                                                    const nodeWidth = Number.isFinite(raw) ? Math.max(100, Math.min(800, raw)) : 200;
-                                                    setElements(prev =>
-                                                        prev.map(elem =>
-                                                            elem.id === selected
-                                                                ? { ...elem, data: { ...elem.data, nodeWidth } }
-                                                                : elem
-                                                        )
-                                                    );
-                                                }}
-                                                style={{ width: '100%' }}
-                                            />
-                                        </div>
-
                                         {selEl.type === 'element-id' && (
                                             <>
                                                 <div>
@@ -5630,7 +5978,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         }}
                                                         style={{ width: '100%' }}
                                                     >
-                                                        <option value="">— Select Element —</option>
+                                                        <option value="">-- Select Element --</option>
                                                         {detectedElements.map(d => (
                                                             <option key={d.id} value={d.id}>{d.id}</option>
                                                         ))}
@@ -6038,6 +6386,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         const inputCount = getInputCount(el);
                         const outputCount = getOutputCount(el);
                         const nodeHeight = getNodeHeight(el);
+                        const nodeWidth = getNodeWidth(el);
+                        const noInputPins = inputCount === 0;
+                        const noOutputPins = outputCount === 0;
+                        const nodePinClass = [
+                            noInputPins ? 'no-input-pins' : '',
+                            noOutputPins ? 'no-output-pins' : '',
+                        ].filter(Boolean).join(' ');
 
                         //console.log(acceptedTypes);
                         
@@ -6063,24 +6418,28 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'css-width'
                             || el.type === 'css-height'
                             || el.type === 'css-font-size'
+                            || el.type === 'css-join'
                             || el.type === 'css-display'
                             || el.type === 'css-text';
+                        const calcSegments = el.type === 'calculation' ? (calcFlowByNode[el.id] || []) : [];
+                        const calcMarkerId = `calc-flow-arrow-${el.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
 
                         return (
                             <div
                                 key={el.id}
-                                className={`canvas-element type-${el.type} ${selected === el.id ? 'selected' : ''}`}
+                                className={`canvas-element type-${el.type} ${nodePinClass} ${selected === el.id ? 'selected' : ''} ${dynamicInputGapErrors[el.id] ? 'node-error' : ''}`}
                                 data-element-id={el.id}
                                 style={{ 
                                     left: `${el.x * zoom + offsetX}px`, 
                                     top: `${el.y * zoom + offsetY}px`,
-                                    width: `${el.data?.nodeWidth || 200}px`,
+                                    width: `${nodeWidth}px`,
                                     height: `${nodeHeight}px`,
                                     transform: `scale(${zoom})`,
                                     transformOrigin: '0 0',
                                     cursor: isDraggingCanvasElement && draggedElementId === el.id ? 'grabbing' : 'grab'
                                 }}
+                                title={dynamicInputGapErrors[el.id] || ''}
                                 onMouseDown={(e) => {
                                     // Don't trigger element select on pin interaction
                                     const target = e.target as HTMLElement;
@@ -6095,6 +6454,43 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 }}
                             >
                                 <div className="node-header">{el.name}</div>
+                                {el.type === 'calculation' && calcSegments.length > 0 && (
+                                    <svg
+                                        className="calc-flow-overlay"
+                                        viewBox={`0 0 ${nodeWidth} ${nodeHeight}`}
+                                        preserveAspectRatio="none"
+                                        aria-hidden="true"
+                                    >
+                                        <defs>
+                                            <marker
+                                                id={calcMarkerId}
+                                                markerWidth="8"
+                                                markerHeight="8"
+                                                refX="6"
+                                                refY="3"
+                                                orient="auto"
+                                                markerUnits="strokeWidth"
+                                            >
+                                                <path d="M 0 0 L 6 3 L 0 6 z" fill="#9db4d8" />
+                                            </marker>
+                                        </defs>
+                                        {calcSegments.map((segment) => (
+                                            <g key={segment.key}>
+                                                <path
+                                                    className="calc-flow-path"
+                                                    d={segment.d}
+                                                    markerEnd={`url(#${calcMarkerId})`}
+                                                />
+                                                <g transform={`translate(${segment.badgeX}, ${segment.badgeY})`} className="calc-flow-badge">
+                                                    <circle r="7" />
+                                                    <text textAnchor="middle" dominantBaseline="middle">
+                                                        {segment.step}
+                                                    </text>
+                                                </g>
+                                            </g>
+                                        ))}
+                                    </svg>
+                                )}
 
                                 {isSpecialLayout ? (
                                     // Special layout: labels column + inputs column (centered)
@@ -6189,41 +6585,38 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'calculation' ? (
                                                 (() => {
-                                                    const operatorRowCount = Math.max(0, inputCount - 1); // x-1 rows (last one phantom)
+                                                    const connectedCalcInputs = getConnectedInputIndexesForElement(el.id);
+                                                    const operatorRowCount = Math.max(0, connectedCalcInputs.length - 1);
                                                     return Array.from({ length: operatorRowCount }).map((_, i) => {
-                                                        const isPhantomRow = i === operatorRowCount - 1;
                                                         const keyName = `input${i}`;
                                                         return (
-                                                            <div key={`operator-row-${i}`} className="input-row-special">
-                                                                {isPhantomRow ? (
-                                                                    <div style={{ width: '60px', height: '18px' }} />
-                                                                ) : (
-                                                                    <select
-                                                                        className="input-control"
-                                                                        value={el.data?.inputOperations?.[keyName] || '+'}
-                                                                        onChange={(e) => {
-                                                                            const inputOperations = { ...el.data?.inputOperations };
-                                                                            inputOperations[keyName] = e.target.value;
-                                                                            setElements(prev =>
-                                                                                updateElementValueTypes(
-                                                                                    prev.map(elem =>
-                                                                                        elem.id === el.id
-                                                                                            ? { ...elem, data: { ...elem.data, inputOperations } }
-                                                                                            : elem
-                                                                                    )
+                                                            <div key={`operator-row-${i}`} className="input-row-special calc-op-row">
+                                                                <select
+                                                                    className="input-control calc-op-control"
+                                                                    data-calc-op-index={i}
+                                                                    value={el.data?.inputOperations?.[keyName] || '+'}
+                                                                    onChange={(e) => {
+                                                                        const inputOperations = { ...el.data?.inputOperations };
+                                                                        inputOperations[keyName] = e.target.value;
+                                                                        setElements(prev =>
+                                                                            updateElementValueTypes(
+                                                                                prev.map(elem =>
+                                                                                    elem.id === el.id
+                                                                                        ? { ...elem, data: { ...elem.data, inputOperations } }
+                                                                                        : elem
                                                                                 )
-                                                                            );
-                                                                        }}
-                                                                        onClick={(e) => e.stopPropagation()}
-                                                                    >
-                                                                        <option value="+">+</option>
-                                                                        <option value="-">-</option>
-                                                                        <option value="*">*</option>
-                                                                        <option value="/">÷</option>
-                                                                        <option value="**">**</option>
-                                                                        <option value="%">%</option>
-                                                                    </select>
-                                                                )}
+                                                                            )
+                                                                        );
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                >
+                                                                    <option value="+">+</option>
+                                                                    <option value="-">-</option>
+                                                                    <option value="*">*</option>
+                                                                    <option value="/">/</option>
+                                                                    <option value="**">**</option>
+                                                                    <option value="%">%</option>
+                                                                </select>
                                                             </div>
                                                         );
                                                     });
@@ -6377,7 +6770,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     );
                                                                 }}
                                                                 onClick={(e) => e.stopPropagation()}
-                                                                style={{ width: '34px', maxWidth: '34px', padding: '1px' }}
+                                                                style={{ width: '26px', minWidth: '26px', maxWidth: '26px', height: '26px', minHeight: '26px', maxHeight: '26px', padding: '1px' }}
                                                             />
                                                             <input
                                                                 type="text"
@@ -6397,26 +6790,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 }}
                                                                 onClick={(e) => e.stopPropagation()}
                                                                 placeholder="#2563eb"
-                                                                style={{ maxWidth: '80px' }}
                                                             />
                                                         </div>
                                                     );
                                                 })()
                                             ) : el.type === 'element-id' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar →
+                                                    Configure in sidebar ->
                                                 </div>
                                             ) : el.type === 'memory-read-number' || el.type === 'memory-read-string' || el.type === 'memory-read-boolean' || el.type === 'memory-write-number' || el.type === 'memory-write-string' || el.type === 'memory-write-boolean' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar →
+                                                    Configure in sidebar ->
                                                 </div>
                                             ) : el.type === 'event-element' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar →
+                                                    Configure in sidebar ->
                                                 </div>
                                             ) : el.type === 'event-id' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar →
+                                                    Configure in sidebar ->
                                                 </div>
                                             ) : el.type === 'event-processor' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -6444,14 +6836,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         }}
                                                         onClick={(e) => e.stopPropagation()}
                                                     >
-                                                        <option value="">— Element —</option>
+                                                        <option value="">-- Element --</option>
                                                         {detectedElements.map(d => (
                                                             <option key={d.id} value={d.id}>{d.id}</option>
                                                         ))}
                                                     </select>
                                                 </div>
                                             ) : el.type === 'output' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                                <div className="node-output-controls" style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
                                                     {!customNodeMode && (
                                                         <>
                                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
@@ -6476,7 +6868,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             {el.data?.useIdInput ? (
                                                                 <input
                                                                     type="text"
-                                                                    className="input-control"
+                                                                    className="input-control output-target-control"
                                                                     value={el.data?.selectedElement || ''}
                                                                     onChange={(e) => {
                                                                         const selectedElementId = e.target.value;
@@ -6492,11 +6884,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     }}
                                                                     onClick={(e) => e.stopPropagation()}
                                                                     placeholder="Element ID"
-                                                                    style={{ width: '100%' }}
                                                                 />
                                                             ) : (
                                                                 <select
-                                                                    className="input-control"
+                                                                    className="input-control output-target-control"
                                                                     value={el.data?.selectedElement || ''}
                                                                     onChange={(e) => {
                                                                         const selectedElementId = e.target.value;
@@ -6513,7 +6904,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     }}
                                                                     onClick={(e) => e.stopPropagation()}
                                                                 >
-                                                                    <option value="">— Target —</option>
+                                                                    <option value="">-- Target --</option>
                                                                     {detectedElements.map(d => (
                                                                         <option key={d.id} value={d.id}>{d.id}</option>
                                                                     ))}
@@ -6608,15 +6999,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'css-join' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
-                                                    <select className="input-control" value={String(el.data?.inputCount ?? 3)} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
-                                                        <option value="2">2 inputs</option>
-                                                        <option value="3">3 inputs</option>
-                                                        <option value="4">4 inputs</option>
-                                                        <option value="5">5 inputs</option>
-                                                        <option value="6">6 inputs</option>
-                                                        <option value="7">7 inputs</option>
-                                                        <option value="8">8 inputs</option>
-                                                    </select>
+                                                    <input
+                                                        type="number"
+                                                        className="input-control"
+                                                        min={2}
+                                                        max={8}
+                                                        step={1}
+                                                        value={String(el.data?.inputCount ?? 3)}
+                                                        onChange={(e) => {
+                                                            const raw = parseInt(e.target.value, 10);
+                                                            const next = Number.isFinite(raw) ? Math.max(2, Math.min(8, raw)) : 3;
+                                                            setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: next } } : em));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        placeholder="2-8"
+                                                    />
                                                 </div>
                                             ) : el.type === 'css-unit' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
@@ -6663,7 +7060,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         style={{ width: '100%', padding: '4px 8px', fontSize: '11px', background: '#4a1d96', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
                                                         onClick={(e) => { e.stopPropagation(); setCssEditorNodeId(el.id); }}
                                                     >
-                                                        {el.data?.cssText ? 'Edit CSS ✓' : 'Edit CSS…'}
+                                                        {el.data?.cssText ? 'Edit CSS [saved]' : 'Edit CSS...'}
                                                     </button>
                                                 </div>
                                             ) : null}

@@ -193,6 +193,7 @@ add_action('init', function () {
     register_block_type(__DIR__ . '/blocks/element-select');
     register_block_type(__DIR__ . '/blocks/element-checkbox');
     register_block_type(__DIR__ . '/blocks/element-label');
+    register_block_type(__DIR__ . '/trigger-group-block.json');
 });
 
 add_action('init', function () {

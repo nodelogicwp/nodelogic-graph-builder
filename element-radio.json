@@ -7,7 +7,7 @@
   "description": "Radio button group element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "radio_1" },
+    "sliderId": { "type": "string" },
     "value": { "type": "string", "default": "" },
     "options": {
       "type": "array",

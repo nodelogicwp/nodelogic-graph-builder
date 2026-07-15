@@ -14,6 +14,7 @@ export const PRESET_CONTAINER_ALLOWED_BLOCKS = [
     'custom/nodelogic-logic',
     'custom/nodelogic-image',
     'custom/nodelogic-array-list',
+    'custom/nodelogic-trigger-group',
 ];
 
 const clampGridValue = (value, fallback) => {

@@ -7,7 +7,7 @@
   "description": "Numeric input element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "number_1" },
+    "sliderId": { "type": "string" },
     "min": { "type": "number", "default": 0 },
     "max": { "type": "number", "default": 100 },
     "value": { "type": "number", "default": 0 }

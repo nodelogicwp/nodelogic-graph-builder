@@ -7,7 +7,7 @@
   "description": "Dropdown select element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "select_1" },
+    "sliderId": { "type": "string" },
     "value": { "type": "string", "default": "" },
     "options": {
       "type": "array",

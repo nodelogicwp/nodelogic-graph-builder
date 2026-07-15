@@ -277,6 +277,8 @@ interface CanvasElement {
         eventElement?: string;
         eventId?: string;
         eventOption?: string;
+        eventUseManualId?: boolean; // true = manual text input, false = dropdown from detectedElements
+        eventType?: string;
         // For Action nodes
         actionEventType?: string;
         actionTargetId?: string;
@@ -364,7 +366,7 @@ interface CalcFlowSegment {
 
 interface DetectedElement {
     id: string;
-    type: 'slider' | 'input-number' | 'input-string' | 'checkbox' | 'radio' | 'select' | 'button-group' | 'image' | 'array-list' | 'chart' | 'custom-element';
+    type: 'slider' | 'input-number' | 'input-string' | 'checkbox' | 'radio' | 'select' | 'button-group' | 'image' | 'array-list' | 'chart' | 'custom-element' | 'trigger';
     name: string;
     outputs?: { name: string; type: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'array' }[];
 }
@@ -572,6 +574,11 @@ const detectElementFromBlock = (block: any): DetectedElement | null => {
                 name: String(attrs.title || 'Array List'),
                 outputs: outputsForValue('array'),
             };
+        case 'custom/nodelogic-trigger-group': {
+            // Each item in the trigger group is a separate detectable element (event-only, no value output)
+            // We return null here — individual items are collected in collectDetectedElementsFromBlocks
+            return null;
+        }
         case 'nodelogic/chart':
             return {
                 id: readId(attrs.chartId),
@@ -599,6 +606,27 @@ const collectDetectedElementsFromBlocks = (blocks: any[]): DetectedElement[] => 
 
     const walk = (items: any[]): void => {
         items.forEach((block) => {
+            const blockName = String(block?.name || '').trim().toLowerCase();
+
+            // Trigger Group: each item with an id is a separate detectable trigger element
+            if (blockName === 'custom/nodelogic-trigger-group') {
+                const attrs = block?.attributes || {};
+                const triggerItems = Array.isArray(attrs.items) ? attrs.items : [];
+                triggerItems.forEach((item: any) => {
+                    const itemId = String(item?.id || '').trim();
+                    if (itemId && !seen.has(itemId)) {
+                        seen.add(itemId);
+                        results.push({
+                            id: itemId,
+                            type: 'trigger',
+                            name: String(item?.label || itemId),
+                            outputs: [], // triggers emit events, not values
+                        });
+                    }
+                });
+                return;
+            }
+
             const detected = detectElementFromBlock(block);
             if (detected && detected.id && !seen.has(detected.id)) {
                 seen.add(detected.id);
@@ -2025,6 +2053,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-event') return 178;
         if (element.type === 'action-length') return 160;
         if (element.type === 'action-block') return 110;
+        // event-element: checkbox(22) + dropdown/input(32) + event-type(32) + gaps = ~130
+        if (element.type === 'event-element') return 152;
+        // event-id: text input(32) + event-type(32) + gaps = ~110
+        if (element.type === 'event-id') return 120;
         if (element.type === 'action-required'
             || element.type === 'action-min'
             || element.type === 'action-max'
@@ -2048,6 +2080,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'chart-data' && element.data?.chartDataTypeCarrier) return 160;
         if (element.type === 'action-event') return 280;
         if (element.type === 'action-length') return 240;
+        if (element.type === 'event-element') return 220;
+        if (element.type === 'event-id') return 200;
         if (element.type === 'action-block') return 220;
         if (element.type === 'action-required'
             || element.type === 'action-min'
@@ -2073,10 +2107,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const nodeWidth = getNodeWidth(element) * currentZoom;
         const pinGap = 1 * currentZoom;
 
-        // rowHeight: actual rendered height of the input/output row
+        // rowHeight: actual rendered height of the output row (event-element/event-id have no inputs)
         // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
         // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
-        // All other rows: CSS min-height 34px (content 32px + flex alignment)
+        // For event-element body (output side): output row is standard 34px
+        // All other rows: CSS min-height 34px
         const isTallActionInput = type === 'input' && index === 0 && (
             element.type === 'action-event' || element.type === 'action-length'
         );
@@ -2119,10 +2154,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const nodeWidth = getNodeWidth(element) * currentZoom;
         const pinGap = 1 * currentZoom;
 
-        // rowHeight: actual rendered height of the input/output row
+        // rowHeight: actual rendered height of the output row (event-element/event-id have no inputs)
         // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
         // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
-        // All other rows: CSS min-height 34px (content 32px + flex alignment)
+        // For event-element body (output side): output row is standard 34px
+        // All other rows: CSS min-height 34px
         const isTallActionInput = type === 'input' && index === 0 && (
             element.type === 'action-event' || element.type === 'action-length'
         );
@@ -3949,6 +3985,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 case 'element-id':
                     return serializeGraphFormulaLiteral(String(element.data?.elementId || ''));
+                case 'event-element': {
+                    // Resolve target ID: manual input or dropdown selection
+                    const targetId = String(
+                        element.data?.eventUseManualId
+                            ? (element.data?.eventId || '')
+                            : (element.data?.eventElement || element.data?.eventId || '')
+                    ).trim();
+                    const evType = String(element.data?.eventType || 'click');
+                    return targetId
+                        ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
+                        : 'null';
+                }
+                case 'event-id': {
+                    const targetId = String(element.data?.eventId || '').trim();
+                    const evType = String(element.data?.eventType || 'click');
+                    return targetId
+                        ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
+                        : 'null';
+                }
                 case 'fallback':
                     return `__nodeFallback(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
                 case 'concat':
@@ -6060,116 +6115,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                         )}
 
                                         {selEl.type === 'event-element' && (
-                                            <>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Target Element</div>
-                                                    <select
-                                                        className="input-control"
-                                                        value={selEl.data?.eventElement || ''}
-                                                        onChange={(e) => {
-                                                            const eventElement = e.target.value;
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, eventElement } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        style={{ width: '100%' }}
-                                                    >
-                                                        <option value="">-- Select Element --</option>
-                                                        {detectedElements.map(d => (
-                                                            <option key={d.id} value={d.id}>{d.id}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Event Type</div>
-                                                    <select
-                                                        className="input-control"
-                                                        value={selEl.data?.eventType || 'click'}
-                                                        onChange={(e) => {
-                                                            const eventType = e.target.value;
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, eventType } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        style={{ width: '100%' }}
-                                                    >
-                                                        <option value="change">on change</option>
-                                                        <option value="input">on input</option>
-                                                        <option value="click">on click</option>
-                                                        <option value="focus">on focus</option>
-                                                        <option value="blur">on blur</option>
-                                                        <option value="keyup">on keyup</option>
-                                                        <option value="keydown">on keydown</option>
-                                                    </select>
-                                                </div>
-                                            </>
+                                            <div style={{ color: '#aaa', fontSize: '11px', lineHeight: '1.4' }}>
+                                                Configure target element and event type directly in the node body.
+                                            </div>
                                         )}
 
                                         {selEl.type === 'event-id' && (
-                                            <>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Element ID</div>
-                                                    <input
-                                                        type="text"
-                                                        className="input-control"
-                                                        value={selEl.data?.eventId || ''}
-                                                        onChange={(e) => {
-                                                            const eventId = e.target.value;
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, eventId } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        placeholder="Element ID"
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Event Type</div>
-                                                    <select
-                                                        className="input-control"
-                                                        value={selEl.data?.eventType || 'click'}
-                                                        onChange={(e) => {
-                                                            const eventType = e.target.value;
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, eventType } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        style={{ width: '100%' }}
-                                                    >
-                                                        <option value="change">on change</option>
-                                                        <option value="input">on input</option>
-                                                        <option value="click">on click</option>
-                                                        <option value="focus">on focus</option>
-                                                        <option value="blur">on blur</option>
-                                                        <option value="keyup">on keyup</option>
-                                                        <option value="keydown">on keydown</option>
-                                                    </select>
-                                                </div>
-                                            </>
+                                            <div style={{ color: '#aaa', fontSize: '11px', lineHeight: '1.4' }}>
+                                                Configure element ID and event type directly in the node body.
+                                            </div>
                                         )}
 
                                         {selEl.type === 'event-processor' && (
@@ -6907,12 +6861,110 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     Configure in sidebar ->
                                                 </div>
                                             ) : el.type === 'event-element' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar ->
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {/* checkbox: list vs manual */}
+                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={!!el.data?.eventUseManualId}
+                                                            onChange={(e) => {
+                                                                const eventUseManualId = e.target.checked;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            style={{ cursor: 'pointer' }}
+                                                        />
+                                                        Manual ID
+                                                    </label>
+                                                    {el.data?.eventUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.eventId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const eventId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.eventElement || ''}
+                                                            onChange={(e) => {
+                                                                const eventElement = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventElement } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Target --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                    {/* Event Type */}
+                                                    <select
+                                                        className="input-control"
+                                                        value={el.data?.eventType || 'click'}
+                                                        onChange={(e) => {
+                                                            const eventType = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, eventType } } : elem
+                                                            )));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        <option value="click">click</option>
+                                                        <option value="change">change</option>
+                                                        <option value="input">input</option>
+                                                        <option value="focus">focus</option>
+                                                        <option value="blur">blur</option>
+                                                        <option value="keyup">keyup</option>
+                                                        <option value="keydown">keydown</option>
+                                                    </select>
                                                 </div>
                                             ) : el.type === 'event-id' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar ->
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    <input
+                                                        type="text"
+                                                        className="input-control"
+                                                        value={el.data?.eventId || ''}
+                                                        placeholder="Element ID"
+                                                        onChange={(e) => {
+                                                            const eventId = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, eventId } } : elem
+                                                            )));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    />
+                                                    <select
+                                                        className="input-control"
+                                                        value={el.data?.eventType || 'click'}
+                                                        onChange={(e) => {
+                                                            const eventType = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, eventType } } : elem
+                                                            )));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        <option value="click">click</option>
+                                                        <option value="change">change</option>
+                                                        <option value="input">input</option>
+                                                        <option value="focus">focus</option>
+                                                        <option value="blur">blur</option>
+                                                        <option value="keyup">keyup</option>
+                                                        <option value="keydown">keydown</option>
+                                                    </select>
                                                 </div>
                                             ) : el.type === 'event-processor' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>

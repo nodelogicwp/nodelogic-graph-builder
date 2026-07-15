@@ -7,6 +7,7 @@
   "description": "Choice button group with heading.",
   "attributes": {
     "title": { "type": "string", "default": "Choose industry" },
+    "showTitle": { "type": "boolean", "default": true },
     "buttons": {
       "type": "array",
       "default": [
@@ -14,7 +15,7 @@
         { "id": "", "label": "Option 2", "value": "" }
       ]
     },
-    "groupId": { "type": "string", "default": "button-group" },
+    "groupId": { "type": "string" },
     "buttonBackground": { "type": "string", "default": "#1d4ed8" },
     "buttonHover": { "type": "string", "default": "#2563eb" },
     "buttonText": { "type": "string", "default": "#ffffff" },

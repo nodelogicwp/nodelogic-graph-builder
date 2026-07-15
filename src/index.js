@@ -9,6 +9,10 @@ import sliderCheckboxJson from '../element-checkbox.json';
 import sliderLabelJson    from '../element-label.json';
 import buttonsMetadata    from '../buttons-block.json';
 import logicMetadata      from '../logic-block.json';
+import presetContainerJson from '../preset-container-block.json';
+import imageBlockJson      from '../image-block.json';
+import arrayListBlockJson  from '../array-list-block.json';
+import triggerGroupJson    from '../trigger-group-block.json';
 
 import {
     SeekbarEdit,
@@ -21,6 +25,10 @@ import {
 } from './edit';
 import ButtonsEdit from './buttons-edit';
 import LogicEdit   from './logic-edit';
+import { PresetContainerEdit } from './preset-container-edit';
+import { ImageBlockEdit, ImageBlockSave, LegacyImageBlockSave, LegacyImageBlockSavePlain } from './image-edit';
+import { ArrayListEdit, ArrayListSave, LegacyArrayListSave, LegacyArrayListSavePlain } from './array-list-edit';
+import TriggerGroupEdit from './trigger-group-edit';
 
 // ─── Seekbar ──────────────────────────────────────────────────────────────────
 registerBlockType(sliderSeekbarJson.name, {
@@ -118,5 +126,69 @@ registerBlockType(logicMetadata.name, {
     description: logicMetadata.description,
     attributes: logicMetadata.attributes,
     edit: LogicEdit,
+    save: () => null,
+});
+
+// ─── Preset Container ────────────────────────────────────────────────────────
+registerBlockType(presetContainerJson.name, {
+    title: presetContainerJson.title,
+    category: presetContainerJson.category,
+    icon: presetContainerJson.icon,
+    description: presetContainerJson.description,
+    attributes: presetContainerJson.attributes,
+    edit: PresetContainerEdit,
+    save: () => null,
+});
+
+// ─── Image Block ─────────────────────────────────────────────────────────────
+registerBlockType(imageBlockJson.name, {
+    title: imageBlockJson.title,
+    category: imageBlockJson.category,
+    icon: imageBlockJson.icon,
+    description: imageBlockJson.description,
+    attributes: imageBlockJson.attributes,
+    edit: ImageBlockEdit,
+    save: ImageBlockSave,
+    deprecated: [
+        {
+            attributes: imageBlockJson.attributes,
+            save: LegacyImageBlockSave,
+        },
+        {
+            attributes: imageBlockJson.attributes,
+            save: LegacyImageBlockSavePlain,
+        },
+    ],
+});
+
+// ─── Array List Block ────────────────────────────────────────────────────────
+registerBlockType(arrayListBlockJson.name, {
+    title: arrayListBlockJson.title,
+    category: arrayListBlockJson.category,
+    icon: arrayListBlockJson.icon,
+    description: arrayListBlockJson.description,
+    attributes: arrayListBlockJson.attributes,
+    edit: ArrayListEdit,
+    save: ArrayListSave,
+    deprecated: [
+        {
+            attributes: arrayListBlockJson.attributes,
+            save: LegacyArrayListSave,
+        },
+        {
+            attributes: arrayListBlockJson.attributes,
+            save: LegacyArrayListSavePlain,
+        },
+    ],
+});
+
+// ─── Trigger Group ───────────────────────────────────────────────────────────
+registerBlockType(triggerGroupJson.name, {
+    title: triggerGroupJson.title,
+    category: triggerGroupJson.category,
+    icon: triggerGroupJson.icon,
+    description: triggerGroupJson.description,
+    attributes: triggerGroupJson.attributes,
+    edit: TriggerGroupEdit,
     save: () => null,
 });

@@ -7,10 +7,11 @@
   "description": "Seekbar / progress slider element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "seekbar_1" },
+    "sliderId": { "type": "string" },
     "min": { "type": "number", "default": 1 },
     "max": { "type": "number", "default": 10 },
     "value": { "type": "number", "default": 5 },
+    "trackBackgroundColor": { "type": "string", "default": "#ffffff" },
     "trackProgressColor": { "type": "string", "default": "#2563eb" },
     "thumbValueColor": { "type": "string", "default": "#111827" },
     "thumbBackgroundColor": { "type": "string", "default": "#2563eb" }
@@ -18,5 +19,3 @@
   "editorScript": "file:./build/index.js",
   "render": "file:./element-seekbar-render.php"
 }
-
-

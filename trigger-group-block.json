@@ -1,0 +1,26 @@
+{
+  "apiVersion": 3,
+  "name": "custom/nodelogic-trigger-group",
+  "title": "Trigger Group",
+  "category": "advanced-blocks-calculator",
+  "icon": "controls-play",
+  "description": "Group of trigger buttons, each with a unique ID detectable by Event Element Node.",
+  "attributes": {
+    "groupId": { "type": "string" },
+    "title": { "type": "string", "default": "" },
+    "showTitle": { "type": "boolean", "default": false },
+    "items": {
+      "type": "array",
+      "default": [
+        { "id": "", "label": "Trigger 1" },
+        { "id": "", "label": "Trigger 2" }
+      ]
+    },
+    "buttonBackground": { "type": "string", "default": "#7c3aed" },
+    "buttonHover": { "type": "string", "default": "#6d28d9" },
+    "buttonText": { "type": "string", "default": "#ffffff" },
+    "buttonSpacing": { "type": "number", "default": 8 }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./trigger-group-render.php"
+}

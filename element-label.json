@@ -7,7 +7,7 @@
   "description": "Static label / text output element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "label_1" },
+    "sliderId": { "type": "string" },
     "nodelogicLabel": { "type": "string", "default": "" }
   },
   "editorScript": "file:./build/index.js",

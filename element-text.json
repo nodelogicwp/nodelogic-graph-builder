@@ -7,7 +7,7 @@
   "description": "Text input element.",
   "attributes": {
     "editorId": { "type": "string" },
-    "sliderId": { "type": "string", "default": "text_1" },
+    "sliderId": { "type": "string" },
     "value": { "type": "string", "default": "" }
   },
   "editorScript": "file:./build/index.js",

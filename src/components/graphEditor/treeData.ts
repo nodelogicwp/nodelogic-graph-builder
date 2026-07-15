@@ -1,5 +1,13 @@
 export const TREE_DATA = [
     {
+        id: 'output-folder',
+        name: 'Outputs',
+        type: 'folder',
+        children: [
+            { id: 'output-node', name: 'Output Node', type: 'output' },
+        ],
+    },
+    {
         id: '1',
         name: 'Node Types',
         type: 'folder',
@@ -86,6 +94,45 @@ export const TREE_DATA = [
             { id: '51', name: 'CSS Color', type: 'css-color' },
             { id: '52', name: 'CSS Text', type: 'css-text' },
             { id: '70', name: 'CSS Join', type: 'css-join' },
+        ],
+    },
+    {
+        id: '76',
+        name: 'Array',
+        type: 'folder',
+        children: [
+            { id: '77', name: 'Array', type: 'array' },
+            { id: '78', name: 'Push', type: 'array-push' },
+            { id: '79', name: 'Pop Out', type: 'array-pop' },
+            { id: '80', name: 'Sort', type: 'array-sort' },
+            { id: '81', name: 'Remove by Index', type: 'array-remove-index' },
+            { id: '82', name: 'Replace by Index', type: 'array-replace-index' },
+        ],
+    },
+    {
+        id: '83',
+        name: 'Image',
+        type: 'folder',
+        children: [
+            { id: '84', name: 'Image From Link', type: 'image-from-link' },
+            { id: '85', name: 'Image From Element', type: 'image-from-element' },
+        ],
+    },
+    {
+        id: '98',
+        name: 'Actions',
+        type: 'folder',
+        children: [
+            { id: '99', name: 'Action Event Node', type: 'action-event' },
+            { id: '100', name: 'Action Block Node', type: 'action-block' },
+            { id: '101', name: 'Set Required', type: 'action-required' },
+            { id: '102', name: 'Set Min', type: 'action-min' },
+            { id: '103', name: 'Set Max', type: 'action-max' },
+            { id: '104', name: 'Set Length', type: 'action-length' },
+            { id: '105', name: 'Set Regex', type: 'action-regex' },
+            { id: '106', name: 'Add Class', type: 'action-add-class' },
+            { id: '107', name: 'Remove Class', type: 'action-remove-class' },
+            { id: '108', name: 'Toggle Class', type: 'action-toggle-class' },
         ],
     },
 ];

@@ -1,18 +1,18 @@
 === NodeLogic Graph Builder ===
 Contributors: nodelogicwp
-Tags: calculator, logic, no-code, graph, blocks
+Tags: calculator, calculator builder, gutenberg, wordpress blocks, no-code, workflow builder, conditional logic, dynamic content, visual builder, reusable templates
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.4.1
+Stable tag: 1.4.3
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Visual no-code graph editor for building dynamic page logic with Gutenberg blocks.
+Visual no-code calculator and workflow builder for Gutenberg blocks with conditional logic, dynamic content, and reusable presets.
 
 == Description ==
 
-NodeLogic Graph Builder lets you build dynamic logic for WordPress pages without writing code.
+NodeLogic Graph Builder lets you build dynamic WordPress page logic, calculators, and reusable workflows without writing code.
 
 You create your setup directly in Gutenberg:
 
@@ -23,11 +23,11 @@ You create your setup directly in Gutenberg:
 
 **Key Features:**
 
-* Visual drag-and-drop node graph editor
+* Visual drag-and-drop node graph editor for calculators and workflows
 * Gutenberg blocks for inputs/outputs and page logic
 * Supports number, string, boolean, color, and basic CSS logic flows in the free version
 * Logic Block for page-level runtime behavior
-* Additional advanced node packs (events, memory, advanced string/math helpers, templates, and custom nodes) are available in a separate Pro extension
+* Starter preset layouts for common calculator-style setups
 * Works locally inside WordPress (no license endpoint required)
 
 **Node Types Included:**
@@ -56,9 +56,9 @@ Open Gutenberg, add the plugin input/output blocks to your page, then add the **
 
 No. This plugin works locally in WordPress and does not require a license activation endpoint.
 
-= Where can I find optional Pro plans? =
+= Are there starter presets? =
 
-Optional Pro plan details are available at https://nodelogicwp.com.
+Yes. The free version includes starter preset layouts built from the plugin's own blocks so you can begin with a ready-made calculator layout and then adjust it to fit your page.
 
 = Where is the JavaScript source code? =
 
@@ -69,6 +69,17 @@ The source is included in the `src/` directory. Build artifacts are in `build/`.
 All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimized for desktop editing.
 
 == Changelog ==
+
+= 1.4.3 =
+* Added Actions system — new Action nodes in the graph editor (Action Event, Action Block, Set Required, Set Min, Set Max, Set Length, Set Regex, Add Class, Remove Class, Toggle Class)
+* Fixed broken Calculation Node — formula evaluation was blocked when any action nodes were connected to an Output Node
+* Fixed element freeze when actions were attached — output payload was incorrectly used as the element value, causing seekbar and other inputs to reset visually
+* Fixed connection line endpoints for Action Nodes — pin positions now correctly align to the center of each pin
+
+= 1.4.2 =
+* Added manual height control for Array List blocks
+* Improved pie and donut percentage rounding with configurable decimal precision
+* Removed internal debug logging from the editor and runtime
 
 = 1.4.1 =
 * Improved calculation flow visualization with clearer numbered markers and curved input mapping arrows
@@ -82,6 +93,12 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 * Added/kept readable source files in `src/` and documented source location
 
 == Upgrade Notice ==
+
+= 1.4.3 =
+This release adds the Actions system to the graph editor and fixes several runtime issues related to action nodes, formula evaluation, and connection line alignment.
+
+= 1.4.2 =
+This release adds Array List height control, refines pie/donut percentages, and removes leftover debug output.
 
 = 1.4.1 =
 This release improves graph editor flow clarity and adds stronger validation for dynamic input chains.

@@ -1,20 +1,28 @@
-﻿import * as React from 'react';
+import * as React from 'react';
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 // @ts-ignore: allow importing CSS in this environment without type declarations
 // import './graphEditor.css';
 import { TREE_DATA } from './graphEditor/treeData';
-import { normalizeSnapshot, resolveInitialSnapshot } from './graphEditor/persistence';
 import {
-    fetchGraphCustomNodes,
-    fetchGraphTemplates,
-    saveGraphTemplate,
-    GraphCustomNode,
-    GraphTemplate,
-} from './graphEditor/templateApi';
+    normalizeSnapshot,
+    normalizeCustomNodeUiState,
+    resolveInitialSnapshot,
+    type CustomNodeUiSharedVariable,
+    type CustomNodeUiState,
+} from './graphEditor/persistence';
 
 interface PinStyle extends React.CSSProperties {
     '--pin-gradient'?: string;
 }
+
+type ArrayItemType = 'number' | 'string' | 'boolean' | 'color' | 'zip';
+type ArrayItemSchemaField = {
+    id: string;
+    label: string;
+    type: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case';
+    sourceNodeId?: string;
+    sourcePin?: string;
+};
 
 interface TreeItem {
     id: string;
@@ -49,6 +57,7 @@ interface TreeItem {
         | 'gradient'
         | 'math'
         | 'custom-node'
+        | 'chart-data'
         | 'unzip'
         | 'memory-read-number'
         | 'memory-read-string'
@@ -66,6 +75,27 @@ interface TreeItem {
         | 'css-width'
         | 'css-height'
         | 'css-font-size'
+        | 'array'
+        | 'array-push'
+        | 'array-pop'
+        | 'array-sort'
+        | 'array-remove-index'
+        | 'array-replace-index'
+        | 'image-from-link'
+        | 'image-from-element'
+        | 'api-request'
+        | 'api-field'
+        | 'api-list-mapper'
+        | 'action-event'
+        | 'action-block'
+        | 'action-required'
+        | 'action-min'
+        | 'action-max'
+        | 'action-length'
+        | 'action-regex'
+        | 'action-add-class'
+        | 'action-remove-class'
+        | 'action-toggle-class'
         | 'event-element'
         | 'event-id'
         | 'event-processor';
@@ -104,6 +134,7 @@ interface CanvasElement {
         | 'color'
         | 'gradient'
         | 'custom-node'
+        | 'chart-data'
         | 'unzip'
         | 'output'
         | 'not'
@@ -131,6 +162,27 @@ interface CanvasElement {
         | 'css-width'
         | 'css-height'
         | 'css-font-size'
+        | 'array'
+        | 'array-push'
+        | 'array-pop'
+        | 'array-sort'
+        | 'array-remove-index'
+        | 'array-replace-index'
+        | 'image-from-link'
+        | 'image-from-element'
+        | 'api-request'
+        | 'api-field'
+        | 'api-list-mapper'
+        | 'action-event'
+        | 'action-block'
+        | 'action-required'
+        | 'action-min'
+        | 'action-max'
+        | 'action-length'
+        | 'action-regex'
+        | 'action-add-class'
+        | 'action-remove-class'
+        | 'action-toggle-class'
         | 'operator'
         | 'math'
         | 'comparison'
@@ -197,6 +249,7 @@ interface CanvasElement {
         }>;
         customTemplateFormula?: string;
         customInputValues?: Array<string | number | boolean>;
+        customSharedVariables?: CustomNodeUiSharedVariable[];
         unzipIndex?: number;
         outputMode?: 'zipped' | 'unzipped';
         eventType?: string;
@@ -224,8 +277,22 @@ interface CanvasElement {
         eventElement?: string;
         eventId?: string;
         eventOption?: string;
+        // For Action nodes
+        actionEventType?: string;
+        actionTargetId?: string;
+        actionTargetManualId?: string;
+        actionRequired?: boolean;
+        actionMin?: number;
+        actionMax?: number;
+        actionMinLength?: number;
+        actionMaxLength?: number;
+        actionRegexPattern?: string;
+        actionClassName?: string;
         // For custom-node: true = single zip output (legacy), false/undefined = individual output pins
         zipOutput?: boolean;
+        // For custom-node/constant carriers: no editable inputs, output carries type only
+        customNodeTypeCarrier?: boolean;
+        constantTypeCarrier?: boolean;
         // For string-split: delimiter and index
         splitDelimiter?: string;
         splitIndex?: number;
@@ -242,8 +309,36 @@ interface CanvasElement {
         cssDisplay?: string;
         // For css-text node: raw CSS text
         cssText?: string;
+        // Array nodes
+        arrayItemType?: ArrayItemType;
+        arrayTypeCarrier?: boolean;
+        chartDataTypeCarrier?: boolean;
+        arrayItemSchema?: ArrayItemSchemaField[];
+        sortMode?: 'number-asc' | 'number-desc' | 'string-asc' | 'string-desc' | 'custom-asc' | 'custom-desc';
+        arraySortField?: string;
+        // Image nodes
+        imageUrl?: string;
+        elementSelector?: string;
+        // API nodes
+        apiUrl?: string;
+        apiMethod?: string;
+        apiFieldPath?: string;
+        apiFieldType?: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case';
+        apiFieldFallback?: string;
+        apiListPath?: string;
+        apiListLabelField?: string;
+        apiListValueField?: string;
+        apiListMatchMode?: 'auto' | 'names' | 'types';
+        apiListItemType?: ArrayItemType | 'case' | 'chart-data';
+        apiListCustomNodeId?: string;
+        apiListFieldMappings?: Array<{
+            fieldId: string;
+            path: string;
+        }>;
+        // Custom object splitter nodes
+        sharedVariables?: CustomNodeUiSharedVariable[];
     };
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action';
     connections?: Connection[];
 }
 
@@ -253,8 +348,8 @@ interface Connection {
     fromOutput: string;
     toId: string;
     toInput: string;
-    operation?: '+' | '-' | '*' | '/' | '**' | '===' | '!==' | '>' | '<' | '>=' | '<=';
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event';
+    operation?: '+' | '-' | '*' | '/' | '**' | '%' | '===' | '!==' | '>' | '<' | '>=' | '<=';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action';
     connectionType?: 'normal' | 'case'; // New type for case connections
 }
 
@@ -264,31 +359,261 @@ interface CalcFlowSegment {
     step: number;
     badgeX: number;
     badgeY: number;
+    ghost?: boolean;
 }
 
 interface DetectedElement {
     id: string;
-    type: 'slider' | 'input-number' | 'input-string' | 'checkbox' | 'radio' | 'select' | 'button-group';
+    type: 'slider' | 'input-number' | 'input-string' | 'checkbox' | 'radio' | 'select' | 'button-group' | 'image' | 'array-list' | 'chart' | 'custom-element';
     name: string;
-    outputs?: { name: string; type: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' }[];
+    outputs?: { name: string; type: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'array' }[];
 }
 
 interface SavedState {
     elements: CanvasElement[];
     connections: Connection[];
     formula: string;
+    customNodeUi?: CustomNodeUiState | null;
     updatedAt?: number;
 }
 
-interface GraphEditorRuntimeConfig {
-    enableTemplates?: boolean;
-    enableCustomNodes?: boolean;
-    treeData?: TreeItem[];
+interface GraphTemplateItem {
+    id: string;
+    name: string;
+    state: SavedState | null;
+    updatedAt: number;
 }
 
 interface GraphEditorRuntimeWindow extends Window {
-    nodelogicGraphBuilderConfig?: GraphEditorRuntimeConfig;
+    nodelogicGraphBuilderBaseTreeData?: TreeItem[];
+    nodelogicGraphBuilderConfig?: {
+        enableTemplates?: boolean;
+        enableCustomNodes?: boolean;
+        treeData?: TreeItem[];
+        extraTreeData?: TreeItem[];
+        customNodes?: Array<Record<string, unknown>>;
+    };
 }
+
+if (typeof window !== 'undefined') {
+    const runtimeWindow = window as GraphEditorRuntimeWindow;
+    if (!Array.isArray(runtimeWindow.nodelogicGraphBuilderBaseTreeData) || runtimeWindow.nodelogicGraphBuilderBaseTreeData.length === 0) {
+        runtimeWindow.nodelogicGraphBuilderBaseTreeData = TREE_DATA as TreeItem[];
+    }
+}
+
+const cloneTreeData = (items: TreeItem[]): TreeItem[] => {
+    try {
+        return JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+    } catch {
+        return Array.isArray(items)
+            ? items.map((item) => ({
+                  ...item,
+                  children: Array.isArray(item.children) ? cloneTreeData(item.children as TreeItem[]) : []
+              }))
+            : [];
+    }
+};
+
+const mergeTreeData = (baseItems: TreeItem[] = [], extraItems: TreeItem[] = []): TreeItem[] => {
+    const base = cloneTreeData(baseItems);
+    const extra = cloneTreeData(extraItems);
+    const extraById = new Map(extra.map((item) => [item.id, item]));
+    const merged = base.map((baseItem) => {
+        const extraItem = extraById.get(baseItem.id);
+        if (!extraItem) {
+            return {
+                ...baseItem,
+                children: Array.isArray(baseItem.children) ? mergeTreeData(baseItem.children as TreeItem[], []) : []
+            };
+        }
+
+        return {
+            ...extraItem,
+            ...baseItem,
+            children: mergeTreeData(
+                Array.isArray(baseItem.children) ? (baseItem.children as TreeItem[]) : [],
+                Array.isArray(extraItem.children) ? (extraItem.children as TreeItem[]) : []
+            )
+        };
+    });
+
+    extra.forEach((extraItem) => {
+        if (!base.some((baseItem) => baseItem.id === extraItem.id)) {
+            merged.push(extraItem);
+        }
+    });
+
+    return merged;
+};
+
+const normalizeDetectedOutputType = (
+    value: unknown,
+    fallback: NonNullable<DetectedElement['outputs']>[number]['type'] = 'string'
+): NonNullable<DetectedElement['outputs']>[number]['type'] => {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    switch (normalized) {
+        case 'number':
+        case 'string':
+        case 'boolean':
+        case 'case':
+        case 'color':
+        case 'zip':
+        case 'array':
+            return normalized;
+        default:
+            return fallback;
+    }
+};
+
+const escapeRegExp = (value: unknown): string => String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const detectElementOutputsFromCustomUi = (customNodeUi: unknown): NonNullable<DetectedElement['outputs']> => {
+    const normalizedUi = normalizeCustomNodeUiState(customNodeUi);
+    return (Array.isArray(normalizedUi?.sharedVariables) ? normalizedUi.sharedVariables : [])
+        .map((item) => ({
+            name: String(item?.label || item?.path || item?.id || '').trim(),
+            type: normalizeDetectedOutputType(item?.type, 'string'),
+        }))
+        .filter((item) => item.name.length > 0);
+};
+
+const detectElementFromBlock = (block: any): DetectedElement | null => {
+    if (!block || typeof block !== 'object') {
+        return null;
+    }
+
+    const blockName = String(block.name || '').trim().toLowerCase();
+    const attrs = block.attributes || {};
+    const readId = (...values: unknown[]): string => {
+        for (const value of values) {
+            const candidate = String(value ?? '').trim();
+            if (candidate.length > 0) {
+                return candidate;
+            }
+        }
+        return '';
+    };
+
+    const outputsForValue = (type: NonNullable<DetectedElement['outputs']>[number]['type']): NonNullable<DetectedElement['outputs']> => [
+        { name: 'value', type },
+    ];
+
+    switch (blockName) {
+        case 'custom/element-seekbar':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'slider',
+                name: String(attrs.title || 'Seekbar'),
+                outputs: outputsForValue('number'),
+            };
+        case 'custom/element-number':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'input-number',
+                name: String(attrs.title || 'Number Input'),
+                outputs: outputsForValue('number'),
+            };
+        case 'custom/element-text':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'input-string',
+                name: String(attrs.title || 'Text Input'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/element-radio':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'radio',
+                name: String(attrs.title || 'Radio Group'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/element-select':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'select',
+                name: String(attrs.title || 'Select'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/element-checkbox':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'checkbox',
+                name: String(attrs.title || 'Checkbox'),
+                outputs: outputsForValue('boolean'),
+            };
+        case 'custom/element-label':
+            return {
+                id: readId(attrs.sliderId),
+                type: 'input-string',
+                name: String(attrs.nodelogicLabel || attrs.title || 'Label'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/button-group':
+            return {
+                id: readId(attrs.groupId),
+                type: 'button-group',
+                name: String(attrs.title || 'Button Group'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/nodelogic-image':
+        case 'nodelogic/image':
+            return {
+                id: readId(attrs.imageId),
+                type: 'image',
+                name: String(attrs.title || 'Image'),
+                outputs: outputsForValue('string'),
+            };
+        case 'custom/nodelogic-array-list':
+        case 'nodelogic/array-list':
+            return {
+                id: readId(attrs.listId),
+                type: 'array-list',
+                name: String(attrs.title || 'Array List'),
+                outputs: outputsForValue('array'),
+            };
+        case 'nodelogic/chart':
+            return {
+                id: readId(attrs.chartId),
+                type: 'chart',
+                name: String(attrs.title || 'Chart'),
+                outputs: outputsForValue('array'),
+            };
+        case 'nodelogic/custom-element': {
+            const customOutputs = detectElementOutputsFromCustomUi(attrs.customNodeUi);
+            return {
+                id: readId(attrs.elementId),
+                type: 'custom-element',
+                name: String(attrs.title || attrs.customNodeName || 'Custom Element'),
+                outputs: customOutputs.length > 0 ? customOutputs : outputsForValue('zip'),
+            };
+        }
+        default:
+            return null;
+    }
+};
+
+const collectDetectedElementsFromBlocks = (blocks: any[]): DetectedElement[] => {
+    const results: DetectedElement[] = [];
+    const seen = new Set<string>();
+
+    const walk = (items: any[]): void => {
+        items.forEach((block) => {
+            const detected = detectElementFromBlock(block);
+            if (detected && detected.id && !seen.has(detected.id)) {
+                seen.add(detected.id);
+                results.push(detected);
+            }
+
+            if (Array.isArray(block?.innerBlocks) && block.innerBlocks.length > 0) {
+                walk(block.innerBlocks);
+            }
+        });
+    };
+
+    walk(Array.isArray(blocks) ? blocks : []);
+    return results;
+};
 
 
 // TreeNode component - stable, outside GraphEditor to prevent re-creation
@@ -303,6 +628,7 @@ const TreeNode: React.FC<{
     const isExpanded = expandedFolders.has(item.id);
     const isDraggable = item.type !== 'folder';
     const isLocked = isDraggable && isLockedNode(item);
+    const hasChildren = Array.isArray(item.children) && item.children.length > 0;
 
     return (
         <div className="tree-node">
@@ -327,26 +653,38 @@ const TreeNode: React.FC<{
                         onLockedNodeClick(item);
                         return;
                     }
-                    if (item.children) {
+                    if (hasChildren) {
                         e.stopPropagation();
                         onToggleFolder(item.id);
                     }
                 }}
             >
-                {item.children && (
+                {hasChildren && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation();
                             onToggleFolder(item.id);
                         }}
-                        style={{ pointerEvents: 'auto' }}
+                        style={{
+                            pointerEvents: 'auto',
+                            fontSize: '32px',
+                            width: '16px',
+                            height: '16px',
+                            minWidth: '16px',
+                            minHeight: '16px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            lineHeight: 1,
+                            padding: 0,
+                        }}
                     >
                         {isExpanded ? '\u25BE' : '\u25B8'}
                     </button>
                 )}
                 {item.type === 'folder' ? '\u{1F4C1}' : '\u{1F527}'} {item.name}{isLocked ? ' (Locked)' : ''}
             </div>
-            {isExpanded && item.children && (
+            {isExpanded && hasChildren && (
                 <div className="tree-children">
                     {item.children.map((child) => (
                         <TreeNode
@@ -372,10 +710,9 @@ interface GraphEditorProps {
     onStateChange?: (state: SavedState) => void;
     onUnsavedChange?: (hasUnsaved: boolean) => void;
     forceInitialState?: boolean;
-    showTemplateTools?: boolean;
-    enableCustomNodes?: boolean;
     templateMode?: boolean;
     customNodeMode?: boolean;
+    showTemplateTools?: boolean;
     editingNodeId?: string;
     liveStateSync?: boolean;
     mainElementType?: 'range' | 'seekbar' | 'number' | 'checkbox' | 'info' | 'template' | 'logic';
@@ -402,7 +739,14 @@ const PIN_TYPE_COLORS: Record<string, string> = {
     zip: '#f59e0b',
     css: '#a855f7',
     'css-unit': '#7c3aed',
+    action: '#a855f7',
+    array: '#10b981',
+    event: '#dc2626',
+    'chart-data': '#f59e0b',
 };
+
+const outputPropertyNames = ['value', 'background', 'color', 'disabled', 'custom-css'];
+const outputInputLabels = ['Value', 'Background', 'Color', 'Disabled', 'CSS'];
 
 const getConnectionLookupKey = (toId: string, toInput: string): string => `${toId}:${toInput}`;
 
@@ -420,6 +764,8 @@ const buildPinStyle = (types: string[]): PinStyle => {
     };
 };
 
+const getPinStyleByTypes = (types: string[]): PinStyle => buildPinStyle(types);
+
 const GraphEditor: React.FC<GraphEditorProps> = ({
     editorId,
     onFormulaChange,
@@ -427,10 +773,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     onStateChange,
     onUnsavedChange,
     forceInitialState = false,
-    showTemplateTools = false,
-    enableCustomNodes = false,
     templateMode = false,
     customNodeMode = false,
+    showTemplateTools = false,
     editingNodeId = '',
     liveStateSync = true,
     mainElementType = 'info',
@@ -441,12 +786,305 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [savedState, setSavedState] = useState<SavedState | null>(null);
     const [autosaveState, setAutosaveState] = useState<SavedState | null>(null);
     const [isStateLoaded, setIsStateLoaded] = useState(false);
+    const [runtimeConfigState, setRuntimeConfigState] = useState<NonNullable<GraphEditorRuntimeWindow['nodelogicGraphBuilderConfig']>>({});
 
     const [unsavedChanges, setUnsavedChanges] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [sidebarSearch, setSidebarSearch] = useState('');
     const [zoom, setZoom] = useState(1);
     const [offsetX, setOffsetX] = useState(0);
     const [offsetY, setOffsetY] = useState(0);
+    useEffect(() => {
+        const syncRuntimeConfig = () => {
+            if (typeof window === 'undefined') {
+                return;
+            }
+            const nextConfig = (window as GraphEditorRuntimeWindow).nodelogicGraphBuilderConfig || {};
+            const proConfig = (window as GraphEditorRuntimeWindow & {
+                calcgraphProEditorConfig?: Record<string, unknown>;
+            }).calcgraphProEditorConfig || {};
+            const nextTreeData = Array.isArray((nextConfig as any).treeData) ? (nextConfig as any).treeData : [];
+            const nextExtraTreeData = Array.isArray((nextConfig as any).extraTreeData) ? (nextConfig as any).extraTreeData : [];
+            const proTreeData = Array.isArray((proConfig as any).treeData) ? (proConfig as any).treeData : [];
+            const proExtraTreeData = Array.isArray((proConfig as any).extraTreeData) ? (proConfig as any).extraTreeData : [];
+            const nextCustomNodes = Array.isArray((nextConfig as any).customNodes) && (nextConfig as any).customNodes.length > 0
+                ? (nextConfig as any).customNodes
+                : (Array.isArray((proConfig as any).customNodes) ? (proConfig as any).customNodes : []);
+            const mergedTreeData = mergeTreeData(nextTreeData, nextExtraTreeData);
+            const mergedProTreeData = mergeTreeData(proTreeData, proExtraTreeData);
+            setRuntimeConfigState({
+                ...nextConfig,
+                ...(mergedTreeData.length > 0 ? { treeData: mergedTreeData } : {}),
+                ...((mergedTreeData.length === 0 && mergedProTreeData.length > 0) ? { treeData: mergedProTreeData } : {}),
+                ...(Array.isArray(nextCustomNodes) ? { customNodes: nextCustomNodes } : {}),
+                ...(typeof (proConfig as any).hasAccess === 'boolean' && (proConfig as any).hasAccess
+                    ? {
+                        enableCustomNodes: Boolean((nextConfig as any).enableCustomNodes || (proConfig as any).enableCustomNodes),
+                        enableTemplates: Boolean((nextConfig as any).enableTemplates || (proConfig as any).enableTemplates),
+                    }
+                    : {}),
+            });
+        };
+
+        syncRuntimeConfig();
+
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        const handleRuntimeConfigUpdate = () => syncRuntimeConfig();
+        window.addEventListener('nodelogic-graph-builder-config-updated', handleRuntimeConfigUpdate as EventListener);
+        return () => {
+            window.removeEventListener('nodelogic-graph-builder-config-updated', handleRuntimeConfigUpdate as EventListener);
+        };
+    }, []);
+
+    useEffect(() => {
+        const canvasEl = canvasRef.current;
+        if (!canvasEl) {
+            return;
+        }
+
+        const onWheel = (event: WheelEvent) => handleWheel(event);
+        canvasEl.addEventListener('wheel', onWheel, { passive: false });
+
+        return () => {
+            canvasEl.removeEventListener('wheel', onWheel);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        const wpAny = (window as any).wp;
+        const dataApi = wpAny?.data;
+        const selectStore = dataApi?.select?.('core/block-editor');
+        if (!selectStore?.getBlocks || !dataApi?.subscribe) {
+            return;
+        }
+
+        const syncDetectedElements = () => {
+            const nextDetectedElements = collectDetectedElementsFromBlocks(selectStore.getBlocks());
+            const nextSignature = nextDetectedElements
+                .map((item) => `${item.id}:${item.type}:${item.name}:${(item.outputs || []).map((output) => `${output.name}:${output.type}`).join(',')}`)
+                .join('|');
+            if (nextSignature !== detectedElementsSignatureRef.current) {
+                detectedElementsSignatureRef.current = nextSignature;
+                setDetectedElements(nextDetectedElements);
+            }
+        };
+
+        syncDetectedElements();
+        const unsubscribe = dataApi.subscribe(syncDetectedElements);
+
+        return () => {
+            if (typeof unsubscribe === 'function') {
+                unsubscribe();
+            }
+        };
+    }, []);
+
+    const runtimeConfig = runtimeConfigState || {};
+    const templateToolsEnabled = Boolean(showTemplateTools && Boolean(runtimeConfig.enableTemplates));
+    const shouldRenderMainBlock = mainElementType === 'logic' || customNodeMode || templateMode;
+    const configuredCustomNodes = React.useMemo(
+        () => (Array.isArray((runtimeConfig as any).customNodes) ? (runtimeConfig as any).customNodes : []),
+        [runtimeConfigState]
+    );
+    const customNodeLibraryEnabled = Boolean(customNodeMode || runtimeConfig.enableCustomNodes || configuredCustomNodes.length > 0);
+    const getCustomNodeRecordById = React.useCallback(
+        (customNodeId?: string) => {
+            const id = String(customNodeId || '').trim();
+            if (!id) return null;
+            return configuredCustomNodes.find((node: any) => String(node?.id || '').trim() === id) || null;
+        },
+        [configuredCustomNodes]
+    );
+    const getCustomNodeUiFieldSchema = React.useCallback((customNodeId?: string): ArrayItemSchemaField[] => {
+        const record = getCustomNodeRecordById(customNodeId);
+        const customUi = normalizeCustomNodeUiState(record?.state?.customNodeUi || record?.customNodeUi || null);
+        const sharedVariables = Array.isArray(customUi?.sharedVariables) ? customUi.sharedVariables : [];
+        return sharedVariables
+            .map((item, index) => {
+                const fieldLabel = String(item?.label || item?.path || item?.id || '').trim();
+                if (!fieldLabel) {
+                    return null;
+                }
+                return normalizeArraySchemaItem(
+                    {
+                        id: String(item?.id || '').trim() || `field-${index + 1}`,
+                        label: fieldLabel,
+                        type: item?.type === 'number' || item?.type === 'string' || item?.type === 'boolean' || item?.type === 'color' || item?.type === 'zip' || item?.type === 'case' ? item.type : 'string',
+                        sourceNodeId: String(item?.sourceNodeId || '').trim() || undefined,
+                        sourcePin: String(item?.path || '').trim() || undefined,
+                    },
+                    index,
+                    fieldLabel
+                );
+            })
+            .filter(Boolean) as ArrayItemSchemaField[];
+    }, [getCustomNodeRecordById]);
+    const getCustomNodeInputSchema = React.useCallback((customNodeId?: string): ArrayItemSchemaField[] => {
+        const record = getCustomNodeRecordById(customNodeId);
+        const inputSchema = Array.isArray(record?.inputSchema) ? record.inputSchema : [];
+        return inputSchema
+            .map((entry: any, index: number) => normalizeArraySchemaItem(
+                entry,
+                index,
+                String(entry?.label || entry?.id || `Input ${index + 1}`)
+            ))
+            .filter(Boolean) as ArrayItemSchemaField[];
+    }, [getCustomNodeRecordById]);
+    const getCustomNodeOutputSchema = React.useCallback((customNodeId?: string): ArrayItemSchemaField[] => {
+        const record = getCustomNodeRecordById(customNodeId);
+        const explicitOutputSchema = Array.isArray(record?.outputSchema) ? record.outputSchema : [];
+        if (explicitOutputSchema.length > 0) {
+            return explicitOutputSchema
+                .map((entry: any, index: number) => normalizeArraySchemaItem(
+                    entry,
+                    index,
+                    String(entry?.label || entry?.id || `Output ${index + 1}`)
+                ))
+                .filter(Boolean) as ArrayItemSchemaField[];
+        }
+        return getCustomNodeUiFieldSchema(customNodeId);
+    }, [getCustomNodeRecordById, getCustomNodeUiFieldSchema]);
+    const getApiListMapperSchema = React.useCallback((element: CanvasElement): ArrayItemSchemaField[] => {
+        const rawItemType = String(element.data?.apiListItemType || 'string').trim().toLowerCase();
+        const itemType = rawItemType === 'case'
+            ? 'zip'
+            : rawItemType;
+
+        if (itemType === 'zip') {
+            const customNodeFields = getCustomNodeInputSchema(element.data?.apiListCustomNodeId);
+            if (customNodeFields.length > 0) {
+                return customNodeFields;
+            }
+            const storedMappings = Array.isArray(element.data?.apiListFieldMappings)
+                ? element.data.apiListFieldMappings
+                : [];
+            return storedMappings
+                .map((mapping, index) => normalizeArraySchemaItem(
+                    {
+                        id: String(mapping?.fieldId || '').trim() || `field-${index + 1}`,
+                        label: String(mapping?.fieldId || '').trim() || `Field ${index + 1}`,
+                        type: 'string',
+                        sourceNodeId: element.id,
+                        sourcePin: String(mapping?.path || '').trim() || undefined,
+                    },
+                    index,
+                    String(mapping?.fieldId || '').trim() || `Field ${index + 1}`
+                ))
+                .filter(Boolean) as ArrayItemSchemaField[];
+        }
+
+        if (itemType === 'chart-data') {
+            const labelField = String(element.data?.apiListLabelField || 'label').trim() || 'label';
+            const valueField = String(element.data?.apiListValueField || 'value').trim() || 'value';
+            return [
+                normalizeArraySchemaItem(
+                    {
+                        id: labelField,
+                        label: labelField,
+                        type: 'string',
+                        sourceNodeId: element.id,
+                        sourcePin: labelField,
+                    },
+                    0,
+                    labelField
+                ),
+                normalizeArraySchemaItem(
+                    {
+                        id: valueField,
+                        label: valueField,
+                        type: 'number',
+                        sourceNodeId: element.id,
+                        sourcePin: valueField,
+                    },
+                    1,
+                    valueField
+                ),
+            ].filter(Boolean) as ArrayItemSchemaField[];
+        }
+
+        const valueField = String(element.data?.apiListValueField || '').trim() || 'value';
+        return [
+            normalizeArraySchemaItem(
+                {
+                    id: valueField,
+                    label: valueField,
+                    type: itemType as ArrayItemType,
+                    sourceNodeId: element.id,
+                    sourcePin: valueField,
+                },
+                0,
+                valueField
+            ),
+        ];
+    }, [getCustomNodeUiFieldSchema, getCustomNodeInputSchema]);
+    const sidebarTreeData = React.useMemo(() => {
+        const runtimeWindow = typeof window !== 'undefined' ? (window as GraphEditorRuntimeWindow) : undefined;
+        const baseTreeData = Array.isArray(runtimeWindow?.nodelogicGraphBuilderBaseTreeData) && runtimeWindow.nodelogicGraphBuilderBaseTreeData.length > 0
+            ? runtimeWindow.nodelogicGraphBuilderBaseTreeData
+            : TREE_DATA;
+        const runtimeTreeData = Array.isArray(runtimeConfigState.treeData) && runtimeConfigState.treeData.length > 0
+            ? runtimeConfigState.treeData
+            : Array.isArray(runtimeConfigState.extraTreeData) && runtimeConfigState.extraTreeData.length > 0
+                ? runtimeConfigState.extraTreeData
+                : [];
+        const mergedTree = mergeTreeData(baseTreeData as TreeItem[], runtimeTreeData as TreeItem[]);
+        const customNodeFolderChildren: TreeItem[] = configuredCustomNodes
+            .map((node: any) => {
+                const nodeId = String(node?.id || '').trim();
+                if (!nodeId) {
+                    return null;
+                }
+                return {
+                    id: `custom-node-${nodeId}`,
+                    name: String(node?.name || nodeId || 'Custom Node').trim() || 'Custom Node',
+                    type: 'custom-node',
+                    customNodeId: nodeId,
+                } as TreeItem;
+            })
+            .filter(Boolean) as TreeItem[];
+        if (!customNodeLibraryEnabled || customNodeFolderChildren.length === 0) {
+            return mergedTree;
+        }
+        return [
+            ...mergedTree,
+            {
+                id: 'custom-node-folder',
+                name: 'Custom Nodes',
+                type: 'folder',
+                children: customNodeFolderChildren,
+            } as TreeItem,
+        ];
+    }, [configuredCustomNodes, customNodeLibraryEnabled, runtimeConfigState]);
+
+    const visibleSidebarTreeData = React.useMemo(() => {
+        const query = sidebarSearch.trim().toLowerCase();
+        if (!query) {
+            return sidebarTreeData;
+        }
+
+        const filterTree = (items: TreeItem[]): TreeItem[] => items
+            .map((item) => {
+                const matchesName = item.name.toLowerCase().includes(query);
+                const filteredChildren = Array.isArray(item.children) ? filterTree(item.children) : [];
+                if (matchesName || filteredChildren.length > 0) {
+                    return {
+                        ...item,
+                        children: filteredChildren,
+                    };
+                }
+                return null;
+            })
+            .filter(Boolean) as TreeItem[];
+
+        return filterTree(sidebarTreeData);
+    }, [sidebarSearch, sidebarTreeData]);
     const [elements, setElements] = useState<CanvasElement[]>([
         {
             id: 'main-block',
@@ -458,14 +1096,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connections: []
         }
     ]);
-    const [selected, setSelected] = useState<string | null>('main-block');
+    const [selected, setSelected] = useState<string | null>(shouldRenderMainBlock ? 'main-block' : null);
     const [draggedItem, setDraggedItem] = useState<TreeItem | null>(null);
     const [isPanning, setIsPanning] = useState(false);
     const [isDraggingFromSidebar, setIsDraggingFromSidebar] = useState(false);
     const [isDraggingElement, setIsDraggingElement] = useState(false);
     const [draggedElementId, setDraggedElementId] = useState<string | null>(null);
-    const [dragStartPos, setDragStartPos] = useState({ x: 0, y: 0 });
-    const [currentMousePos, setCurrentMousePos] = useState({ x: 0, y: 0 });
     const [isClick, setIsClick] = useState(true);
     const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
     const [isConnecting, setIsConnecting] = useState(false);
@@ -478,6 +1114,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         pinIndex: number;
         x: number;
         y: number;
+        reconnectingConnection?: Connection | null;
     } | null>(null);
     const [isDraggingCanvasElement, setIsDraggingCanvasElement] = useState(false);
     const [dragPreview, setDragPreview] = useState<{ x: number; y: number; name: string } | null>(null);
@@ -487,13 +1124,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [offsetDelta, setOffsetDelta] = useState({ x: 0, y: 0 });
 
     const [formula, setFormula] = useState<string>("");
-    const [templates, setTemplates] = useState<GraphTemplate[]>([]);
-    const [customNodes, setCustomNodes] = useState<GraphCustomNode[]>([]);
-    const [templateName, setTemplateName] = useState('');
+    const [customNodeUi, setCustomNodeUi] = useState<CustomNodeUiState | null>(null);
+    const [cssEditorNodeId, setCssEditorNodeId] = useState<string | null>(null);
+    const [templates, setTemplates] = useState<GraphTemplateItem[]>([]);
     const [selectedTemplateId, setSelectedTemplateId] = useState('');
     const [templateInfo, setTemplateInfo] = useState('');
+    const [floatingNotice, setFloatingNotice] = useState('');
     const [isTemplateBusy, setIsTemplateBusy] = useState(false);
-    const [cssEditorNodeId, setCssEditorNodeId] = useState<string | null>(null);
     const [recoverableDraftState, setRecoverableDraftState] = useState<SavedState | null>(null);
     const [pendingDraftRecovery, setPendingDraftRecovery] = useState<SavedState | null>(null);
     const [showDraftRecoveryNotice, setShowDraftRecoveryNotice] = useState(false);
@@ -512,10 +1149,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         startY: number;
         item: TreeItem;
     } | null>(null);
+    const floatingNoticeTimeoutRef = useRef<number | null>(null);
     const lastPanPointRef = useRef({ x: 0, y: 0 });
     const draggedItemRef = useRef<TreeItem | null>(draggedItem);
     const canvasMouseMoveRafRef = useRef<number | null>(null);
     const pendingCanvasMouseRef = useRef<{ x: number; y: number } | null>(null);
+    const detectedElementsSignatureRef = useRef('');
+    const calculationOperatorCountRef = useRef<Record<string, number>>({});
 
     const buttonStyle = {
         width: '100%',
@@ -533,6 +1173,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const isDraggingFromSidebarRef = useRef(false);
     const isDraggingCanvasElementRef = useRef(false);
     const isPanningRef = useRef(false);
+    const apiListMapperScrollLockRef = useRef(false);
     const connectionInProgressRef = useRef<typeof connectionInProgress>(null);
     const elementsRef = useRef(elements);
     const detectedElementsRef = useRef(detectedElements);
@@ -541,10 +1182,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const offsetYRef = useRef(offsetY);
     const connectionsRef = useRef(connections);
     const formulaRef = useRef(formula);
+    const customNodeUiRef = useRef(customNodeUi);
     const hasInitializedRef = useRef(false);
     const onStateChangeRef = useRef<GraphEditorProps['onStateChange']>(onStateChange);
     const isStateLoadedRef = useRef(isStateLoaded);
-    const customNodesRef = useRef(customNodes);
+    const draftRecoveryCheckedRef = useRef(false);
     const previousElementsCountRef = useRef(elements.length);
     // Previous values for delta calculation
     const prevZoomRef = useRef(zoom);
@@ -555,18 +1197,112 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const zoomDeltaRef = useRef(1);
     const offsetDeltaRef = useRef({ x: 0, y: 0 });
 
-    const isMainInputType = INPUT_MAIN_TYPES.has(mainElementType);
-    const runtimeConfig: GraphEditorRuntimeConfig = (() => {
-        if (typeof window === 'undefined') {
-            return {};
+    const handleTreeToggleFolder = (itemId: string) => {
+        setExpandedFolders((prev) => {
+            const next = new Set(prev);
+            if (next.has(itemId)) {
+                next.delete(itemId);
+            } else {
+                next.add(itemId);
+            }
+            return next;
+        });
+    };
+
+    const handleTreeStartDrag = (event: React.MouseEvent, item: TreeItem) => {
+        if (item.type === 'folder') {
+            handleTreeToggleFolder(item.id);
+            return;
         }
-        const candidate = (window as GraphEditorRuntimeWindow).nodelogicGraphBuilderConfig;
-        return candidate && typeof candidate === 'object' ? candidate : {};
-    })();
-    const templateToolsEnabled = Boolean(showTemplateTools && runtimeConfig.enableTemplates);
-    const customNodeLibraryEnabled = Boolean(customNodeMode || enableCustomNodes || runtimeConfig.enableCustomNodes);
-    const outputPropertyNames = ['value', 'background', 'color', 'disabled', 'custom-css'];
-    const outputInputLabels = ['Value', 'Background', 'Color', 'Disabled', 'CSS'];
+
+        setDraggedItem(item);
+        draggedItemRef.current = item;
+        setIsDraggingFromSidebar(true);
+        isDraggingFromSidebarRef.current = true;
+        setDragPreview(null);
+        sidebarDragRef.current = {
+            startX: event.clientX,
+            startY: event.clientY,
+            item,
+        };
+        event.preventDefault();
+        event.stopPropagation();
+    };
+
+    const isNodeLockedForCurrentPlan = (_item: TreeItem) => false;
+
+    const syncConnectionsAndTypes = (nextConnections: Connection[]) => {
+        setConnections(nextConnections);
+        connectionsRef.current = nextConnections;
+        setElements((prev) => updateElementValueTypes(prev, nextConnections));
+    };
+
+    const arePinTypesCompatible = (
+        sourceType: CanvasElement['valueType'] | undefined,
+        targetAcceptedTypes: Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>
+    ): boolean => {
+        if (!sourceType) {
+            return false;
+        }
+
+        if (targetAcceptedTypes.includes(sourceType as any)) {
+            return true;
+        }
+
+        if (sourceType === 'css-unit' && (targetAcceptedTypes.includes('css') || targetAcceptedTypes.includes('string'))) {
+            return true;
+        }
+
+        if (sourceType === 'zip' && (targetAcceptedTypes.includes('number') || targetAcceptedTypes.includes('string') || targetAcceptedTypes.includes('array'))) {
+            return true;
+        }
+
+        if (sourceType === 'action' && targetAcceptedTypes.includes('action')) {
+            return true;
+        }
+
+        if (sourceType === 'case' && (targetAcceptedTypes.includes('number') || targetAcceptedTypes.includes('string') || targetAcceptedTypes.includes('boolean') || targetAcceptedTypes.includes('color'))) {
+            return true;
+        }
+
+        if (sourceType === 'color' && targetAcceptedTypes.includes('string')) {
+            return true;
+        }
+
+        return false;
+    };
+
+    const clearConnectionDrag = (restoreReconnectedConnection: boolean) => {
+        const dragState = connectionInProgressRef.current;
+        if (restoreReconnectedConnection && dragState?.reconnectingConnection) {
+            const restored = dragState.reconnectingConnection;
+            const nextConnections = connectionsRef.current.some((connection) => connection.id === restored.id)
+                ? connectionsRef.current
+                : [...connectionsRef.current, restored];
+            syncConnectionsAndTypes(nextConnections);
+        }
+
+        setConnectionInProgress(null);
+        connectionInProgressRef.current = null;
+    };
+
+    elementsRef.current = elements;
+    detectedElementsRef.current = detectedElements;
+    zoomRef.current = zoom;
+    offsetXRef.current = offsetX;
+    offsetYRef.current = offsetY;
+    connectionsRef.current = connections;
+    formulaRef.current = formula;
+    customNodeUiRef.current = customNodeUi;
+    draggedItemRef.current = draggedItem;
+    isDraggingFromSidebarRef.current = isDraggingFromSidebar;
+    isDraggingCanvasElementRef.current = isDraggingCanvasElement;
+    isPanningRef.current = isPanning;
+    connectionInProgressRef.current = connectionInProgress;
+    dragElementDeltaRef.current = dragElementDelta;
+    zoomDeltaRef.current = zoomDelta;
+    offsetDeltaRef.current = offsetDelta;
+
     const elementsById = React.useMemo(() => {
         const map = new Map<string, CanvasElement>();
         elements.forEach((element) => {
@@ -574,6 +1310,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         });
         return map;
     }, [elements]);
+
     const connectionsByTargetInput = React.useMemo(() => {
         const map = new Map<string, Connection>();
         connections.forEach((connection) => {
@@ -581,10 +1318,127 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         });
         return map;
     }, [connections]);
-    const getPinStyleByTypes = React.useCallback((types: string[]): PinStyle => buildPinStyle(types), []);
-    const configuredTreeData = Array.isArray(runtimeConfig.treeData) && runtimeConfig.treeData.length > 0
-        ? runtimeConfig.treeData
-        : (TREE_DATA as TreeItem[]);
+
+    const normalizeArraySchemaItem = (
+        field: unknown,
+        index: number,
+        fallbackLabel: string
+    ): ArrayItemSchemaField | null => {
+        if (!field || typeof field !== 'object') return null;
+        const item = field as Partial<ArrayItemSchemaField>;
+        const normalizedType = item.type === 'number'
+            || item.type === 'string'
+            || item.type === 'boolean'
+            || item.type === 'color'
+            || item.type === 'zip'
+            || item.type === 'case'
+            ? item.type
+            : 'string';
+        const label = typeof item.label === 'string' && item.label.trim().length > 0
+            ? item.label.trim()
+            : fallbackLabel;
+        const id = typeof item.id === 'string' && item.id.trim().length > 0
+            ? item.id.trim()
+            : label || `field-${index + 1}`;
+        return {
+            id,
+            label,
+            type: normalizedType,
+            sourceNodeId: typeof item.sourceNodeId === 'string' && item.sourceNodeId.trim().length > 0 ? item.sourceNodeId.trim() : undefined,
+            sourcePin: typeof item.sourcePin === 'string' && item.sourcePin.trim().length > 0 ? item.sourcePin.trim() : undefined,
+        };
+    };
+
+    const normalizeChartDataNodeData = (data: CanvasElement['data'] | undefined) => {
+        const chartDataTypeCarrier = !!data?.chartDataTypeCarrier;
+        const chartDataLabel = String(data?.chartDataLabel ?? 'label');
+        const chartDataValueText = String(data?.chartDataValueText ?? data?.chartDataValue ?? '0');
+        const chartDataValueNumber = Number(data?.chartDataValue ?? 0);
+        const chartDataValue = Number.isFinite(chartDataValueNumber) ? chartDataValueNumber : 0;
+
+        return {
+            chartDataTypeCarrier,
+            chartDataLabel,
+            chartDataValueText,
+            chartDataValue,
+        };
+    };
+
+    const getArrayItemSchemaFromElement = (element?: CanvasElement | null): ArrayItemSchemaField[] => {
+        if (!element) return [];
+        if (element.type === 'array' && Array.isArray(element.data?.arrayItemSchema)) {
+            return element.data.arrayItemSchema
+                .map((item, index) => normalizeArraySchemaItem(item, index, `Field ${index + 1}`))
+                .filter(Boolean) as ArrayItemSchemaField[];
+        }
+
+        if (element.type === 'custom-node') {
+            const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                ? element.data.customOutputSchema
+                : getCustomNodeOutputSchema(element.data?.customNodeId);
+            return schema
+                .map((item, index) => normalizeArraySchemaItem(item, index, item?.label || `Output ${index + 1}`))
+                .filter(Boolean) as ArrayItemSchemaField[];
+        }
+
+        if (element.type === 'chart-data') {
+            return [
+                { id: 'label', label: 'label', type: 'string', sourceNodeId: element.id, sourcePin: 'label' },
+                { id: 'value', label: 'value', type: 'number', sourceNodeId: element.id, sourcePin: 'value' },
+            ];
+        }
+
+        if (element.type === 'unzip') {
+            const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                ? element.data.customOutputSchema
+                : getCustomNodeOutputSchema(element.data?.customNodeId);
+            return schema
+                .map((item, index) => normalizeArraySchemaItem(item, index, item?.label || `Output ${index + 1}`))
+                .filter(Boolean) as ArrayItemSchemaField[];
+        }
+
+        if (element.type === 'api-list-mapper') {
+            return getApiListMapperSchema(element);
+        }
+
+        return Array.isArray(element.data?.arrayItemSchema)
+            ? element.data.arrayItemSchema
+                .map((item, index) => normalizeArraySchemaItem(item, index, `Field ${index + 1}`))
+                .filter(Boolean) as ArrayItemSchemaField[]
+            : [];
+    };
+
+    const getArraySortFieldOptions = (element: CanvasElement): ArrayItemSchemaField[] => {
+        const sourceConnection = connectionsByTargetInput.get(getConnectionLookupKey(element.id, 'input0'));
+        if (!sourceConnection) return [];
+        const sourceElement = elementsById.get(sourceConnection.fromId);
+        const schema = getArrayItemSchemaFromElement(sourceElement);
+        if (schema.length > 0) return schema;
+        if (sourceElement?.type === 'array' && sourceElement.data?.arrayItemType === 'zip') {
+            return [
+                { id: 'label', label: 'label', type: 'string', sourceNodeId: sourceElement.id, sourcePin: 'label' },
+                { id: 'value', label: 'value', type: 'zip', sourceNodeId: sourceElement.id, sourcePin: 'value' },
+            ];
+        }
+        return [];
+    };
+
+    const pendingDraftLabel = React.useMemo(() => {
+        const draft = pendingDraftRecovery || recoverableDraftState || autosaveState || savedState;
+        if (!draft?.updatedAt) {
+            return '';
+        }
+        try {
+            return new Date(draft.updatedAt).toLocaleString();
+        } catch {
+            return '';
+        }
+    }, [pendingDraftRecovery, recoverableDraftState, autosaveState, savedState]);
+
+    const getInputIndex = (inputName: string): number => {
+        const match = /input(\d+)/.exec(String(inputName || ''));
+        return match ? Number(match[1]) : -1;
+    };
 
     const getMainValueAcceptedTypes = (): Array<'number' | 'string' | 'boolean'> => {
         if (mainElementType === 'range' || mainElementType === 'seekbar' || mainElementType === 'number') {
@@ -596,7 +1450,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return ['number', 'string', 'boolean'];
     };
 
-    const normalizeGradientColorCount = (rawCount: unknown, fallback: number = GRADIENT_DEFAULT_COLORS.length): number => {
+    const normalizeGradientColorCount = (
+        rawCount: unknown,
+        fallback: number = GRADIENT_DEFAULT_COLORS.length
+    ): number => {
         const parsed = Number(rawCount);
         if (!Number.isFinite(parsed)) {
             return Math.min(GRADIENT_MAX_COLORS, Math.max(GRADIENT_MIN_COLORS, fallback));
@@ -635,9 +1492,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const getGradientColors = (element: CanvasElement): string[] => {
         const colorCount = getGradientColorCount(element);
-
         const rawArray = Array.isArray(element.data?.gradientColors) ? element.data?.gradientColors : [];
-        if (rawArray && rawArray.length > 0) {
+
+        if (rawArray.length > 0) {
             return ensureGradientColors(rawArray, colorCount);
         }
 
@@ -660,25 +1517,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const getAcceptedTypesForPin = (
         element: CanvasElement,
         inputIndex: number
-    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'> => {
-        // Event nodes can only connect to other event nodes
+    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'> => {
         if (element.type === 'event-processor' && inputIndex === 0) {
             return ['event'];
         }
+        if (
+            element.type === 'action-event'
+            || element.type === 'action-block'
+            || element.type === 'action-required'
+            || element.type === 'action-min'
+            || element.type === 'action-max'
+            || element.type === 'action-length'
+            || element.type === 'action-regex'
+            || element.type === 'action-add-class'
+            || element.type === 'action-remove-class'
+            || element.type === 'action-toggle-class'
+        ) {
+            return ['action'];
+        }
+
         if (element.type === 'custom-node') {
             const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
             const schemaPin = schema[inputIndex];
-            if (!schemaPin) {
-                return ['number'];
-            }
+            if (!schemaPin) return ['number'];
             const pinType = schemaPin.type;
-            return (
-                pinType === 'string'
-                || pinType === 'boolean'
-                || pinType === 'color'
-                || pinType === 'zip'
-                || pinType === 'case'
-            ) ? [pinType] : ['number'];
+            return (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'zip' || pinType === 'case')
+                ? [pinType]
+                : ['number'];
         }
 
         if (element.type === 'unzip') {
@@ -687,14 +1552,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
 
         if (element.type === 'output') {
-            const outputAccepted: Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit'>> = [
-                ['number', 'string', 'boolean', 'color', 'zip'], // 0: value
-                ['color', 'string'],                              // 1: background
-                ['color', 'string'],                              // 2: color (text)
-                ['boolean'],                                      // 3: disabled
-                ['css', 'string'],                                // 4: custom CSS
+            const outputAccepted: Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'array' | 'action'>> = [
+                ['number', 'string', 'boolean', 'color', 'zip', 'array'],
+                ['color', 'string'],
+                ['color', 'string'],
+                ['boolean'],
+                ['css', 'string'],
             ];
-            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit'>;
+            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>;
         }
 
         if (element.type === 'main') {
@@ -717,1644 +1582,152 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (inputIndex < colorCount) {
                 return ['color', 'string'];
             }
-            if (inputIndex === colorCount) {
-                return ['number'];
-            }
             return ['number'];
         }
 
-        const acceptedByIndex = acceptedTypes[element.type] || [];
-        const accepted = acceptedByIndex[inputIndex]
-            || acceptedByIndex[acceptedByIndex.length - 1]
-            || ['number'];
-        return accepted as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'>;
-    };
-
-    const acceptedTypes: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event'>>> = {
-        calculation: [
-            ['number'] // one static input
-        ],
-
-        element: [],
-
-        condition: [
-            ['number', 'string', 'boolean'],
-            ['number', 'string', 'boolean']
-        ],
-
-        case: [
-            ['number', 'string', 'boolean'],
-            ['number', 'string', 'boolean', 'color']
-        ],
-
-        'case-range': [
-            ['number'],
-            ['number'],
-            ['number', 'string', 'boolean', 'color', 'zip', 'css']
-        ],
-
-        'case-value': [
-            ['number', 'string', 'boolean'],
-            ['number', 'string', 'boolean', 'color', 'zip', 'css']
-        ],
-
-        switch: [
-            ['number', 'string', 'boolean'],
-            ['case']
-        ],
-
-        node: [
-            ['boolean'],
-            ['number', 'string', 'boolean', 'color', 'zip', 'css'],
-            ['number', 'string', 'boolean', 'color', 'zip', 'css']
-        ],
-
-        regex: [
-            ['string']
-        ],
-
-        concat: [
-            ['string'],
-            ['string']
-        ],
-
-        'cut-a': [
-            ['string'],
-            ['string']
-        ],
-
-        'cut-b': [
-            ['string'],
-            ['number']
-        ],
-
-        'cut-c': [
-            ['string'],
-            ['number'],
-            ['number']
-        ],
-
-        'string-count-chars': [
-            ['string']
-        ],
-
-        'string-count-words': [
-            ['string']
-        ],
-
-        'string-find-start': [
-            ['string'],
-            ['string']
-        ],
-
-        'string-find-end': [
-            ['string'],
-            ['string']
-        ],
-
-        'string-to-number': [
-            ['string']
-        ],
-
-        'number-to-string': [
-            ['number']
-        ],
-
-        'bool-count': [
-            ['boolean']
-        ],
-
-        'memory-write-number': [
-            ['number'],
-            ['boolean', 'event']
-        ],
-
-        'memory-write-string': [
-            ['string'],
-            ['boolean', 'event']
-        ],
-
-        'memory-write-boolean': [
-            ['boolean'],
-            ['boolean', 'event']
-        ],
-
-        'event-processor': [
-            ['event'],
-            ['number', 'string', 'boolean', 'color', 'zip', 'css']
-        ],
-
-        color: [],
-
-        gradient: [
-            ['color', 'string'],
-            ['color', 'string'],
-            ['color', 'string'],
-            ['number']
-        ],
-
-        'custom-node': [
-            ['number']
-        ],
-
-        unzip: [
-            ['zip'],
-            ['number']
-        ],
-
-        math: [
-            ['number']
-        ],
-
-        main: [
-            ['number', 'string', 'boolean'],
-            ['color', 'string'],
-            ['color', 'string'],
-            ['boolean']
-        ],
-
-        not: [['boolean']],
-        and: [['boolean'], ['boolean']],
-        or: [['boolean'], ['boolean']],
-        fallback: [['number', 'string', 'boolean'], ['number', 'string', 'boolean']],
-        clamp: [['number'], ['number'], ['number']],
-        'min-val': [['number'], ['number']],
-        'max-val': [['number'], ['number']],
-        'string-split': [['string']],
-        'string-replace': [['string']],
-        'string-trim': [['string']],
-        'string-upper': [['string']],
-        'string-lower': [['string']],
-        'string-includes': [['string'], ['string']],
-        'number-parse': [['string', 'number']],
-        'number-to-base': [['number']],
-        'multi-concat': [['string', 'number', 'boolean'], ['string', 'number', 'boolean'], ['string', 'number', 'boolean']],
-        'css-unit': [['number']],
-        'css-margin': [['css-unit'], ['css-unit'], ['css-unit'], ['css-unit']],
-        'css-padding': [['css-unit'], ['css-unit'], ['css-unit'], ['css-unit']],
-        'css-width': [['css-unit']],
-        'css-height': [['css-unit']],
-        'css-font-size': [['css-unit']],
-        'css-color': [['color', 'string']],
-        'css-join': [['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean'], ['css', 'string', 'color', 'number', 'boolean']],
-        output: [
-            ['number', 'string', 'boolean', 'color', 'zip'], // 0: value
-            ['color', 'string'],                              // 1: background
-            ['color', 'string'],                              // 2: color (text)
-            ['boolean'],                                      // 3: disabled
-            ['css', 'string'],                                // 4: custom CSS
-        ],
-    };
-
-    const isCaseNodeType = (type: CanvasElement['type']): type is 'case-range' | 'case-value' => {
-        return type === 'case-range' || type === 'case-value';
-    };
-
-    const getInputIndex = (inputName: string): number => {
-        const parsed = parseInt(inputName.replace('input', ''), 10);
-        return Number.isFinite(parsed) ? parsed : -1;
-    };
-
-    const reconcileGradientConnections = (
-        currentConnections: Connection[],
-        elementId: string,
-        previousColorCount: number,
-        nextColorCount: number
-    ): Connection[] => {
-        const oldAngleInput = `input${previousColorCount}`;
-        const newAngleInput = `input${nextColorCount}`;
-        const keepUpToColorIndex = Math.min(previousColorCount, nextColorCount);
-
-        return currentConnections
-            .map((conn) => {
-                if (conn.toId !== elementId) {
-                    return conn;
-                }
-
-                if (conn.toInput === oldAngleInput) {
-                    return { ...conn, toInput: newAngleInput };
-                }
-
-                const inputIndex = getInputIndex(conn.toInput);
-                if (inputIndex >= 0 && inputIndex < keepUpToColorIndex) {
-                    return conn;
-                }
-
-                return null;
-            })
-            .filter((conn): conn is Connection => Boolean(conn));
-    };
-
-    const getLiteralType = (raw: unknown): 'number' | 'string' | 'boolean' => {
-        if (typeof raw === 'boolean') return 'boolean';
-        if (typeof raw === 'number' && Number.isFinite(raw)) return 'number';
-
-        const text = String(raw ?? '').trim();
-        if (text === 'true' || text === 'false') return 'boolean';
-        if (text !== '' && Number.isFinite(Number(text))) return 'number';
-        return 'string';
-    };
-
-    const toFormulaLiteral = (raw: unknown): string => {
-        if (raw === null || raw === undefined) return '0';
-        if (typeof raw === 'boolean') return raw ? 'true' : 'false';
-        if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
-
-        const text = String(raw).trim();
-        if (text === '') return '0';
-        if (text === 'true' || text === 'false') return text;
-        if (Number.isFinite(Number(text))) return String(Number(text));
-        return JSON.stringify(text);
-    };
-
-    const getDefaultNodeData = (type: CanvasElement['type']): CanvasElement['data'] => {
-        switch (type) {
-            case 'number':
-                return { value: 0, valueText: '0' };
-            case 'constant-boolean':
-                return { value: false };
-            case 'constant-string':
-                return { value: '' };
-            case 'calculation':
-                return { operation: '+', inputValues: [0], inputOperations: {} };
-            case 'condition':
-                return { operation: '===' };
-            case 'case-range':
-                return { min: 0, max: 100, out: '0' };
-            case 'case-value':
-                return { caseValue: 0, out: '0' };
-            case 'element-id':
-                return { elementId: '' };
-            case 'memory-read-number':
-                return { variableKey: '', defaultValue: 0, persistVariable: false };
-            case 'memory-read-string':
-                return { variableKey: '', defaultValue: '', persistVariable: false };
-            case 'memory-read-boolean':
-                return { variableKey: '', defaultValue: false, persistVariable: false };
-            case 'memory-write-number':
-            case 'memory-write-string':
-            case 'memory-write-boolean':
-                return { variableKey: '' };
-            case 'event-element':
-                return { eventElement: '', eventType: 'click' };
-            case 'event-id':
-                return { eventId: '', eventType: 'click' };
-            case 'event-processor':
-                return { passOnlyOnEvent: false };
-            case 'fallback':
-                return {};
-            case 'element':
-            case 'regex':
-                return { regexPattern: '' };
-            case 'cut-a':
-            case 'cut-b':
-            case 'cut-c':
-                return { reverse: false };
-            case 'color':
-                return { colorValue: '#2563eb' };
-            case 'gradient':
-                return {
-                    gradientColorCount: GRADIENT_DEFAULT_COLORS.length,
-                    gradientColors: [...GRADIENT_DEFAULT_COLORS],
-                    gradientAngle: 90
-                };
-            case 'custom-node':
-                return {
-                    customNodeId: '',
-                    customNodeName: '',
-                    customInputSchema: [],
-                    customOutputSchema: [],
-                    customTemplateFormula: '',
-                    customInputValues: [],
-                    zipOutput: false,
-                };
-            case 'unzip':
-                return {
-                    unzipIndex: 0,
-                };
-            case 'bool-count':
-                return {};
-            case 'math':
-                return { mathFunction: 'sin' };
-            case 'main':
-                return { formula: '', logicTargets: [''] };
-            case 'output':
-                return { selectedElement: '', outputs: [], executeOnLoad: true, useIdInput: false };
-            case 'not':
-            case 'and':
-            case 'or':
-                return {};
-            case 'clamp':
-                return {};
-            case 'min-val':
-            case 'max-val':
-                return {};
-            case 'string-split':
-                return { splitDelimiter: ',', splitIndex: 0 };
-            case 'string-replace':
-                return { replaceFind: '', replaceWith: '' };
-            case 'string-trim':
-            case 'string-upper':
-            case 'string-lower':
-            case 'string-includes':
-                return {};
-            case 'number-parse':
-                return { parseRadix: 10 };
-            case 'number-to-base':
-                return { parseRadix: 16 };
-            case 'multi-concat':
-                return { inputCount: 3 };
-            case 'css-join':
-                return { inputCount: 3 };
-            case 'css-unit':
-                return { cssUnit: 'px', cssUnitValue: '0' };
-            case 'css-display':
-                return { cssDisplay: 'block' };
-            case 'css-color':
-                return { colorValue: '#2563eb' };
-            case 'css-text':
-                return { cssText: '' };
-            case 'css-margin':
-            case 'css-padding':
-            case 'css-width':
-            case 'css-height':
-            case 'css-font-size':
-                return {};
-            default:
-                return { operation: '+' };
+        if (element.type === 'array') {
+            if (customNodeLibraryEnabled) {
+                return inputIndex === 0
+                    ? ['number', 'string', 'boolean', 'color', 'zip']
+                    : ['zip'];
+            }
+            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
         }
-    };
-
-    const VALID_NODE_TYPES: CanvasElement['type'][] = [
-        'main',
-        'element',
-        'number',
-        'constant-boolean',
-        'constant-string',
-        'calculation',
-        'node',
-        'case-range',
-        'case-value',
-        'switch',
-        'condition',
-        'regex',
-        'concat',
-        'cut-a',
-        'cut-b',
-        'cut-c',
-        'string-count-chars',
-        'string-count-words',
-        'string-find-start',
-        'string-find-end',
-        'string-to-number',
-        'number-to-string',
-        'bool-count',
-        'color',
-        'gradient',
-        'custom-node',
-        'unzip',
-        'output',
-        'not',
-        'and',
-        'or',
-        'clamp',
-        'min-val',
-        'max-val',
-        'string-split',
-        'string-replace',
-        'string-trim',
-        'string-includes',
-        'string-upper',
-        'string-lower',
-        'number-parse',
-        'number-to-base',
-        'multi-concat',
-        'css-unit',
-        'css-margin',
-        'css-padding',
-        'css-width',
-        'css-height',
-        'css-font-size',
-        'css-display',
-        'css-color',
-        'css-text',
-        'css-join',
-        'operator',
-        'math',
-        'comparison',
-        'logic',
-        'constant',
-        'variable',
-        'memory-read-number',
-        'memory-read-string',
-        'memory-read-boolean',
-        'memory-write-number',
-        'memory-write-string',
-        'memory-write-boolean',
-        'element-id',
-        'event-element',
-        'event-id',
-        'event-processor',
-        'fallback',
-    ];
-
-    const normalizeLoadedElements = (source: unknown[]): CanvasElement[] => {
-        const seenIds = new Set<string>();
-        const isValidType = (type: string): type is CanvasElement['type'] =>
-            (VALID_NODE_TYPES as string[]).includes(type);
-
-        return source
-            .map((item, index) => {
-                if (!item || typeof item !== 'object') {
-                    return null;
-                }
-
-                const raw = item as Record<string, unknown>;
-                const typeRaw = String(raw.type || '').trim();
-                const type = isValidType(typeRaw) ? typeRaw : 'calculation';
-
-                let id = String(raw.id || (type === 'main' ? 'main-block' : `element-${index}`)).trim();
-                if (!id) {
-                    id = type === 'main' ? 'main-block' : `element-${index}`;
-                }
-                if (seenIds.has(id)) {
-                    let suffix = 1;
-                    let next = `${id}-${suffix}`;
-                    while (seenIds.has(next)) {
-                        suffix += 1;
-                        next = `${id}-${suffix}`;
-                    }
-                    id = next;
-                }
-                seenIds.add(id);
-
-                const rawData = raw.data && typeof raw.data === 'object'
-                    ? (raw.data as CanvasElement['data'])
-                    : {};
-
-                const xRaw = Number(raw.x);
-                const yRaw = Number(raw.y);
-                const x = Number.isFinite(xRaw) ? xRaw : 120 + (index * 20);
-                const y = Number.isFinite(yRaw) ? yRaw : 120 + (index * 20);
-                const name = type === 'main'
-                    ? (customNodeMode ? 'Zip Output' : 'Html Element')
-                    : String(raw.name || `Node ${index + 1}`);
-
-                const mergedData: CanvasElement['data'] = {
-                    ...getDefaultNodeData(type),
-                    ...rawData,
-                };
-
-                if (type === 'gradient') {
-                    const legacyGradient = [
-                        String((rawData as CanvasElement['data'])?.gradientFrom ?? '').trim(),
-                        String((rawData as CanvasElement['data'])?.gradientMid ?? '').trim(),
-                        String((rawData as CanvasElement['data'])?.gradientTo ?? '').trim(),
-                    ].filter((value) => value.length > 0);
-
-                    const rawColors = Array.isArray((rawData as CanvasElement['data'])?.gradientColors)
-                        ? (rawData as CanvasElement['data'])?.gradientColors
-                        : legacyGradient;
-                    const fallbackCount = Math.max(
-                        legacyGradient.length,
-                        Array.isArray(rawColors) ? rawColors.length : 0,
-                        GRADIENT_DEFAULT_COLORS.length
-                    );
-                    const gradientColorCount = normalizeGradientColorCount(
-                        (rawData as CanvasElement['data'])?.gradientColorCount,
-                        fallbackCount
-                    );
-                    const gradientColors = ensureGradientColors(rawColors, gradientColorCount);
-
-                    mergedData.gradientColorCount = gradientColorCount;
-                    mergedData.gradientColors = gradientColors;
-                    mergedData.gradientFrom = gradientColors[0];
-                    mergedData.gradientMid = gradientColors[1];
-                    mergedData.gradientTo = gradientColors[2];
-                    mergedData.gradientAngle = Number.isFinite(Number((rawData as CanvasElement['data'])?.gradientAngle))
-                        ? Number((rawData as CanvasElement['data'])?.gradientAngle)
-                        : Number(mergedData.gradientAngle ?? 90);
-                }
-
-                const element: CanvasElement = {
-                    id,
-                    name,
-                    type,
-                    x,
-                    y,
-                    data: mergedData,
-                };
-
-                const valueTypeRaw = raw.valueType;
-                if (
-                    valueTypeRaw === 'number'
-                    || valueTypeRaw === 'string'
-                    || valueTypeRaw === 'boolean'
-                    || valueTypeRaw === 'case'
-                    || valueTypeRaw === 'color'
-                    || valueTypeRaw === 'zip'
-                    || valueTypeRaw === 'css'
-                    || valueTypeRaw === 'css-unit'
-                    || valueTypeRaw === 'event'
-                ) {
-                    element.valueType = valueTypeRaw;
-                }
-
-                return element;
-            })
-            .filter((element): element is CanvasElement => Boolean(element));
-    };
-
-    const normalizePinName = (rawValue: unknown, prefix: 'input' | 'output'): string => {
-        const raw = String(rawValue || '').trim();
-        if (!raw) {
-            return `${prefix}0`;
+        if (element.type === 'array-push') {
+            return inputIndex === 0 ? ['array'] : ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
+        }
+        if (element.type === 'array-pop' || element.type === 'array-sort') {
+            return ['array'];
+        }
+        if (element.type === 'array-remove-index') {
+            return inputIndex === 0 ? ['array'] : ['number'];
+        }
+        if (element.type === 'array-replace-index') {
+            if (inputIndex === 0) return ['array'];
+            if (inputIndex === 1) return ['number'];
+            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
+        }
+        if (element.type === 'image-from-link') {
+            return ['string'];
+        }
+        if (element.type === 'image-from-element') {
+            return ['string', 'zip'];
+        }
+        if (element.type === 'api-request') {
+            return ['string'];
+        }
+        if (element.type === 'api-field') {
+            if (inputIndex === 0) return ['zip'];
+            if (inputIndex === 1) return ['string'];
+            return ['string'];
+        }
+        if (element.type === 'api-list-mapper') {
+            return ['zip'];
         }
 
-        const numberMatch = raw.match(/(\d+)/);
-        if (!numberMatch) {
-            return `${prefix}0`;
+        if (element.type === 'chart-data') {
+            return inputIndex === 0 ? ['string'] : ['number'];
         }
 
-        const index = Number.parseInt(numberMatch[1], 10);
-        return `${prefix}${Number.isFinite(index) ? index : 0}`;
-    };
-
-    const normalizeLoadedConnections = (source: unknown[], validElementIds?: Set<string>): Connection[] => {
-        return source
-            .map((item, index) => {
-                if (!item || typeof item !== 'object') {
-                    return null;
-                }
-
-                const raw = item as Record<string, unknown>;
-                const fromRef = raw.from && typeof raw.from === 'object' ? (raw.from as Record<string, unknown>) : null;
-                const toRef = raw.to && typeof raw.to === 'object' ? (raw.to as Record<string, unknown>) : null;
-                const fromId = String(raw.fromId || fromRef?.id || '').trim();
-                const toId = String(raw.toId || toRef?.id || '').trim();
-                const fromOutputRaw = raw.fromOutput || fromRef?.output || fromRef?.pin || '';
-                const toInputRaw = raw.toInput || toRef?.input || toRef?.pin || '';
-
-                if (!fromId || !toId) {
-                    return null;
-                }
-
-                if (validElementIds && (!validElementIds.has(fromId) || !validElementIds.has(toId))) {
-                    return null;
-                }
-
-                const fromOutput = normalizePinName(fromOutputRaw, 'output');
-                const toInput = normalizePinName(toInputRaw, 'input');
-
-                const valueTypeRaw = raw.valueType;
-                const valueType = valueTypeRaw === 'number' || valueTypeRaw === 'string' || valueTypeRaw === 'boolean' || valueTypeRaw === 'case' || valueTypeRaw === 'color' || valueTypeRaw === 'zip' || valueTypeRaw === 'css' || valueTypeRaw === 'css-unit' || valueTypeRaw === 'event'
-                    ? valueTypeRaw
-                    : undefined;
-
-                const connectionTypeRaw = raw.connectionType;
-                const connectionType = connectionTypeRaw === 'case' || connectionTypeRaw === 'normal'
-                    ? connectionTypeRaw
-                    : undefined;
-
-                const connection: Connection = {
-                    id: String(raw.id || `conn-${Date.now()}-${index}`),
-                    fromId,
-                    fromOutput,
-                    toId,
-                    toInput,
-                };
-
-                if (
-                    raw.operation === '+' || raw.operation === '-' || raw.operation === '*'
-                    || raw.operation === '/' || raw.operation === '**' || raw.operation === '%'
-                    || raw.operation === '===' || raw.operation === '!=='
-                    || raw.operation === '>' || raw.operation === '<'
-                    || raw.operation === '>=' || raw.operation === '<='
-                ) {
-                    connection.operation = raw.operation;
-                }
-                if (valueType) {
-                    connection.valueType = valueType;
-                }
-                if (connectionType) {
-                    connection.connectionType = connectionType;
-                }
-
-                return connection;
-            })
-            .filter((connection): connection is Connection => Boolean(connection));
-    };
-
-    const reconcileLoadedConnections = (
-        sourceConnections: Connection[],
-        normalizedElements: CanvasElement[]
-    ): Connection[] => {
-        const validIds = new Set(normalizedElements.map((element) => element.id));
-        const nonMainIds = normalizedElements
-            .map((element) => element.id)
-            .filter((id) => id !== 'main-block');
-
-        const resolveEndpointId = (rawId: string): string => {
-            if (validIds.has(rawId)) {
-                return rawId;
-            }
-
-            const rawNumeric = Number(rawId);
-            if (Number.isFinite(rawNumeric)) {
-                const byNumeric = normalizedElements.find((element) => Number(element.id) === rawNumeric);
-                if (byNumeric) {
-                    return byNumeric.id;
-                }
-            }
-
-            const rawDigits = rawId.replace(/\D/g, '');
-            if (rawDigits) {
-                const byDigits = normalizedElements.find((element) => element.id.replace(/\D/g, '') === rawDigits);
-                if (byDigits) {
-                    return byDigits.id;
-                }
-            }
-
-            return rawId;
+        const acceptedByIndex: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>>> = {
+            calculation: [['number']],
+            element: [],
+            condition: [
+                ['number', 'string', 'boolean'],
+                ['number', 'string', 'boolean'],
+            ],
+            case: [
+                ['number', 'string', 'boolean'],
+                ['number', 'string', 'boolean', 'color'],
+            ],
+            'case-range': [
+                ['number'],
+                ['number'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+            ],
+            'case-value': [
+                ['number', 'string', 'boolean'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+            ],
+            switch: [
+                ['number', 'string', 'boolean'],
+                ['case'],
+            ],
+            node: [
+                ['boolean'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+            ],
+            regex: [['string']],
+            concat: [['string'], ['string']],
+            'cut-a': [['string'], ['string']],
+            'cut-b': [['string'], ['number']],
+            'cut-c': [['string'], ['number'], ['number']],
+            'string-count-chars': [['string']],
+            'string-count-words': [['string']],
+            'string-find-start': [['string'], ['string']],
+            'string-find-end': [['string'], ['string']],
+            'string-to-number': [['string']],
+            'number-to-string': [['number']],
+            'bool-count': [['boolean']],
+            color: [],
+            gradient: [
+                ['color', 'string'],
+                ['color', 'string'],
+                ['color', 'string'],
+                ['number'],
+            ],
+            'string-split': [['string']],
+            'string-replace': [['string']],
+            'string-trim': [['string']],
+            'string-upper': [['string']],
+            'string-lower': [['string']],
+            'string-includes': [['string'], ['string']],
+            'number-parse': [['string']],
+            'number-to-base': [['number']],
+            'multi-concat': [['string']],
+            'css-unit': [['number', 'string']],
+            'css-margin': [['number', 'string'], ['number', 'string'], ['number', 'string'], ['number', 'string']],
+            'css-padding': [['number', 'string'], ['number', 'string'], ['number', 'string'], ['number', 'string']],
+            'css-width': [['number', 'string']],
+            'css-height': [['number', 'string']],
+            'css-font-size': [['number', 'string']],
+            'css-display': [],
+            'css-color': [['color', 'string']],
+            'css-text': [],
+            'css-join': [['css', 'string']],
+            not: [['boolean']],
+            and: [['boolean'], ['boolean']],
+            or: [['boolean'], ['boolean']],
+            fallback: [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array']],
+            clamp: [['number'], ['number'], ['number']],
+            'min-val': [['number'], ['number']],
+            'max-val': [['number'], ['number']],
+            math: [['number']],
+            operator: [['number'], ['number']],
+            comparison: [['number'], ['number']],
+            logic: [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'css'], ['number', 'string', 'boolean', 'color', 'zip', 'css']],
+            'memory-write-number': [['number'], ['boolean']],
+            'memory-write-string': [['string'], ['boolean']],
+            'memory-write-boolean': [['boolean'], ['boolean']],
+            'memory-read-number': [],
+            'memory-read-string': [],
+            'memory-read-boolean': [],
+            'event-element': [],
+            'event-id': [],
+            'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
         };
 
-        return sourceConnections
-            .map((conn) => {
-                let fromId = resolveEndpointId(conn.fromId);
-                let toId = resolveEndpointId(conn.toId);
-
-                // Fallback for simple template/block graphs: single source node -> main-block.
-                if (!validIds.has(fromId) && toId === 'main-block' && nonMainIds.length === 1) {
-                    fromId = nonMainIds[0];
-                }
-                if (!validIds.has(toId) && fromId !== 'main-block' && validIds.has(fromId) && validIds.has('main-block')) {
-                    toId = 'main-block';
-                }
-
-                return {
-                    ...conn,
-                    fromId,
-                    toId,
-                };
-            })
-            .filter((conn) => validIds.has(conn.fromId) && validIds.has(conn.toId));
+        const accepted = acceptedByIndex[element.type] || [];
+        const resolved = accepted[inputIndex] || accepted[accepted.length - 1] || ['number'];
+        return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>;
     };
 
-    const ensureMainBlock = (source: CanvasElement[]): CanvasElement[] => {
-        // In logic mode and template mode, no fixed main-block needed
-        if (mainElementType === 'logic' || templateMode) {
-            return source;
-        }
-        const hasMain = source.some((element) => element.type === 'main');
-        if (hasMain) {
-            return source;
-        }
-
-        return [
-            {
-                id: 'main-block',
-                name: 'Html Element',
-                type: 'main',
-                x: 400,
-                y: 200,
-                data: { formula: '' },
-                connections: [],
-            },
-            ...source,
-        ];
-    };
-
-    const remapElementIdsFromConnections = (
-        elementsInput: CanvasElement[],
-        sourceConnections: Connection[]
-    ): { elements: CanvasElement[]; remapped: boolean; reason: string } => {
-        const endpointIds = Array.from(
-            new Set(
-                sourceConnections
-                    .flatMap((conn) => [conn.fromId, conn.toId])
-                    .filter((id) => id && id !== 'main-block')
-            )
-        );
-        if (endpointIds.length === 0) {
-            return { elements: elementsInput, remapped: false, reason: 'no endpoint ids in connections' };
-        }
-
-        const existingIds = new Set(elementsInput.map((element) => element.id));
-        const matchedEndpointCount = endpointIds.filter((id) => existingIds.has(id)).length;
-        if (matchedEndpointCount > 0) {
-            return { elements: elementsInput, remapped: false, reason: 'at least one endpoint already matched' };
-        }
-
-        const mainCandidates = elementsInput.filter((element) => element.type === 'main');
-        const nonMainElements = elementsInput.filter((element) => element.type !== 'main');
-        const endpointWithoutMain = endpointIds.filter((id) => id !== 'main-block');
-
-        if (nonMainElements.length !== endpointWithoutMain.length) {
-            return {
-                elements: elementsInput,
-                remapped: false,
-                reason: `non-main count mismatch (elements=${nonMainElements.length}, endpointIds=${endpointWithoutMain.length})`,
-            };
-        }
-
-        const sortedEndpointIds = [...endpointWithoutMain].sort((a, b) => Number(a) - Number(b));
-        const remapPairs = new Map<string, string>();
-
-        nonMainElements.forEach((element, index) => {
-            const targetId = sortedEndpointIds[index] || element.id;
-            remapPairs.set(element.id, targetId);
-        });
-
-        const remappedElements = elementsInput.map((element) => {
-            if (element.type === 'main') {
-                const normalizedMainId = mainCandidates.length > 0 ? 'main-block' : element.id;
-                if (element.id === normalizedMainId) {
-                    return element;
-                }
-                return { ...element, id: normalizedMainId };
-            }
-
-            const targetId = remapPairs.get(element.id);
-            if (!targetId || targetId === element.id) {
-                return element;
-            }
-            return { ...element, id: targetId };
-        });
-
-        return {
-            elements: remappedElements,
-            remapped: true,
-            reason: `remapped non-main ids from [${nonMainElements.map((el) => el.id).join(', ')}] to [${sortedEndpointIds.join(', ')}]`,
-        };
-    };
-
-    const applyLoadedState = (
-        snapshot: { elements?: unknown[]; connections?: unknown[]; formula?: string }
-    ) => {
-        const normalizedElements = ensureMainBlock(normalizeLoadedElements(snapshot.elements || []));
-        const sourceConnections = normalizeLoadedConnections(snapshot.connections || []);
-        const remapResult = remapElementIdsFromConnections(normalizedElements, sourceConnections);
-        const reconciledElements = remapResult.elements;
-        const normalizedConnections = reconcileLoadedConnections(sourceConnections, reconciledElements);
-        const normalizedFormula = typeof snapshot.formula === 'string' ? snapshot.formula : '';
-
-        const typedElements = updateElementValueTypes(reconciledElements, normalizedConnections);
-        setElements(typedElements);
-        connectionsRef.current = normalizedConnections;
-        setConnections(normalizedConnections);
-        setFormula(normalizedFormula);
-        formulaRef.current = normalizedFormula;
-
-        return {
-            elements: typedElements,
-            connections: normalizedConnections,
-            formula: normalizedFormula,
-        };
-    };
-
-    const isSnapshotEffectivelyEmpty = (snapshot: SavedState | null): boolean => {
-        if (!snapshot) {
-            return true;
-        }
-
-        const elementsCount = Array.isArray(snapshot.elements) ? snapshot.elements.length : 0;
-        const connectionsCount = Array.isArray(snapshot.connections) ? snapshot.connections.length : 0;
-        const hasFormula = typeof snapshot.formula === 'string' && snapshot.formula.trim() !== '';
-
-        return connectionsCount === 0 && elementsCount <= 1 && !hasFormula;
-    };
-
-    const areSnapshotsEquivalent = (left: SavedState | null, right: SavedState | null): boolean => {
-        if (!left || !right) {
-            return false;
-        }
-        const normalizeForCompare = (snapshot: SavedState): string => JSON.stringify({
-            elements: Array.isArray(snapshot.elements) ? snapshot.elements : [],
-            connections: Array.isArray(snapshot.connections) ? snapshot.connections : [],
-            formula: typeof snapshot.formula === 'string' ? snapshot.formula : '',
-        });
-        return normalizeForCompare(left) === normalizeForCompare(right);
-    };
-
-    const toComparableSnapshot = (snapshot: Partial<SavedState> | null) => ({
-        elements: Array.isArray(snapshot?.elements) ? snapshot.elements : [],
-        connections: Array.isArray(snapshot?.connections) ? snapshot.connections : [],
-        formula: typeof snapshot?.formula === 'string' ? snapshot.formula : '',
-    });
-
-    useEffect(() => {
-        if (hasInitializedRef.current) {
-            return;
-        }
-        hasInitializedRef.current = true;
-
-        const attributeState = normalizeSnapshot(initialState);
-        const saved = normalizeSnapshot(localStorage.getItem(SAVE_KEY));
-        const autosave = normalizeSnapshot(localStorage.getItem(AUTOSAVE_KEY));
-
-        if (autosave) {
-            setAutosaveState(autosave as SavedState);
-        }
-
-        const autosaveCandidate = autosave as SavedState | null;
-        const savedCandidate = saved as SavedState | null;
-        const attributeCandidate = attributeState as SavedState | null;
-        const hasMeaningfulAttribute = Boolean(
-            attributeCandidate
-            && !isSnapshotEffectivelyEmpty(attributeCandidate)
-        );
-
-        let snapshotToLoad: SavedState | null = null;
-        if (forceInitialState) {
-            // Force mode: prefer provided state, then explicit saved state.
-            snapshotToLoad = attributeCandidate || savedCandidate;
-        } else if (hasMeaningfulAttribute) {
-            // Block attribute is canonical when non-empty.
-            snapshotToLoad = attributeCandidate;
-        } else {
-            snapshotToLoad = savedCandidate;
-        }
-
-        if (!snapshotToLoad) {
-            snapshotToLoad = resolveInitialSnapshot(attributeCandidate, savedCandidate, null) as SavedState | null;
-        }
-
-        let synced: SavedState | null = null;
-        if (snapshotToLoad) {
-            const loaded = applyLoadedState({
-                elements: snapshotToLoad.elements || [],
-                connections: snapshotToLoad.connections || [],
-                formula: snapshotToLoad.formula || '',
-            });
-
-            // Keep storage aligned with the loaded canonical state to avoid future conflicts.
-            synced = {
-                elements: loaded.elements,
-                connections: loaded.connections,
-                formula: loaded.formula,
-                updatedAt: typeof snapshotToLoad.updatedAt === 'number' ? snapshotToLoad.updatedAt : Date.now(),
-            };
-            localStorage.setItem(SAVE_KEY, JSON.stringify(synced));
-            setSavedState(synced);
-
-            // Preserve draft autosave when it differs from saved snapshot.
-            if (!autosaveCandidate || areSnapshotsEquivalent(autosaveCandidate, synced)) {
-                localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(synced));
-                setAutosaveState(synced);
-            }
-        }
-
-        const baselineSnapshot = synced || snapshotToLoad || savedCandidate || attributeCandidate;
-        const autosaveUpdatedAt = Number(autosaveCandidate?.updatedAt || 0);
-        const baselineUpdatedAt = Number((baselineSnapshot as SavedState | null)?.updatedAt || 0);
-        const hasReliableTimestamps = autosaveUpdatedAt > 0 && baselineUpdatedAt > 0;
-        const isDraftNewerOrTimestampUnknown = !hasReliableTimestamps || autosaveUpdatedAt > baselineUpdatedAt;
-
-        const hasRecoverableDraft = Boolean(
-            autosaveCandidate
-            && !isSnapshotEffectivelyEmpty(autosaveCandidate)
-            && (
-                !baselineSnapshot
-                || !areSnapshotsEquivalent(autosaveCandidate, baselineSnapshot)
-            )
-            && (
-                !baselineSnapshot
-                || isDraftNewerOrTimestampUnknown
-            )
-        );
-
-        if (hasRecoverableDraft && autosaveCandidate) {
-            setRecoverableDraftState(autosaveCandidate);
-            setPendingDraftRecovery(autosaveCandidate);
-            setShowDraftRecoveryNotice(true);
-        } else {
-            setRecoverableDraftState(null);
-            setPendingDraftRecovery(null);
-            setShowDraftRecoveryNotice(false);
-        }
-
-        setIsStateLoaded(true);
-    }, [SAVE_KEY, AUTOSAVE_KEY, initialState, forceInitialState]);
-
-
-    useEffect(() => {
-        if (!isStateLoaded) return;
-        if (showDraftRecoveryNotice && pendingDraftRecovery) return;
-        const data: SavedState = { elements, connections, formula, updatedAt: Date.now() };
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
-        setAutosaveState(data);
-    }, [elements, connections, formula, AUTOSAVE_KEY, isStateLoaded, showDraftRecoveryNotice, pendingDraftRecovery]);
-
-
-    useEffect(() => {
-        if (!liveStateSync || !isStateLoaded || !onStateChangeRef.current) return;
-
-        // In customNodeMode fire immediately so the parent always has the latest state
-        const delay = customNodeMode ? 0 : 150;
-        const timeoutId = window.setTimeout(() => {
-            onStateChangeRef.current?.({
-                elements,
-                connections,
-                formula,
-                updatedAt: Date.now(),
-            });
-        }, delay);
-
-        return () => window.clearTimeout(timeoutId);
-    }, [elements, connections, formula, isStateLoaded, customNodeMode, liveStateSync]);
-
-    useEffect(() => {
-        return () => {
-            if (!liveStateSync || !onStateChangeRef.current || !isStateLoadedRef.current) return;
-            onStateChangeRef.current({
-                elements: elementsRef.current,
-                connections: connectionsRef.current,
-                formula: formulaRef.current,
-                updatedAt: Date.now(),
-            });
-        };
-    }, [liveStateSync]);
-
-
-
-    useEffect(() => {
-        const currentComparable = toComparableSnapshot({
-            elements,
-            connections,
-            formula
-        });
-
-        if (!savedState) {
-            const hasData = connections.length > 0
-                || elements.length > 1
-                || (typeof formula === 'string' && formula.trim() !== '');
-            setUnsavedChanges(hasData);
-            return;
-        }
-
-        const savedComparable = toComparableSnapshot(savedState);
-        const changed = JSON.stringify(currentComparable) !== JSON.stringify(savedComparable);
-        setUnsavedChanges(changed);
-    }, [elements, connections, formula, savedState]);
-
-    useEffect(() => {
-        onUnsavedChange?.(unsavedChanges);
-    }, [unsavedChanges, onUnsavedChange]);
-
-    const pendingDraftLabel = React.useMemo(() => {
-        const updatedAt = pendingDraftRecovery?.updatedAt;
-        if (!updatedAt || !Number.isFinite(updatedAt)) {
-            return '';
-        }
-        try {
-            return new Date(updatedAt).toLocaleString();
-        } catch (_error) {
-            return '';
-        }
-    }, [pendingDraftRecovery]);
-
-
-    const handleSave = () => {
-        const currentElements = elementsRef.current;
-        const currentConnections = connectionsRef.current;
-        const blockingErrors = getDynamicInputGapErrors(currentElements, currentConnections);
-        if (Object.keys(blockingErrors).length > 0) {
-            const firstError = Object.values(blockingErrors)[0];
-            setTemplateInfo(`Save blocked: ${firstError}`);
-            return;
-        }
-        const { formula: generatedFormula } = generateFormula(currentElements, currentConnections);
-        const nextFormula = generatedFormula || formulaRef.current;
-        const data: SavedState = {
-            elements: currentElements,
-            connections: currentConnections,
-            formula: nextFormula,
-            updatedAt: Date.now()
-        };
-        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
-        connectionsRef.current = currentConnections;
-        setFormula(nextFormula);
-        setSavedState(data);
-        setAutosaveState(data);
-        setUnsavedChanges(false);
-        setRecoverableDraftState(null);
-        setPendingDraftRecovery(null);
-        setShowDraftRecoveryNotice(false);
-        onFormulaChange?.(nextFormula);
-        onStateChange?.(data);
-    };
-
-
-    const handleRestore = () => {
-        const data = savedState || normalizeSnapshot(localStorage.getItem(SAVE_KEY));
-        if (!data) return;
-
-        applyLoadedState({
-            elements: data.elements || [],
-            connections: data.connections || [],
-            formula: data.formula || '',
-        });
-        setSavedState({
-            elements: data.elements || [],
-            connections: data.connections || [],
-            formula: data.formula || '',
-            updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : Date.now(),
-        });
-        setUnsavedChanges(false);
-    };
-
-    const handleRestoreUnsaved = () => {
-        const source = pendingDraftRecovery || recoverableDraftState || autosaveState;
-        if (!source) return;
-
-        applyLoadedState({
-            elements: source.elements || [],
-            connections: source.connections || [],
-            formula: source.formula || '',
-        });
-        setShowDraftRecoveryNotice(false);
-        setPendingDraftRecovery(null);
-        setRecoverableDraftState(null);
-    };
-
-    const handleDismissDraftRecovery = () => {
-        const currentDraft = pendingDraftRecovery || recoverableDraftState || autosaveState;
-        if (!currentDraft) {
-            setShowDraftRecoveryNotice(false);
-            setPendingDraftRecovery(null);
-            return;
-        }
-
-        setShowDraftRecoveryNotice(false);
-        setPendingDraftRecovery(null);
-        setRecoverableDraftState(null);
-
-        if (savedState) {
-            localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(savedState));
-            setAutosaveState(savedState);
-        } else {
-            localStorage.removeItem(AUTOSAVE_KEY);
-            setAutosaveState(null);
-        }
-    };
-
-    // Initialize canvas to be centered
-    React.useEffect(() => {
-        if (canvasRef.current) {
-            const container = canvasRef.current;
-            const containerRect = container.getBoundingClientRect();
-            // Center the view
-            const centerX = containerRect.width / 2;
-            const centerY = containerRect.height / 2;
-
-            setOffsetX(centerX);
-            setOffsetY(centerY);
-        }
-    }, []);
-    
-    // Sync refs with state to avoid closure issues
-    React.useEffect(() => {
-        isDraggingFromSidebarRef.current = isDraggingFromSidebar;
-    }, [isDraggingFromSidebar]);
-
-    React.useEffect(() => {
-        draggedItemRef.current = draggedItem;
-    }, [draggedItem]);
-    
-    React.useEffect(() => {
-        isDraggingCanvasElementRef.current = isDraggingCanvasElement;
-    }, [isDraggingCanvasElement]);
-
-    React.useEffect(() => {
-        isPanningRef.current = isPanning;
-    }, [isPanning]);
-    
-    React.useEffect(() => {
-        connectionInProgressRef.current = connectionInProgress;
-    }, [connectionInProgress]);
-    
-    React.useEffect(() => {
-        elementsRef.current = elements;
-    }, [elements]);
-
-    React.useEffect(() => {
-        detectedElementsRef.current = detectedElements;
-    }, [detectedElements]);
-    
-    React.useEffect(() => {
-        zoomRef.current = zoom;
-    }, [zoom]);
-    
-    React.useEffect(() => {
-        offsetXRef.current = offsetX;
-    }, [offsetX]);
-    
-    React.useEffect(() => {
-        offsetYRef.current = offsetY;
-    }, [offsetY]);
-    
-    React.useEffect(() => {
-        connectionsRef.current = connections;
-    }, [connections]);
-
-    React.useEffect(() => {
-        formulaRef.current = formula;
-    }, [formula]);
-
-    React.useEffect(() => {
-        onStateChangeRef.current = onStateChange;
-    }, [onStateChange]);
-
-    React.useEffect(() => {
-        isStateLoadedRef.current = isStateLoaded;
-    }, [isStateLoaded]);
-
-    React.useEffect(() => {
-        customNodesRef.current = customNodes;
-    }, [customNodes]);
-
-    React.useEffect(() => {
-        setElements((prev) =>
-            prev.map((element) => {
-                if (element.id !== 'main-block' || element.type !== 'main') {
-                    return element;
-                }
-                return {
-                    ...element,
-                    name: customNodeMode ? 'Zip Output' : 'Html Element',
-                };
-            })
-        );
-    }, [customNodeMode]);
-
-    React.useEffect(() => {
-        previousElementsCountRef.current = elements.length;
-    }, []);
-
-    // Keep connections in sync when nodes are deleted (remove orphan edges).
-    // We intentionally skip prune on load/replace to avoid dropping valid connections
-    // during hydration when ids/states may settle across renders.
-    React.useEffect(() => {
-        const previousCount = previousElementsCountRef.current;
-        const currentCount = elements.length;
-        previousElementsCountRef.current = currentCount;
-
-        if (currentCount >= previousCount) {
-            return;
-        }
-
-        setConnections(prev => {
-            const existingIds = new Set(elements.map(el => el.id));
-            const next = prev.filter(conn => existingIds.has(conn.fromId) && existingIds.has(conn.toId));
-            const resolved = next.length === prev.length ? prev : next;
-            connectionsRef.current = resolved;
-            return resolved;
-        });
-    }, [elements]);
-
-    // Track zoom delta
-    React.useEffect(() => {
-        const newZoomDelta = zoom / prevZoomRef.current;
-        setZoomDelta(newZoomDelta);
-        zoomDeltaRef.current = newZoomDelta;
-        prevZoomRef.current = zoom;
-    }, [zoom]);
-
-    // Track offset delta
-    React.useEffect(() => {
-        const deltaX = offsetX - prevOffsetXRef.current;
-        const deltaY = offsetY - prevOffsetYRef.current;
-        setOffsetDelta({ x: deltaX, y: deltaY });
-        offsetDeltaRef.current = { x: deltaX, y: deltaY };
-        prevOffsetXRef.current = offsetX;
-        prevOffsetYRef.current = offsetY;
-    }, [offsetX, offsetY]);
-
-    // Sync dragElementDelta to ref
-    React.useEffect(() => {
-        dragElementDeltaRef.current = dragElementDelta;
-    }, [dragElementDelta]);
-
-    // Real-time pin position updates on every state change
-    // Removed predictive pin position cache; positions are always current geometry.
-    React.useEffect(() => {
-        // No work needed here because getPinPosition always computes from element geometry.
-    }, [elements, connections, zoom, offsetX, offsetY]);
-
-    // Detect DOM elements after component mounts
-    React.useEffect(() => {
-        if (templateMode || customNodeMode) {
-            const templateElementTypes: DetectedElement[] = [
-                {
-                    id: 'template-number',
-                    type: 'input-number',
-                    name: 'Template Number',
-                    outputs: [{ name: 'value', type: 'number' }],
-                },
-                {
-                    id: 'template-boolean',
-                    type: 'checkbox',
-                    name: 'Template Boolean',
-                    outputs: [{ name: 'value', type: 'boolean' }],
-                },
-                {
-                    id: 'template-string',
-                    type: 'select',
-                    name: 'Template String',
-                    outputs: [{ name: 'value', type: 'string' }],
-                },
-            ];
-            setDetectedElements(templateElementTypes);
-            return;
-        }
-
-        const detectElements = () => {
-            const getCanvasDocument = (): Document => {
-                const iframe = document.querySelector('iframe[name="editor-canvas"]');
-                if (iframe instanceof HTMLIFrameElement && iframe.contentDocument) {
-                    return iframe.contentDocument;
-                }
-                return document;
-            };
-            const doc = getCanvasDocument();
-
-            // Exclude elements inside the graph editor UI itself
-            const isInsideEditor = (el: Element): boolean => {
-                return !!(
-                    el.closest('.graph-editor')
-                    || el.closest('.calcgraph-editor-modal')
-                    || el.closest('[data-nodelogic-logic]')
-                    || el.closest('.components-modal__frame')
-                    || el.closest('.block-editor-block-list__layout')?.closest('.components-modal__frame')
-                );
-            };
-
-            const rangeElements: DetectedElement[] = Array.from(doc.querySelectorAll('input[type="range"]'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.sliderId || htmlEl.dataset.nodelogicId || `seekbar-${index}`,
-                        type: 'slider' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || htmlEl.dataset.sliderId || `Seekbar ${index + 1}`,
-                        outputs: [{ name: 'value', type: 'number' as const }]
-                    };
-                });
-
-            const numberElements: DetectedElement[] = Array.from(doc.querySelectorAll('input[type="number"]'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLInputElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.nodelogicId || `number-input-${index}`,
-                        type: 'input-number' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || `Number Input ${index + 1}`,
-                        outputs: [{ name: 'value', type: 'number' as const }]
-                    };
-                });
-
-            const stringElements: DetectedElement[] = Array.from(doc.querySelectorAll('input[type="text"]'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLInputElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.nodelogicId || `string-input-${index}`,
-                        type: 'input-string' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || `Text Input ${index + 1}`,
-                        outputs: [{ name: 'value', type: 'string' as const }]
-                    };
-                });
-
-            const checkboxElements: DetectedElement[] = Array.from(doc.querySelectorAll('input[type="checkbox"]'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLInputElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.nodelogicId || `checkbox-${index}`,
-                        type: 'checkbox' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || `Checkbox ${index + 1}`,
-                        outputs: [{ name: 'checked', type: 'boolean' as const }]
-                    };
-                });
-
-            const radioGroups = new Map<string, DetectedElement>();
-            Array.from(doc.querySelectorAll('input[type="radio"]'))
-                .filter(el => !isInsideEditor(el))
-                .forEach((el, index) => {
-                    const htmlEl = el as HTMLInputElement;
-                    const groupId = (htmlEl.name || htmlEl.id || `radio-${index}`).trim();
-                    if (!groupId || radioGroups.has(groupId)) return;
-                    radioGroups.set(groupId, {
-                        id: groupId,
-                        type: 'radio',
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.name || htmlEl.id || `Radio Group ${index + 1}`,
-                        outputs: [{ name: 'selected', type: 'string' }]
-                    });
-                });
-            const radioElements = Array.from(radioGroups.values());
-
-            const selectElements: DetectedElement[] = Array.from(doc.querySelectorAll('select'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLSelectElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.nodelogicId || `select-${index}`,
-                        type: 'select' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || `Select ${index + 1}`,
-                        outputs: [{ name: 'selected', type: 'string' as const }]
-                    };
-                });
-
-            const buttonGroups: DetectedElement[] = Array.from(doc.querySelectorAll('.btn_container'))
-                .filter(el => !isInsideEditor(el))
-                .map((el, index) => {
-                    const htmlEl = el as HTMLElement;
-                    return {
-                        id: htmlEl.id || htmlEl.dataset.nodelogicId || `button-group-${index}`,
-                        type: 'button-group' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || `Button Group ${index + 1}`,
-                        outputs: [{ name: 'selected', type: 'string' as const }]
-                    };
-                });
-
-            // Detect plugin's own label elements (data-nodelogic-id)
-            const labelElements: DetectedElement[] = Array.from(doc.querySelectorAll('[data-nodelogic-id]'))
-                .filter(el => !isInsideEditor(el) && !el.matches('input, select, textarea'))
-                .map((el) => {
-                    const htmlEl = el as HTMLElement;
-                    const id = htmlEl.dataset.nodelogicId || '';
-                    if (!id) return null;
-                    return {
-                        id,
-                        type: 'input-string' as const,
-                        name: htmlEl.dataset.nodelogicLabel || id,
-                        outputs: [{ name: 'value', type: 'string' as const }]
-                    };
-                })
-                .filter((el): el is DetectedElement => el !== null);
-
-            // Detect any element with class nodelogic-detect (user-added external elements)
-            const externalElements: DetectedElement[] = Array.from(doc.querySelectorAll('.nodelogic-detect'))
-                .filter(el => !isInsideEditor(el))
-                .map((el) => {
-                    const htmlEl = el as HTMLElement;
-                    const id = htmlEl.id || htmlEl.dataset.nodelogicId || '';
-                    if (!id) return null;
-                    const isInput = el.matches('input, select, textarea');
-                    const outputType = el.matches('input[type="number"], input[type="range"]') ? 'number' as const
-                        : el.matches('input[type="checkbox"]') ? 'boolean' as const
-                        : 'string' as const;
-                    return {
-                        id,
-                        type: isInput ? 'input-string' as const : 'input-string' as const,
-                        name: htmlEl.dataset.nodelogicLabel || htmlEl.id || id,
-                        outputs: [{ name: 'value', type: outputType }]
-                    };
-                })
-                .filter((el): el is DetectedElement => el !== null);
-
-            const allDetected = [
-                ...rangeElements,
-                ...numberElements,
-                ...stringElements,
-                ...checkboxElements,
-                ...radioElements,
-                ...selectElements,
-                ...buttonGroups,
-                ...labelElements,
-                ...externalElements,
-            ];
-
-            const uniqueById = new Map<string, DetectedElement>();
-            allDetected.forEach((detected) => {
-                const key = String(detected.id || '').trim();
-                if (!key || uniqueById.has(key)) return;
-                uniqueById.set(key, detected);
-            });
-
-            setDetectedElements(Array.from(uniqueById.values()));
-        };
-
-        // Detect elements immediately
-        detectElements();
-
-        // Also detect elements after a short delay to ensure DOM is ready
-        const timeoutId = setTimeout(detectElements, 100);
-
-        return () => clearTimeout(timeoutId);
-    }, [customNodeMode, templateMode]);
-
-    const treeData: TreeItem[] = React.useMemo(() => {
-        const base = (configuredTreeData as TreeItem[]).map((item) => ({
-            ...item,
-            children: item.children ? [...item.children] : undefined,
-        }));
-
-        if (mainElementType === 'logic' || templateMode) {
-            // In logic mode and template mode, add Output node to the top of the sidebar
-            const outputFolder: TreeItem = {
-                id: 'output-folder',
-                name: 'Outputs',
-                type: 'folder',
-                children: [
-                    { id: 'output-node', name: 'Output Node', type: 'output' },
-                ],
-            };
-            base.unshift(outputFolder);
-        }
-
-        // Build the set of node IDs that would cause recursion if used inside editingNodeId.
-        // A node X causes recursion if X === editingNodeId, or if X transitively uses editingNodeId.
-        const getRecursiveIds = (currentId: string): Set<string> => {
-            const forbidden = new Set<string>([currentId]);
-            if (!currentId) return forbidden;
-
-            // For each custom node, collect which other custom node IDs it uses
-            const usesMap = new Map<string, Set<string>>();
-            customNodes.forEach(node => {
-                const used = new Set<string>();
-                const formula = String(node.state?.mainFormula || node.state?.formula || '');
-                // The formula contains __customIn("nodeId") placeholders for inputs,
-                // but the actual custom-node references are embedded as sub-expressions.
-                // We detect them by scanning the formula for customNodeId references.
-                // More reliably: scan the node's saved elements for custom-node type elements.
-                const elements = Array.isArray(node.state?.elements) ? node.state.elements : [];
-                elements.forEach((el: any) => {
-                    if (el?.type === 'custom-node' && el?.data?.customNodeId) {
-                        used.add(String(el.data.customNodeId));
-                    }
-                });
-                usesMap.set(node.id, used);
-            });
-
-            // BFS: find all nodes that transitively use currentId
-            const queue = [currentId];
-            while (queue.length > 0) {
-                const id = queue.shift()!;
-                usesMap.forEach((uses, nodeId) => {
-                    if (!forbidden.has(nodeId) && uses.has(id)) {
-                        forbidden.add(nodeId);
-                        queue.push(nodeId);
-                    }
-                });
-            }
-
-            return forbidden;
-        };
-
-        // In custom node mode, show other custom nodes but exclude recursive ones
-        const forbiddenIds = customNodeMode ? getRecursiveIds(editingNodeId) : new Set<string>();
-
-        const allowedCustomNodes = customNodes.filter(node => !forbiddenIds.has(node.id));
-
-        if (customNodeLibraryEnabled) {
-            const customFolder: TreeItem = {
-                id: 'custom-node-folder',
-                name: 'Custom Nodes',
-                type: 'folder',
-                children: allowedCustomNodes.map((node) => ({
-                    id: `custom-node-${node.id}`,
-                    name: node.name,
-                    type: 'custom-node',
-                    customNodeId: node.id,
-                })),
-            };
-            base.push(customFolder);
-        }
-
-        return base;
-    }, [configuredTreeData, customNodes, customNodeLibraryEnabled, customNodeMode, editingNodeId, mainElementType, templateMode]);
-
-    const handleDelete = (id: string) => {
-        setConnections(prevConnections => {
-            const nextConnections = prevConnections.filter(conn => conn.fromId !== id && conn.toId !== id);
-            connectionsRef.current = nextConnections;
-            setElements(prevElements => updateElementValueTypes(prevElements.filter((el) => el.id !== id), nextConnections));
-            return nextConnections;
-        });
-        setSelected(prev => (prev === id ? null : prev));
-    };
-
-    const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-        const target = e.target as HTMLElement;
-        
-        // Check if clicking on a canvas element (not on pins)
-        const canvasElement = target.closest('.canvas-element') as HTMLElement;
-        if (canvasElement && !target.closest('.pin') && !target.closest('.operation-input')) {
-            const elementId = canvasElement.getAttribute('data-element-id');
-            if (elementId) {
-                const element = elementsById.get(elementId);
-                if (element) {
-                    elementDragRef.current = {
-                        elementId: elementId,
-                        startX: e.clientX,
-                        startY: e.clientY,
-                        elementX: element.x,
-                        elementY: element.y
-                    };
-                    setSelected(elementId);
-                    setIsDraggingCanvasElement(true);
-                    e.stopPropagation();
-                    return;
-                }
-            }
-        }
-        
-        // Otherwise, start panning
-        if (e.button === 1 || e.button === 0) {
-            e.preventDefault();
-            setIsPanning(true);
-            lastPanPointRef.current = { x: e.clientX, y: e.clientY };
-        }
-    };
-
-    const processCanvasMouseMove = React.useCallback((clientX: number, clientY: number) => {
-        if (connectionInProgressRef.current) {
-            setConnectionInProgress(prev =>
-                prev ? { ...prev, x: clientX, y: clientY } : null
-            );
-        }
-
-        if (isPanningRef.current) {
-            const deltaX = clientX - lastPanPointRef.current.x;
-            const deltaY = clientY - lastPanPointRef.current.y;
-            if (deltaX !== 0 || deltaY !== 0) {
-                setOffsetX(prev => prev + deltaX);
-                setOffsetY(prev => prev + deltaY);
-                lastPanPointRef.current = { x: clientX, y: clientY };
-            }
-        }
-
-        if (isDraggingFromSidebarRef.current && draggedItemRef.current) {
-            const rect = canvasRef.current?.getBoundingClientRect();
-            if (rect) {
-                setDragPreview({
-                    x: clientX - rect.left,
-                    y: clientY - rect.top,
-                    name: draggedItemRef.current.name
-                });
-            }
-        }
-    }, []);
-
-    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-        pendingCanvasMouseRef.current = { x: e.clientX, y: e.clientY };
-        if (canvasMouseMoveRafRef.current !== null) {
-            return;
-        }
-        canvasMouseMoveRafRef.current = window.requestAnimationFrame(() => {
-            canvasMouseMoveRafRef.current = null;
-            const pending = pendingCanvasMouseRef.current;
-            if (!pending) return;
-            processCanvasMouseMove(pending.x, pending.y);
-        });
-    };
-
-    const handleMouseUp = () => {
-        // Only stop panning on canvas mouse up, not drag from sidebar
-        setIsPanning(false);
-    };
-
-    React.useEffect(() => {
-        return () => {
-            if (canvasMouseMoveRafRef.current !== null) {
-                window.cancelAnimationFrame(canvasMouseMoveRafRef.current);
-                canvasMouseMoveRafRef.current = null;
-            }
-        };
-    }, []);
-
-    // Helper function to find item by ID
-    const findItemById = (items: TreeItem[], id: string | null): TreeItem | null => {
-        for (const item of items) {
-            if (item.id === id) return item;
-            if (item.children) {
-                const found = findItemById(item.children, id);
-                if (found) return found;
-            }
-        }
-        return null;
-    };
-
-    const getConnectedInputIndexesForElement = (
-        elementId: string,
-        sourceConnections: Connection[] = connections
-    ): number[] => {
-        return Array.from(new Set(
-            sourceConnections
-                .filter((c) => c.toId === elementId && c.toInput.startsWith('input'))
-                .map((c) => getInputIndex(c.toInput))
-                .filter((i) => Number.isFinite(i) && i >= 0)
-        )).sort((a, b) => a - b);
-    };
-
-    // Get input pins count for element
     const getInputCount = (element: CanvasElement): number => {
-        if (element.type === 'number') return 0; // Number has no input
+        if (element.type === 'number') return 0;
         if (element.type === 'constant-boolean') return 0;
         if (element.type === 'constant-string') return 0;
-        if (element.type === 'element') return 0; // Selectors shown in node header, no input pins
+        if (element.type === 'element') return 0;
         if (element.type === 'element-id') return 0;
         if (element.type === 'memory-read-number') return 0;
         if (element.type === 'memory-read-string') return 0;
@@ -2369,68 +1742,88 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'and') return 2;
         if (element.type === 'or') return 2;
         if (element.type === 'fallback') return 2;
-        if (element.type === 'condition') return 2; // Left, Right
-        if (element.type === 'regex') return 1; // Text input
-        if (element.type === 'concat') return 2; // A + B
-        if (element.type === 'cut-a') return 2; // Source, needle
-        if (element.type === 'cut-b') return 2; // Source, index
-        if (element.type === 'cut-c') return 3; // Source, start, end
-        if (element.type === 'string-count-chars') return 1; // Text
-        if (element.type === 'string-count-words') return 1; // Text
-        if (element.type === 'string-find-start') return 2; // Text, Find
-        if (element.type === 'string-find-end') return 2; // Text, Find
-        if (element.type === 'string-to-number') return 1; // Text
-        if (element.type === 'number-to-string') return 1; // Number
+        if (element.type === 'condition') return 2;
+        if (element.type === 'regex') return 1;
+        if (element.type === 'concat') return 2;
+        if (element.type === 'cut-a') return 2;
+        if (element.type === 'cut-b') return 2;
+        if (element.type === 'cut-c') return 3;
+        if (element.type === 'string-count-chars') return 1;
+        if (element.type === 'string-count-words') return 1;
+        if (element.type === 'string-find-start') return 2;
+        if (element.type === 'string-find-end') return 2;
+        if (element.type === 'string-to-number') return 1;
+        if (element.type === 'number-to-string') return 1;
         if (element.type === 'bool-count') {
-            const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
-            const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
-            return highestConnected >= 0 ? highestConnected + 2 : 1;
+            const connectedInputIndexes = Array.from(new Set(connections
+                .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
+                .map(c => getInputIndex(c.toInput))
+                .filter(i => !Number.isNaN(i))
+            ));
+            const highestConnectedIndex = connectedInputIndexes.length > 0 ? Math.max(...connectedInputIndexes) : -1;
+            return Math.max(1, highestConnectedIndex + 1);
         }
-        if (element.type === 'color') return 0; // Color constant
-        if (element.type === 'gradient') return getGradientColorCount(element) + 1; // Colors + Angle
+        if (element.type === 'color') return 0;
+        if (element.type === 'gradient') return getGradientColorCount(element) + 1;
         if (element.type === 'custom-node') {
-            const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
-            return schema.length; // 0 is valid - no inputs when all are hidden
+            if (element.data?.customNodeTypeCarrier) return 0;
+            const schema = Array.isArray(element.data?.customInputSchema) && element.data.customInputSchema.length > 0
+                ? element.data.customInputSchema
+                : getCustomNodeInputSchema(element.data?.customNodeId);
+            return schema.length;
         }
-        if (element.type === 'unzip') return 1; // Always unzips all - only zip input needed
-        if (element.type === 'math') return 1; // Numeric input
-        if (element.type === 'case-range') return 3; // Min, Max, Out
-        if (element.type === 'case-value') return 2; // Value, Out
+        if (element.type === 'unzip') return 1;
+        if (element.type === 'math') return 1;
+        if (element.type === 'case-range') return 3;
+        if (element.type === 'case-value') return 2;
         if (element.type === 'switch') {
-            const caseIndexes = getConnectedInputIndexesForElement(element.id).filter((index) => index > 0);
-            const highestCase = caseIndexes.length > 0 ? caseIndexes[caseIndexes.length - 1] : 0;
-            // input0 = value, input1..inputN = cases, plus one trailing empty case pin
-            return highestCase > 0 ? highestCase + 2 : 2;
+            const caseConnections = connections.filter(c =>
+                c.toId === element.id
+                && c.toInput.startsWith('input')
+                && getInputIndex(c.toInput) > 0
+            ).length;
+            const connectedCaseIndexes = Array.from(new Set(connections
+                .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) > 0)
+                .map(c => getInputIndex(c.toInput))
+                .filter(i => !Number.isNaN(i))
+            ));
+            const highestConnectedIndex = connectedCaseIndexes.length > 0 ? Math.max(...connectedCaseIndexes) : 0;
+            return Math.max(2, highestConnectedIndex + 1);
         }
-        if (element.type === 'node') return 3; // condition, true, false
+        if (element.type === 'node') return 3;
         if (element.type === 'calculation') {
-            const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
-            const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
-            return highestConnected >= 0 ? highestConnected + 2 : 1;
+            const connectedInputIndexes = Array.from(new Set(connections
+                .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
+                .map(c => getInputIndex(c.toInput))
+                .filter(i => !Number.isNaN(i))
+            ));
+            const highestConnectedIndex = connectedInputIndexes.length > 0 ? Math.max(...connectedInputIndexes) : -1;
+            return Math.max(1, highestConnectedIndex + 2);
         }
         if (element.type === 'main') {
             if (customNodeMode) {
-                const connectedInputIndexes = getConnectedInputIndexesForElement(element.id);
-                const highestConnected = connectedInputIndexes.length > 0 ? connectedInputIndexes[connectedInputIndexes.length - 1] : -1;
-                return highestConnected >= 0 ? highestConnected + 2 : 1;
+                const connectedInputIndexes = Array.from(new Set(connections
+                    .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
+                    .map(c => getInputIndex(c.toInput))
+                    .filter(i => !Number.isNaN(i))
+                ));
+                const highestConnectedIndex = connectedInputIndexes.length > 0 ? Math.max(...connectedInputIndexes) : -1;
+                return Math.max(1, highestConnectedIndex + 1);
             }
             if (mainElementType === 'logic') {
                 const targets = Array.isArray(element.data?.logicTargets) ? element.data.logicTargets : [''];
-                // 4 inputs per slot (value, background, color, disabled) + always one empty slot at end
                 return Math.max(1, targets.length) * 4;
             }
             return isMainInputType ? 4 : 3;
         }
         if (element.type === 'constant' || element.type === 'variable') return 0;
         if (element.type === 'output') return outputPropertyNames.length;
-        if (element.type === 'not') return 1;
-        if (element.type === 'and' || element.type === 'or') return 2;
-        if (element.type === 'clamp') return 3; // value, min, max
+        if (element.type === 'clamp') return 3;
         if (element.type === 'min-val' || element.type === 'max-val') return 2;
         if (element.type === 'string-split') return 1;
         if (element.type === 'string-replace') return 1;
         if (element.type === 'string-trim' || element.type === 'string-upper' || element.type === 'string-lower') return 1;
-        if (element.type === 'string-includes') return 2; // text, needle
+        if (element.type === 'string-includes') return 2;
         if (element.type === 'number-parse') return 1;
         if (element.type === 'number-to-base') return 1;
         if (element.type === 'multi-concat') {
@@ -2439,18 +1832,1888 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'css-join') {
             return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
         }
-        if (element.type === 'css-unit') return 1;   // number input
+        if (element.type === 'css-unit') return 1;
         if (element.type === 'css-margin') return 4;
         if (element.type === 'css-padding') return 4;
         if (element.type === 'css-width') return 1;
         if (element.type === 'css-height') return 1;
         if (element.type === 'css-font-size') return 1;
-        if (element.type === 'css-display') return 0; // no inputs, just a selector
-        if (element.type === 'css-color') return 1;   // color or string
-        if (element.type === 'css-text') return 0;    // no inputs, just text field
+        if (element.type === 'css-display') return 0;
+        if (element.type === 'css-color') return 1;
+        if (element.type === 'css-text') return 0;
+        if (element.type === 'array') return 1;
+        if (element.type === 'array-push') return 2;
+        if (element.type === 'array-pop') return 1;
+        if (element.type === 'array-sort') return 1;
+        if (element.type === 'array-remove-index') return 2;
+        if (element.type === 'array-replace-index') return 3;
+        if (element.type === 'action-event') return 1;
+        if (element.type === 'action-block') return 1;
+        if (element.type === 'action-required') return 1;
+        if (element.type === 'action-min' || element.type === 'action-max') return 1;
+        if (element.type === 'action-length') return 1;
+        if (element.type === 'action-regex') return 1;
+        if (element.type === 'action-add-class' || element.type === 'action-remove-class' || element.type === 'action-toggle-class') return 1;
+        if (element.type === 'image-from-link') return 1;
+        if (element.type === 'image-from-element') return 1;
+        if (element.type === 'api-request') return 1;
+        if (element.type === 'api-field') return 2;
+        if (element.type === 'api-list-mapper') return 1;
+        if (element.type === 'chart-data') return 2;
         if (element.type === 'operator' || element.type === 'comparison' || element.type === 'logic') return 2;
-        // Fallback
         return 1;
+    };
+
+    const getOutputCount = (element: CanvasElement): number => {
+        switch (element.type) {
+            case 'case-range':
+            case 'case-value':
+            case 'switch':
+            case 'node':
+            case 'operator':
+            case 'math':
+            case 'comparison':
+            case 'logic':
+            case 'element':
+            case 'element-id':
+            case 'memory-read-number':
+            case 'memory-read-string':
+            case 'memory-read-boolean':
+            case 'memory-write-number':
+            case 'memory-write-string':
+            case 'memory-write-boolean':
+            case 'event-element':
+            case 'event-id':
+            case 'event-processor':
+            case 'number':
+            case 'constant-boolean':
+            case 'constant-string':
+            case 'regex':
+            case 'concat':
+            case 'cut-a':
+            case 'cut-b':
+            case 'cut-c':
+            case 'string-count-chars':
+            case 'string-count-words':
+            case 'string-find-start':
+            case 'string-find-end':
+            case 'string-to-number':
+            case 'number-to-string':
+            case 'bool-count':
+            case 'color':
+            case 'gradient':
+            case 'not':
+            case 'and':
+            case 'or':
+            case 'fallback':
+            case 'clamp':
+            case 'min-val':
+            case 'max-val':
+            case 'string-split':
+            case 'string-replace':
+            case 'string-trim':
+            case 'string-upper':
+            case 'string-lower':
+            case 'string-includes':
+            case 'number-parse':
+            case 'number-to-base':
+            case 'multi-concat':
+            case 'css-unit':
+            case 'css-margin':
+            case 'css-padding':
+            case 'css-width':
+            case 'css-height':
+            case 'css-font-size':
+            case 'css-display':
+            case 'css-color':
+            case 'css-text':
+            case 'css-join':
+                return 1;
+            case 'custom-node': {
+                if (!element.data?.zipOutput && !element.data?.customNodeTypeCarrier) {
+                    const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                        ? element.data.customOutputSchema
+                        : getCustomNodeOutputSchema(element.data?.customNodeId);
+                    return Math.max(1, schema.length);
+                }
+                return 1;
+            }
+            case 'unzip': {
+                const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                    ? element.data.customOutputSchema
+                    : getCustomNodeOutputSchema(element.data?.customNodeId);
+                return Math.max(1, schema.length);
+            }
+            case 'array':
+                return 1;
+            case 'array-push':
+            case 'array-pop':
+            case 'array-sort':
+            case 'array-remove-index':
+            case 'array-replace-index':
+            case 'image-from-link':
+            case 'image-from-element':
+            case 'api-request':
+            case 'api-field':
+            case 'api-list-mapper':
+            case 'chart-data':
+                return 1;
+            case 'action-event':
+            case 'action-block':
+                return 1;
+            case 'action-required':
+            case 'action-min':
+            case 'action-max':
+            case 'action-length':
+            case 'action-regex':
+            case 'action-add-class':
+            case 'action-remove-class':
+            case 'action-toggle-class':
+                return 0;
+            case 'main':
+                return 0;
+            case 'output':
+                return 1;
+            default:
+                return 1;
+        }
+    };
+
+    const getOutputPinType = (element: CanvasElement, index: number): CanvasElement['valueType'] => {
+        if (element.type === 'unzip' || (element.type === 'custom-node' && !element.data?.zipOutput && !element.data?.customNodeTypeCarrier)) {
+            const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                ? element.data.customOutputSchema
+                : getCustomNodeOutputSchema(element.data?.customNodeId);
+            const pinType = schema[index]?.type;
+            if (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'case') {
+                return pinType;
+            }
+            return 'number';
+        }
+        if (element.type === 'custom-node' && element.data?.customNodeTypeCarrier) return 'zip';
+        if (element.type === 'array') return 'array';
+        if (element.type === 'array-push' || element.type === 'array-pop' || element.type === 'array-sort' || element.type === 'array-remove-index' || element.type === 'array-replace-index') return 'array';
+        if (element.type === 'image-from-link' || element.type === 'image-from-element') return 'string';
+        if (element.type === 'api-request') return 'zip';
+        if (element.type === 'api-field') {
+            const apiFieldType = element.data?.apiFieldType;
+            if (apiFieldType === 'string' || apiFieldType === 'boolean' || apiFieldType === 'color' || apiFieldType === 'case' || apiFieldType === 'zip' || apiFieldType === 'number') {
+                return apiFieldType;
+            }
+            return 'string';
+        }
+        if (element.type === 'api-list-mapper') return 'array';
+        if (element.type === 'chart-data') return 'zip';
+        if (element.type === 'action-event'
+            || element.type === 'action-block'
+            || element.type === 'action-required'
+            || element.type === 'action-min'
+            || element.type === 'action-max'
+            || element.type === 'action-length'
+            || element.type === 'action-regex'
+            || element.type === 'action-add-class'
+            || element.type === 'action-remove-class'
+            || element.type === 'action-toggle-class') return 'action';
+        if (element.type === 'output') return 'action';
+        return element.valueType || 'number';
+    };
+
+    const getNodeHeight = (element: CanvasElement): number => {
+        if (element.type === 'api-request') return 128;
+        if (element.type === 'api-field') return 168;
+        if (element.type === 'api-list-mapper') return 208;
+        if (element.type === 'action-event') return 178;
+        if (element.type === 'action-length') return 160;
+        if (element.type === 'action-block') return 110;
+        if (element.type === 'action-required'
+            || element.type === 'action-min'
+            || element.type === 'action-max'
+            || element.type === 'action-regex'
+            || element.type === 'action-add-class'
+            || element.type === 'action-remove-class'
+            || element.type === 'action-toggle-class') return 136;
+        const inputCount = getInputCount(element);
+        const outputCount = getOutputCount(element);
+        const maxRows = Math.max(inputCount, outputCount);
+        return 24 + 16 + (maxRows * 32) + 8;
+    };
+
+    const getNodeWidth = (element: CanvasElement): number => {
+        const explicitWidth = Number(element.data?.nodeWidth);
+        if (Number.isFinite(explicitWidth)) {
+            return Math.max(120, Math.min(800, explicitWidth));
+        }
+        if (element.type === 'css-text') return 240;
+        if (element.type === 'array' || element.type.startsWith('array-')) return 220;
+        if (element.type === 'chart-data' && element.data?.chartDataTypeCarrier) return 160;
+        if (element.type === 'action-event') return 280;
+        if (element.type === 'action-length') return 240;
+        if (element.type === 'action-block') return 220;
+        if (element.type === 'action-required'
+            || element.type === 'action-min'
+            || element.type === 'action-max'
+            || element.type === 'action-regex'
+            || element.type === 'action-add-class'
+            || element.type === 'action-remove-class'
+            || element.type === 'action-toggle-class') return 220;
+        if (element.type === 'image-from-link' || element.type === 'image-from-element') return 220;
+        return 200;
+    };
+
+    const calculatePinPosition = (
+        element: CanvasElement,
+        type: 'input' | 'output',
+        index: number
+    ): { x: number; y: number } => {
+        const currentZoom = zoomRef.current * zoomDeltaRef.current;
+        const currentOffsetX = offsetXRef.current + offsetDeltaRef.current.x;
+        const currentOffsetY = offsetYRef.current + offsetDeltaRef.current.y;
+        const nodeX = (element.x * currentZoom) + currentOffsetX;
+        const nodeY = (element.y * currentZoom) + currentOffsetY;
+        const nodeWidth = getNodeWidth(element) * currentZoom;
+        const pinGap = 1 * currentZoom;
+
+        // rowHeight: actual rendered height of the input/output row
+        // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
+        // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
+        // All other rows: CSS min-height 34px (content 32px + flex alignment)
+        const isTallActionInput = type === 'input' && index === 0 && (
+            element.type === 'action-event' || element.type === 'action-length'
+        );
+        const rowHeight = isTallActionInput
+            ? (element.type === 'action-event' ? ((32 * 3) + (4 * 2)) : ((32 * 2) + 4))
+            : 34;
+
+        // Y = border(2) + padding(12) + rowHeight/2 + index * (rowHeight + gap(8))
+        const rowGap = 8;
+        const topOffset = 2 + 12; // border-top + padding-top
+        const rowY = nodeY + ((topOffset + (rowHeight / 2) + (index * (rowHeight + rowGap))) * currentZoom);
+
+        if (type === 'input') {
+            return { x: nodeX - pinGap, y: rowY };
+        }
+
+        return { x: nodeX + nodeWidth + pinGap, y: rowY };
+    };
+
+    const calculatePinPositionWithDelta = (
+        element: CanvasElement,
+        type: 'input' | 'output',
+        index: number,
+        applyDelta: boolean = true
+    ): { x: number; y: number } => {
+        let elementX = element.x;
+        let elementY = element.y;
+
+        if (applyDelta && dragElementDeltaRef.current && dragElementDeltaRef.current.elementId === element.id) {
+            elementX += dragElementDeltaRef.current.deltaX;
+            elementY += dragElementDeltaRef.current.deltaY;
+        }
+
+        const currentZoom = zoomRef.current * zoomDeltaRef.current;
+        const currentOffsetX = offsetXRef.current + offsetDeltaRef.current.x;
+        const currentOffsetY = offsetYRef.current + offsetDeltaRef.current.y;
+
+        const nodeX = (elementX * currentZoom) + currentOffsetX;
+        const nodeY = (elementY * currentZoom) + currentOffsetY;
+        const nodeWidth = getNodeWidth(element) * currentZoom;
+        const pinGap = 1 * currentZoom;
+
+        // rowHeight: actual rendered height of the input/output row
+        // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
+        // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
+        // All other rows: CSS min-height 34px (content 32px + flex alignment)
+        const isTallActionInput = type === 'input' && index === 0 && (
+            element.type === 'action-event' || element.type === 'action-length'
+        );
+        const rowHeight = isTallActionInput
+            ? (element.type === 'action-event' ? ((32 * 3) + (4 * 2)) : ((32 * 2) + 4))
+            : 34;
+
+        // Y = border(2) + padding(12) + rowHeight/2 + index * (rowHeight + gap(8))
+        const rowGap = 8;
+        const topOffset = 2 + 12; // border-top + padding-top
+        const rowY = nodeY + ((topOffset + (rowHeight / 2) + (index * (rowHeight + rowGap))) * currentZoom);
+
+        if (type === 'input') {
+            return { x: nodeX - pinGap, y: rowY };
+        }
+
+        return { x: nodeX + nodeWidth + pinGap, y: rowY };
+    };
+
+    const getPinPosition = (
+        element: CanvasElement,
+        type: 'input' | 'output',
+        index: number
+    ): { x: number; y: number } => calculatePinPositionWithDelta(element, type, index, true);
+
+    const getBezierPath = (
+        fromPos: { x: number; y: number },
+        toPos: { x: number; y: number }
+    ): string => {
+        const distance = Math.abs(fromPos.x - toPos.x);
+        const controlPointDistance = Math.min(distance / 2, 100);
+        return `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + controlPointDistance} ${fromPos.y}, ${toPos.x - controlPointDistance} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+    };
+
+    const renderInputControl = (element: CanvasElement, index: number): React.ReactNode => {
+        switch (element.type) {
+            case 'output':
+                if (index === 0) {
+                    return (
+                        <select
+                            className="input-control output-target-control"
+                            value={element.data?.selectedElement || ''}
+                            onChange={(e) => {
+                                const selectedElementId = e.target.value;
+                                const selectedElement = detectedElements.find((el) => el.id === selectedElementId);
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? {
+                                                    ...elem,
+                                                    data: {
+                                                        ...elem.data,
+                                                        selectedElement: selectedElementId,
+                                                        outputs: selectedElement?.outputs || [],
+                                                    },
+                                                    name: selectedElementId || 'Output',
+                                                }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <option value="">-- Target Element --</option>
+                            {detectedElements.map((detectedEl) => (
+                                <option key={detectedEl.id} value={detectedEl.id}>
+                                    {detectedEl.name} ({detectedEl.type})
+                                </option>
+                            ))}
+                        </select>
+                    );
+                }
+                return null;
+            case 'action-event':
+                if (index !== 0) return null;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                        <select
+                            className="input-control"
+                            value={String(element.data?.actionEventType || 'change')}
+                            onChange={(e) => {
+                                const actionEventType = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionEventType } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                        >
+                            <option value="change">change</option>
+                            <option value="input">input</option>
+                            <option value="click">click</option>
+                            <option value="focus">focus</option>
+                            <option value="blur">blur</option>
+                            <option value="keydown">keydown</option>
+                            <option value="keyup">keyup</option>
+                        </select>
+                        <select
+                            className="input-control"
+                            value={String(element.data?.actionTargetId || '')}
+                            onChange={(e) => {
+                                const actionTargetId = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionTargetId } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                        >
+                            <option value="">-- Element ID --</option>
+                            {detectedElements.map((detectedEl) => (
+                                <option key={detectedEl.id} value={detectedEl.id}>
+                                    {detectedEl.name} ({detectedEl.id})
+                                </option>
+                            ))}
+                        </select>
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.actionTargetManualId || '')}
+                            placeholder="Manual element ID"
+                            onChange={(e) => {
+                                const actionTargetManualId = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionTargetManualId } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                        />
+                    </div>
+                );
+            case 'action-required':
+                if (index !== 0) return null;
+                return (
+                    <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
+                        <input
+                            type="checkbox"
+                            checked={element.data?.actionRequired !== false}
+                            onChange={(e) => {
+                                const actionRequired = e.target.checked;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionRequired } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        Required
+                    </label>
+                );
+            case 'action-min':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="number"
+                        className="input-control"
+                        value={String(element.data?.actionMin ?? 0)}
+                        onChange={(e) => {
+                            const actionMin = parseFloat(e.target.value) || 0;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, actionMin } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Min"
+                    />
+                );
+            case 'action-max':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="number"
+                        className="input-control"
+                        value={String(element.data?.actionMax ?? 100)}
+                        onChange={(e) => {
+                            const actionMax = parseFloat(e.target.value) || 0;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, actionMax } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Max"
+                    />
+                );
+            case 'action-length':
+                if (index !== 0) return null;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={String(element.data?.actionMinLength ?? 0)}
+                            placeholder="Min length"
+                            onChange={(e) => {
+                                const actionMinLength = parseFloat(e.target.value) || 0;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionMinLength } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                        />
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={String(element.data?.actionMaxLength ?? 0)}
+                            placeholder="Max length"
+                            onChange={(e) => {
+                                const actionMaxLength = parseFloat(e.target.value) || 0;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, actionMaxLength } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                        />
+                    </div>
+                );
+            case 'action-regex':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(element.data?.actionRegexPattern || '')}
+                        placeholder="Pattern"
+                        onChange={(e) => {
+                            const actionRegexPattern = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, actionRegexPattern } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                );
+            case 'action-add-class':
+            case 'action-remove-class':
+            case 'action-toggle-class':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(element.data?.actionClassName || '')}
+                        placeholder="CSS class"
+                        onChange={(e) => {
+                            const actionClassName = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, actionClassName } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                );
+            case 'action-block':
+                if (index !== 0) return null;
+                return (
+                    <div className="input-control" style={{ padding: '10px', cursor: 'default' }}>
+                        Action chain extender
+                    </div>
+                );
+            case 'calculation': {
+                const connected = connections.some((connection) => connection.toId === element.id && connection.toInput === `input${index}`);
+                const inputValue = element.data?.inputValues?.[index] ?? 0;
+                if (!connected) {
+                    return (
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={String(inputValue)}
+                            onChange={(e) => {
+                                const value = parseFloat(e.target.value) || 0;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) => {
+                                            if (elem.id !== element.id) return elem;
+                                            const currentInputs = [...(elem.data?.inputValues || [])];
+                                            currentInputs[index] = value;
+                                            return { ...elem, data: { ...elem.data, inputValues: currentInputs } };
+                                        })
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder={`Input ${index + 1}`}
+                        />
+                    );
+                }
+                return null;
+            }
+            case 'case-range': {
+                const hasMinConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input0');
+                const hasMaxConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input1');
+                const hasOutConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input2');
+                if (index === 0) {
+                    return !hasMinConnection ? (
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={element.data?.min || 0}
+                            onChange={(e) => {
+                                const min = parseFloat(e.target.value) || 0;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, min } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Min"
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                if (index === 1) {
+                    return !hasMaxConnection ? (
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={element.data?.max || 100}
+                            onChange={(e) => {
+                                const max = parseFloat(e.target.value) || 100;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, max } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Max"
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                if (index === 2) {
+                    return !hasOutConnection ? (
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={element.data?.out || ''}
+                            onChange={(e) => {
+                                const out = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, out } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Out value"
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                return null;
+            }
+            case 'case-value': {
+                const hasValueConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input0');
+                const hasOutConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input1');
+                if (index === 0) {
+                    return !hasValueConnection ? (
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.caseValue ?? '')}
+                            onChange={(e) => {
+                                const caseValue = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, caseValue } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Value"
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                if (index === 1) {
+                    return !hasOutConnection ? (
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={element.data?.out || ''}
+                            onChange={(e) => {
+                                const out = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, out } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Out value"
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                return null;
+            }
+            case 'regex':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={element.data?.regexPattern || ''}
+                        onChange={(e) => {
+                            const regexPattern = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, regexPattern } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="/regex/i"
+                    />
+                );
+            case 'cut-a':
+            case 'cut-b':
+            case 'cut-c':
+                if (index !== 0) return null;
+                return (
+                    <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
+                        <input
+                            type="checkbox"
+                            checked={Boolean(element.data?.reverse)}
+                            onChange={(e) => {
+                                const reverse = e.target.checked;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, reverse } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        Reverse
+                    </label>
+                );
+            case 'gradient': {
+                const colorCount = getGradientColorCount(element);
+                const angleIndex = colorCount;
+                if (index < colorCount) {
+                    const hasColorConnection = connections.some((connection) => connection.toId === element.id && connection.toInput === `input${index}`);
+                    const colorValue = getGradientColorByIndex(element, index);
+                    return !hasColorConnection ? (
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={colorValue}
+                            onChange={(e) => {
+                                const nextValue = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) => {
+                                            if (elem.id !== element.id) return elem;
+                                            const nextColors = ensureGradientColors(elem.data?.gradientColors, getGradientColorCount(elem));
+                                            nextColors[index] = nextValue;
+                                            return {
+                                                ...elem,
+                                                data: {
+                                                    ...elem.data,
+                                                    gradientColors: nextColors,
+                                                    gradientFrom: nextColors[0],
+                                                    gradientMid: nextColors[1],
+                                                    gradientTo: nextColors[2],
+                                                }
+                                            };
+                                        })
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder={`Color ${index + 1}`}
+                        />
+                    ) : <div className="input-placeholder" />;
+                }
+                if (index === angleIndex) {
+                    return (
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={String(element.data?.gradientAngle ?? 0)}
+                            onChange={(e) => {
+                                const gradientAngle = Number(e.target.value) || 0;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, gradientAngle } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Angle"
+                        />
+                    );
+                }
+                return null;
+            }
+            case 'math':
+                if (index !== 0) return null;
+                return (
+                    <select
+                        className="input-control"
+                        value={String(element.data?.mathFunction || 'sin')}
+                        onChange={(e) => {
+                            const mathFunction = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, mathFunction } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sqrt', 'abs', 'log', 'exp', 'floor', 'ceil', 'round'].map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                        ))}
+                    </select>
+                );
+            case 'array-sort':
+                if (index !== 0) return null;
+                const sortMode = String(element.data?.sortMode || 'number-asc');
+                const arraySortFieldOptions = getArraySortFieldOptions(element);
+                const showArraySortField = sortMode.startsWith('custom');
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                        <select
+                            className="input-control"
+                            value={sortMode}
+                            onChange={(e) => {
+                                const nextSortMode = e.target.value as NonNullable<CanvasElement['data']>['sortMode'];
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, sortMode: nextSortMode } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <option value="number-asc">Number asc</option>
+                            <option value="number-desc">Number desc</option>
+                            <option value="string-asc">String A-Z</option>
+                            <option value="string-desc">String Z-A</option>
+                            <option value="custom-asc">Custom field asc</option>
+                            <option value="custom-desc">Custom field desc</option>
+                        </select>
+                        {showArraySortField ? (
+                            arraySortFieldOptions.length > 0 ? (
+                                <select
+                                    className="input-control"
+                                    value={String(element.data?.arraySortField || arraySortFieldOptions[0]?.id || '')}
+                                    onChange={(e) => {
+                                        const arraySortField = e.target.value;
+                                        setElements((prev) =>
+                                            updateElementValueTypes(
+                                                prev.map((elem) =>
+                                                    elem.id === element.id
+                                                        ? { ...elem, data: { ...elem.data, arraySortField } }
+                                                        : elem
+                                                )
+                                            )
+                                        );
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <option value="">-- Field --</option>
+                                    {arraySortFieldOptions.map((field) => (
+                                        <option key={field.id} value={field.id}>
+                                            {field.label} ({field.type})
+                                        </option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <input
+                                    type="text"
+                                    className="input-control"
+                                    value={String(element.data?.arraySortField || '')}
+                                    placeholder="Field path"
+                                    onChange={(e) => {
+                                        const arraySortField = e.target.value;
+                                        setElements((prev) =>
+                                            updateElementValueTypes(
+                                                prev.map((elem) =>
+                                                    elem.id === element.id
+                                                        ? { ...elem, data: { ...elem.data, arraySortField } }
+                                                        : elem
+                                                )
+                                            )
+                                        );
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                />
+                            )
+                        ) : null}
+                    </div>
+                );
+            case 'array': {
+                if (index !== 0) return null;
+                return (
+                    <select
+                        className="input-control"
+                        value={String(element.data?.arrayItemType || 'number')}
+                        onChange={(e) => {
+                            const arrayItemType = e.target.value as ArrayItemType;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, arrayItemType } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <option value="number">Number</option>
+                        <option value="string">String</option>
+                        <option value="boolean">Boolean</option>
+                        <option value="color">Color</option>
+                        <option value="zip">Zip</option>
+                    </select>
+                );
+            }
+            case 'chart-data': {
+                if (element.data?.chartDataTypeCarrier) return null;
+                if (index === 0) {
+                    return (
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.chartDataLabel ?? 'label')}
+                            placeholder="Label"
+                            onChange={(e) => {
+                                const chartDataLabel = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, chartDataLabel } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    );
+                }
+                if (index === 1) {
+                    return (
+                        <input
+                            type="number"
+                            className="input-control"
+                            value={String(element.data?.chartDataValueText ?? element.data?.chartDataValue ?? '')}
+                            placeholder="Value"
+                            onChange={(e) => {
+                                const chartDataValueText = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, chartDataValueText } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onBlur={(e) => {
+                                const raw = e.target.value.replace(',', '.');
+                                const parsed = Number(raw);
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) => {
+                                            if (elem.id !== element.id) return elem;
+                                            const nextValue = Number.isFinite(parsed) ? parsed : Number(elem.data?.chartDataValue ?? 0);
+                                            return {
+                                                ...elem,
+                                                data: {
+                                                    ...elem.data,
+                                                    chartDataValue: nextValue,
+                                                    chartDataValueText: String(nextValue),
+                                                }
+                                            };
+                                        })
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    );
+                }
+                return null;
+            }
+            case 'api-request': {
+                if (index !== 0) return null;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.apiUrl || '')}
+                            placeholder="API URL"
+                            onChange={(e) => {
+                                const apiUrl = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, apiUrl } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        <select
+                            className="input-control"
+                            value={String(element.data?.apiMethod || 'GET').toUpperCase()}
+                            onChange={(e) => {
+                                const apiMethod = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, apiMethod } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => (
+                                <option key={method} value={method}>{method}</option>
+                            ))}
+                        </select>
+                    </div>
+                );
+            }
+            case 'api-field': {
+                if (index !== 0) return null;
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                        <select
+                            className="input-control"
+                            value={String(element.data?.apiFieldType || 'string')}
+                            onChange={(e) => {
+                                const apiFieldType = e.target.value as NonNullable<CanvasElement['data']>['apiFieldType'];
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, apiFieldType } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {['number', 'string', 'boolean', 'color', 'zip', 'case'].map((fieldType) => (
+                                <option key={fieldType} value={fieldType}>{fieldType}</option>
+                            ))}
+                        </select>
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.apiFieldPath || '')}
+                            placeholder="Field path"
+                            onChange={(e) => {
+                                const apiFieldPath = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, apiFieldPath } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.apiFieldFallback || '')}
+                            placeholder="Fallback"
+                            onChange={(e) => {
+                                const apiFieldFallback = e.target.value;
+                                setElements((prev) =>
+                                    updateElementValueTypes(
+                                        prev.map((elem) =>
+                                            elem.id === element.id
+                                                ? { ...elem, data: { ...elem.data, apiFieldFallback } }
+                                                : elem
+                                        )
+                                    )
+                                );
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    </div>
+                );
+            }
+            case 'api-list-mapper': {
+                if (index !== 0) return null;
+                return renderApiListMapperControls(element, (patch) => {
+                    setElements((prev) =>
+                        updateElementValueTypes(
+                            prev.map((elem) =>
+                                elem.id === element.id
+                                    ? { ...elem, data: { ...elem.data, ...patch } }
+                                    : elem
+                            )
+                        )
+                    );
+                });
+            }
+            case 'image-from-link':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(element.data?.imageUrl || '')}
+                        onChange={(e) => {
+                            const imageUrl = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, imageUrl } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Image URL"
+                    />
+                );
+            case 'image-from-element':
+                if (index !== 0) return null;
+                return (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(element.data?.elementSelector || '')}
+                        onChange={(e) => {
+                            const elementSelector = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, elementSelector } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Element selector"
+                    />
+                );
+            default:
+                return null;
+        }
+    };
+
+    const renderOutputControl = (element: CanvasElement, index: number): React.ReactNode => {
+        if (element.type === 'output' && customNodeMode) {
+            return (
+                <input
+                    type="text"
+                    className="input-control"
+                    value={String((element.data?.outputLabels || outputInputLabels)[index] || '')}
+                    onChange={(e) => {
+                        const nextValue = e.target.value;
+                        setElements((prev) =>
+                            updateElementValueTypes(
+                                prev.map((elem) => {
+                                    if (elem.id !== element.id) return elem;
+                                    const labels = [...(elem.data?.outputLabels || outputInputLabels)];
+                                    labels[index] = nextValue;
+                                    return { ...elem, data: { ...elem.data, outputLabels: labels } };
+                                })
+                            )
+                        );
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder={`Output ${index + 1}`}
+                />
+            );
+        }
+
+        if (element.type === 'custom-node' && !element.data?.zipOutput && !element.data?.customNodeTypeCarrier) {
+            return null;
+        }
+
+        if (element.type === 'array' || element.type.startsWith('array-') || element.type.startsWith('image-')) {
+            return null;
+        }
+
+        return null;
+    };
+
+    const renderApiListMapperControls = (element: CanvasElement, updateApiNode: (patch: Record<string, unknown>) => void): React.ReactNode => {
+        const itemType = String(element.data?.apiListItemType || 'string').trim().toLowerCase();
+        const isZipMode = itemType === 'zip' || itemType === 'case';
+        const isChartDataMode = itemType === 'chart-data';
+        const customNodeId = String(element.data?.apiListCustomNodeId || '').trim();
+        const customNodeFields = isZipMode ? getCustomNodeInputSchema(customNodeId) : [];
+        const fieldMappings = Array.isArray(element.data?.apiListFieldMappings)
+            ? element.data.apiListFieldMappings
+            : [];
+
+        const syncMappingsForFields = (nextCustomNodeId: string) => {
+            const nextFields = getCustomNodeInputSchema(nextCustomNodeId);
+            const nextMappings = nextFields.map((field, index) => {
+                const existing = fieldMappings.find((mapping) => String(mapping?.fieldId || '').trim() === String(field.id || '').trim())
+                    || fieldMappings[index]
+                    || null;
+                return {
+                    fieldId: String(field.id || '').trim() || `field-${index + 1}`,
+                    path: String(existing?.path || '').trim(),
+                };
+            });
+            updateApiNode({
+                        apiListCustomNodeId: nextCustomNodeId,
+                        apiListFieldMappings: nextMappings,
+                    });
+                };
+
+        return (
+            <div
+                className="api-list-mapper-scroll"
+                style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '132px', overflowY: 'auto', paddingRight: '4px' }}
+                onMouseEnter={() => { apiListMapperScrollLockRef.current = true; }}
+                onMouseLeave={() => { apiListMapperScrollLockRef.current = false; }}
+                onWheelCapture={(e) => e.stopPropagation()}
+                onMouseDownCapture={(e) => e.stopPropagation()}
+                onPointerDownCapture={(e) => e.stopPropagation()}
+            >
+                <select
+                    className="input-control"
+                    value={String(element.data?.apiListMatchMode || 'auto')}
+                    onChange={(e) => updateApiNode({ apiListMatchMode: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <option value="auto">Auto</option>
+                    <option value="names">Field names</option>
+                    <option value="types">Field types</option>
+                </select>
+
+                <input
+                    type="text"
+                    className="input-control"
+                    value={String(element.data?.apiListPath || '')}
+                    placeholder="Array path"
+                    onChange={(e) => updateApiNode({ apiListPath: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                />
+
+                <select
+                    className="input-control"
+                    value={String(element.data?.apiListItemType || 'string')}
+                    onChange={(e) => {
+                        const nextType = e.target.value;
+                        updateApiNode({
+                            apiListItemType: nextType,
+                            ...(nextType === 'zip' || nextType === 'case'
+                                ? { apiListValueField: '' }
+                                : nextType === 'chart-data'
+                                    ? { apiListCustomNodeId: '', apiListFieldMappings: [], apiListLabelField: String(element.data?.apiListLabelField || 'label'), apiListValueField: String(element.data?.apiListValueField || 'value') }
+                                    : { apiListCustomNodeId: '', apiListFieldMappings: [] }),
+                        });
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <option value="number">number</option>
+                    <option value="string">string</option>
+                    <option value="boolean">boolean</option>
+                    <option value="color">color</option>
+                    <option value="zip">zip</option>
+                    <option value="chart-data">chart data</option>
+                    <option value="case">case</option>
+                </select>
+
+                {isZipMode ? (
+                    <>
+                        <select
+                            className="input-control"
+                            value={customNodeId}
+                            onChange={(e) => syncMappingsForFields(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <option value="">Select custom node</option>
+                            {configuredCustomNodes.map((node: any) => {
+                                const nodeId = String(node?.id || '').trim();
+                                if (!nodeId) {
+                                    return null;
+                                }
+                                const nodeName = String(node?.name || nodeId).trim();
+                                return (
+                                    <option key={nodeId} value={nodeId}>{nodeName}</option>
+                                );
+                            })}
+                        </select>
+                        {customNodeFields.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                {customNodeFields.map((field, index) => {
+                                    const mapping = fieldMappings.find((item) => String(item?.fieldId || '').trim() === String(field.id || '').trim())
+                                        || fieldMappings[index]
+                                        || null;
+                                    return (
+                                        <div
+                                            key={`${field.id}-${index}`}
+                                            style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.35fr)',
+                                                gap: '6px',
+                                                alignItems: 'center'
+                                            }}
+                                        >
+                                            <div style={{
+                                                fontSize: '11px',
+                                                color: '#e5eef9',
+                                                opacity: 1,
+                                                lineHeight: 1.2,
+                                                background: 'rgba(15, 23, 42, 0.55)',
+                                                border: '1px solid rgba(255, 255, 255, 0.08)',
+                                                borderRadius: '6px',
+                                                padding: '2px 6px',
+                                            }}>
+                                                {field.label}
+                                                <span style={{ opacity: 0.72 }}> ({field.type})</span>
+                                            </div>
+                                            <input
+                                                type="text"
+                                                className="input-control"
+                                                value={String(mapping?.path || '')}
+                                                placeholder={`Path for ${field.label}`}
+                                                onChange={(e) => {
+                                                    const nextPath = e.target.value;
+                                                    const nextMappings = [...fieldMappings];
+                                                    nextMappings[index] = {
+                                                        fieldId: String(field.id || '').trim() || `field-${index + 1}`,
+                                                        path: nextPath,
+                                                    };
+                                                    updateApiNode({
+                                                        apiListCustomNodeId: customNodeId,
+                                                        apiListFieldMappings: nextMappings,
+                                                    });
+                                                }}
+                                                onClick={(e) => e.stopPropagation()}
+                                            />
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            <div style={{ fontSize: '11px', opacity: 0.75, lineHeight: 1.4 }}>
+                                Select a custom node to map its input fields.
+                            </div>
+                        )}
+                    </>
+                ) : isChartDataMode ? (
+                    <>
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.apiListLabelField || 'label')}
+                            placeholder="Label field path"
+                            onChange={(e) => updateApiNode({ apiListLabelField: e.target.value })}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        <input
+                            type="text"
+                            className="input-control"
+                            value={String(element.data?.apiListValueField || 'value')}
+                            placeholder="Value field path"
+                            onChange={(e) => updateApiNode({ apiListValueField: e.target.value })}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    </>
+                ) : (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(element.data?.apiListValueField || '')}
+                        placeholder="Field path"
+                        onChange={(e) => {
+                            const nextPath = e.target.value;
+                            updateApiNode({
+                                apiListValueField: nextPath,
+                                apiListLabelField: nextPath,
+                            });
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                )}
+            </div>
+        );
+    };
+
+    const renderApiNodeControls = (el: CanvasElement): React.ReactNode => {
+        const updateApiNode = (patch: Record<string, unknown>) => {
+            setElements((prev) =>
+                updateElementValueTypes(
+                    prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, ...patch } } : elem))
+                )
+            );
+        };
+
+        if (el.type === 'api-request') {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(el.data?.apiUrl || '')}
+                        placeholder="API URL"
+                        onChange={(e) => updateApiNode({ apiUrl: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                    <select
+                        className="input-control"
+                        value={String(el.data?.apiMethod || 'GET').toUpperCase()}
+                        onChange={(e) => updateApiNode({ apiMethod: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => (
+                            <option key={method} value={method}>{method}</option>
+                        ))}
+                    </select>
+                </div>
+            );
+        }
+
+        if (el.type === 'api-field') {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <select
+                        className="input-control"
+                        value={String(el.data?.apiFieldType || 'string')}
+                        onChange={(e) => updateApiNode({ apiFieldType: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {['number', 'string', 'boolean', 'color', 'zip', 'case'].map((fieldType) => (
+                            <option key={fieldType} value={fieldType}>{fieldType}</option>
+                        ))}
+                    </select>
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(el.data?.apiFieldPath || '')}
+                        placeholder="Field path"
+                        onChange={(e) => updateApiNode({ apiFieldPath: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(el.data?.apiFieldFallback || '')}
+                        placeholder="Fallback"
+                        onChange={(e) => updateApiNode({ apiFieldFallback: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                </div>
+            );
+        }
+
+        if (el.type === 'api-list-mapper') {
+            return renderApiListMapperControls(el, updateApiNode);
+        }
+
+        return null;
+    };
+
+    const getInputLabel = (element: CanvasElement, index: number): string => {
+        switch (element.type) {
+            case 'calculation':
+                return `Input ${index + 1}`;
+            case 'condition':
+                if (index === 0) return 'Left';
+                if (index === 1) return 'Right';
+                return '';
+            case 'switch':
+                if (index === 0) return 'Value';
+                return `Case ${index}`;
+            case 'case-range':
+                if (index === 0) return 'Min';
+                if (index === 1) return 'Max';
+                if (index === 2) return 'Out';
+                return '';
+            case 'case-value':
+                if (index === 0) return 'Value';
+                if (index === 1) return 'Out';
+                return '';
+            case 'regex':
+                return 'Text';
+            case 'concat':
+                return index === 0 ? 'A' : 'B';
+            case 'cut-a':
+                return index === 0 ? 'Text' : 'Find';
+            case 'cut-b':
+                return index === 0 ? 'Text' : 'Index';
+            case 'cut-c':
+                if (index === 0) return 'Text';
+                if (index === 1) return 'Start';
+                if (index === 2) return 'End';
+                return '';
+            case 'string-count-chars':
+            case 'string-count-words':
+            case 'string-to-number':
+                return 'Text';
+            case 'string-find-start':
+            case 'string-find-end':
+                return index === 0 ? 'Text' : 'Find';
+            case 'number-to-string':
+                return 'Value';
+            case 'memory-write-number':
+            case 'memory-write-string':
+            case 'memory-write-boolean':
+                return index === 0 ? 'Value' : 'Reset';
+            case 'event-processor':
+                return index === 0 ? 'Event' : 'Payload';
+            case 'bool-count':
+                return `Bool ${index + 1}`;
+            case 'color':
+                return '';
+            case 'gradient': {
+                const colorCount = getGradientColorCount(element);
+                if (index < colorCount) {
+                    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+                    const suffix = index < alphabet.length ? alphabet[index] : String(index + 1);
+                    return `Color ${suffix}`;
+                }
+                if (index === colorCount) return 'Angle';
+                return '';
+            }
+            case 'custom-node': {
+                const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
+                return schema[index]?.label || `Input ${index + 1}`;
+            }
+            case 'unzip':
+                return 'Zip';
+            case 'math':
+                return 'Value';
+            case 'number':
+                return 'Value';
+            case 'constant-boolean':
+            case 'constant-string':
+                return '';
+            case 'main':
+                if (customNodeMode) {
+                    return `Output ${index + 1}`;
+                }
+                if (mainElementType === 'logic') {
+                    const slotIndex = Math.floor(index / 4);
+                    const slotPin = index % 4;
+                    const slotLabel = `[${slotIndex + 1}]`;
+                    if (slotPin === 0) return `${slotLabel} Value`;
+                    if (slotPin === 1) return `${slotLabel} Background`;
+                    if (slotPin === 2) return `${slotLabel} Color`;
+                    return `${slotLabel} Disabled`;
+                }
+                if (index === 0) return 'Value';
+                if (index === 1) return 'Background';
+                if (index === 2) return 'Color';
+                if (index === 3) return 'Disabled';
+                return '';
+            case 'output':
+                if (index === 0) return 'Value';
+                if (customNodeMode && element.data?.outputLabels) {
+                    return element.data.outputLabels[index] || outputInputLabels[index] || '';
+                }
+                return outputInputLabels[index] || '';
+            case 'node':
+                if (index === 0) return 'Condition';
+                if (index === 1) return 'True';
+                if (index === 2) return 'False';
+                return '';
+            case 'css-unit':
+                return 'Number';
+            case 'css-margin':
+            case 'css-padding':
+                if (index === 0) return 'Top';
+                if (index === 1) return 'Right';
+                if (index === 2) return 'Bottom';
+                return 'Left';
+            case 'css-width':
+            case 'css-height':
+            case 'css-font-size':
+                return 'Value';
+            case 'css-color':
+                return 'Color';
+            case 'css-text':
+            case 'css-display':
+                return '';
+            case 'and':
+            case 'or':
+                return index === 0 ? 'A' : 'B';
+            case 'fallback':
+                return index === 0 ? 'Primary' : 'Fallback';
+            case 'clamp':
+                if (index === 0) return 'Value';
+                if (index === 1) return 'Min';
+                return 'Max';
+            case 'min-val':
+            case 'max-val':
+                return index === 0 ? 'A' : 'B';
+            case 'string-split':
+            case 'string-replace':
+            case 'string-trim':
+            case 'string-upper':
+            case 'string-lower':
+                return 'Text';
+            case 'string-includes':
+                return index === 0 ? 'Text' : 'Find';
+            case 'number-parse':
+                return 'Text';
+            case 'number-to-base':
+                return 'Number';
+            case 'multi-concat':
+                return `Text ${index + 1}`;
+            case 'css-join':
+                return `CSS ${index + 1}`;
+            case 'array':
+                return 'Type';
+            case 'array-push':
+                return index === 0 ? 'Array' : 'Value';
+            case 'array-pop':
+            case 'array-sort':
+                return 'Array';
+            case 'array-remove-index':
+                return index === 0 ? 'Array' : 'Index';
+            case 'array-replace-index':
+                if (index === 0) return 'Array';
+                if (index === 1) return 'Index';
+                return 'Value';
+            case 'image-from-link':
+                return 'URL';
+            case 'image-from-element':
+                return 'Element';
+            case 'api-request':
+                return 'URL';
+            case 'api-field':
+                return index === 0 ? 'Source' : 'Path';
+            case 'api-list-mapper':
+                return index === 0 ? 'Request Data' : `Input ${index + 1}`;
+            case 'action-event':
+            case 'action-block':
+            case 'action-required':
+            case 'action-min':
+            case 'action-max':
+            case 'action-length':
+            case 'action-regex':
+            case 'action-add-class':
+            case 'action-remove-class':
+            case 'action-toggle-class':
+                return index === 0 ? 'Action' : '';
+            case 'chart-data':
+                return index === 0 ? 'Label' : 'Value';
+            default:
+                return `Input ${index + 1}`;
+        }
+    };
+
+    const getOutputLabel = (element: CanvasElement, index: number): string => {
+        switch (element.type) {
+            case 'case-range':
+            case 'case-value':
+            case 'switch':
+            case 'node':
+            case 'calculation':
+            case 'condition':
+                return 'Result';
+            case 'element-id':
+            case 'memory-read-number':
+            case 'memory-read-string':
+            case 'memory-read-boolean':
+            case 'memory-write-number':
+            case 'memory-write-string':
+            case 'memory-write-boolean':
+            case 'event-element':
+            case 'event-id':
+            case 'event-processor':
+            case 'element':
+            case 'number':
+            case 'constant-boolean':
+            case 'constant-string':
+            case 'operator':
+            case 'math':
+            case 'comparison':
+            case 'logic':
+            case 'constant':
+            case 'variable':
+            case 'not':
+            case 'and':
+            case 'or':
+            case 'fallback':
+            case 'clamp':
+                return 'Value';
+            case 'regex':
+                return 'Match';
+            case 'concat':
+            case 'cut-a':
+            case 'cut-b':
+            case 'cut-c':
+                return 'Text';
+            case 'string-count-chars':
+                return 'Characters';
+            case 'string-count-words':
+                return 'Words';
+            case 'string-find-start':
+                return 'Start';
+            case 'string-find-end':
+                return 'End';
+            case 'string-to-number':
+                return 'Number';
+            case 'number-to-string':
+                return 'Text';
+            case 'bool-count':
+                return 'Count';
+            case 'color':
+            case 'gradient':
+                return 'Color';
+            case 'custom-node':
+                return element.data?.zipOutput || element.data?.customNodeTypeCarrier
+                    ? 'Zip'
+                    : (
+                        (Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0)
+                            ? (element.data.customOutputSchema[index]?.label || `Output ${index + 1}`)
+                            : (getCustomNodeOutputSchema(element.data?.customNodeId)[index]?.label || `Output ${index + 1}`)
+                    );
+            case 'unzip': {
+                const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                    ? element.data.customOutputSchema
+                    : getCustomNodeOutputSchema(element.data?.customNodeId);
+                return schema[index]?.label || `Output ${index + 1}`;
+            }
+            case 'css-unit':
+            case 'css-margin':
+            case 'css-padding':
+            case 'css-width':
+            case 'css-height':
+            case 'css-font-size':
+            case 'css-display':
+            case 'css-color':
+            case 'css-text':
+            case 'css-join':
+                return 'CSS';
+            case 'array':
+            case 'array-push':
+            case 'array-pop':
+            case 'array-sort':
+            case 'array-remove-index':
+            case 'array-replace-index':
+                return 'Array';
+            case 'image-from-link':
+            case 'image-from-element':
+                return 'Image';
+            case 'api-request':
+                return 'Data';
+            case 'api-field':
+                return 'Value';
+            case 'api-list-mapper':
+                return 'Array';
+            case 'output':
+                return 'Action';
+            case 'action-event':
+            case 'action-block':
+            case 'action-required':
+            case 'action-min':
+            case 'action-max':
+            case 'action-length':
+            case 'action-regex':
+            case 'action-add-class':
+            case 'action-remove-class':
+            case 'action-toggle-class':
+                return 'Action';
+            case 'chart-data':
+                return 'Zip';
+            default:
+                return `Output-${index + 1}`;
+        }
+    };
+
+    const getConnectedInputIndexesForElement = (
+        elementId: string,
+        sourceConnections: Connection[] = connectionsRef.current
+    ): number[] => {
+        return Array.from(new Set(sourceConnections
+            .filter((connection) => connection.toId === elementId && connection.toInput.startsWith('input'))
+            .map((connection) => getInputIndex(connection.toInput))
+            .filter((index) => Number.isFinite(index) && index >= 0)))
+            .sort((a, b) => a - b);
     };
 
     const getDynamicInputGapErrors = (
@@ -2490,9 +3753,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const highestConnected = connectedIndexes[connectedIndexes.length - 1];
             for (let index = dynamicConfig.startIndex; index <= highestConnected; index += 1) {
                 if (!connectedIndexes.includes(index)) {
-                    const labelNumber = dynamicConfig.label === 'Case'
-                        ? index
-                        : index + 1;
+                    const labelNumber = dynamicConfig.label === 'Case' ? index : index + 1;
                     errors[element.id] = `${dynamicConfig.label} ${labelNumber} is missing while lower pins are connected.`;
                     break;
                 }
@@ -2502,70 +3763,452 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return errors;
     };
 
+    const resolveZipSchema = (
+        elementId: string,
+        allElements: CanvasElement[],
+        allConnections: Connection[],
+        depth = 0
+    ): Array<{ id: string; label: string; type: string }> => {
+        if (depth > 20) return [];
+        const el = allElements.find((item) => item.id === elementId);
+        if (!el) return [];
+
+        if (el.type === 'custom-node') {
+            return Array.isArray(el.data?.customOutputSchema) ? el.data.customOutputSchema : [];
+        }
+
+        if (el.type === 'chart-data') {
+            return [
+                { id: 'label', label: 'label', type: 'string' },
+                { id: 'value', label: 'value', type: 'number' },
+            ];
+        }
+
+        const traceInputs: string[] = [];
+        if (el.type === 'switch') {
+            traceInputs.push('input0');
+            const caseConns = allConnections.filter((connection) => connection.toId === el.id && getInputIndex(connection.toInput) > 0);
+            caseConns.forEach((connection) => traceInputs.push(connection.toInput));
+        } else if (el.type === 'node') {
+            traceInputs.push('input1', 'input2');
+        } else if (el.type === 'case-range' || el.type === 'case-value') {
+            traceInputs.push(el.type === 'case-range' ? 'input2' : 'input1');
+        } else {
+            const inConns = allConnections.filter((connection) => connection.toId === el.id);
+            inConns.forEach((connection) => traceInputs.push(connection.toInput));
+        }
+
+        for (const inputName of traceInputs) {
+            const conn = allConnections.find((connection) => connection.toId === el.id && connection.toInput === inputName);
+            if (!conn) continue;
+            const schema = resolveZipSchema(conn.fromId, allElements, allConnections, depth + 1);
+            if (schema.length > 0) return schema;
+        }
+
+        return [];
+    };
+
     const dynamicInputGapErrors = React.useMemo(
         () => getDynamicInputGapErrors(elements, connections),
         [elements, connections, customNodeMode]
     );
     const hasDynamicInputGapErrors = Object.keys(dynamicInputGapErrors).length > 0;
 
-    // Walk the connection graph backwards from elementId to find the customOutputSchema
-    // of the originating custom-node, even if zip passes through switch/case/if nodes.
-    const resolveZipSchema = (
-        elementId: string,
-        elements: CanvasElement[],
-        connections: Connection[],
-        depth = 0
-    ): Array<{ id: string; label: string; type: string }> => {
-        if (depth > 20) return [];
-        const el = elements.find(e => e.id === elementId);
-        if (!el) return [];
-
-        // Found the source - return its schema
-        if (el.type === 'custom-node') {
-            return Array.isArray(el.data?.customOutputSchema) ? el.data.customOutputSchema : [];
+    const serializeGraphFormulaLiteral = (value: unknown): string => {
+        if (value === null || value === undefined) {
+            return '0';
         }
 
-        // Passthrough nodes - trace back through their value inputs
-        const inputsToTrace: string[] = [];
-        if (el.type === 'switch') {
-            // switch output comes from case out-values - trace input0 (the value) and case inputs
-            inputsToTrace.push('input0');
-            const caseConns = connections.filter(c => c.toId === el.id && getInputIndex(c.toInput) > 0);
-            caseConns.forEach(c => inputsToTrace.push(c.toInput));
-        } else if (el.type === 'node') {
-            inputsToTrace.push('input1', 'input2');
-        } else if (el.type === 'case-range' || el.type === 'case-value') {
-            // The "out" value is the last input
-            const lastInput = el.type === 'case-range' ? 'input2' : 'input1';
-            inputsToTrace.push(lastInput);
-        } else {
-            // For any other node, trace all inputs
-            const inConns = connections.filter(c => c.toId === el.id);
-            inConns.forEach(c => inputsToTrace.push(c.toInput));
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return String(value);
         }
 
-        for (const inputName of inputsToTrace) {
-            const conn = connections.find(c => c.toId === el.id && c.toInput === inputName);
-            if (!conn) continue;
-            const schema = resolveZipSchema(conn.fromId, elements, connections, depth + 1);
-            if (schema.length > 0) return schema;
+        if (typeof value === 'boolean') {
+            return value ? 'true' : 'false';
         }
-        return [];
+
+        if (typeof value === 'string') {
+            return JSON.stringify(value);
+        }
+
+        if (Array.isArray(value)) {
+            return `[${value.map((entry) => serializeGraphFormulaLiteral(entry)).join(', ')}]`;
+        }
+
+        if (typeof value === 'object') {
+            try {
+                return JSON.stringify(value);
+            } catch {
+                return JSON.stringify(String(value));
+            }
+        }
+
+        return JSON.stringify(String(value));
     };
 
-    // Update element value types based on node configuration and current connections
-    const updateElementValueTypes = (nextElements: CanvasElement[], nextConnections: Connection[] = connectionsRef.current): CanvasElement[] => {
-        const elementMap = new Map(nextElements.map(el => [el.id, el]));
+    const buildGraphFormulaFromState = (
+        allElements: CanvasElement[],
+        allConnections: Connection[],
+        depth = 0
+    ): string => {
+        if (depth > 20) {
+            return '';
+        }
 
-        const getConnectedType = (toId: string, toInput: string): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | null => {
-            const conn = nextConnections.find(c => c.toId === toId && c.toInput === toInput);
+        const elementMap = new Map(allElements.map((item) => [item.id, item]));
+        const getConnectionForInput = (elementId: string, inputName: string): Connection | undefined => (
+            allConnections.find((connection) => connection.toId === elementId && connection.toInput === inputName)
+        );
+        const getConnectedExpression = (elementId: string, inputName: string): string | null => {
+            const connection = getConnectionForInput(elementId, inputName);
+            if (!connection) {
+                return null;
+            }
+
+            const sourceElement = elementMap.get(connection.fromId);
+            if (!sourceElement) {
+                return null;
+            }
+
+            const outputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+            return buildNodeExpression(sourceElement, Number.isFinite(outputIndex) && outputIndex >= 0 ? outputIndex : 0, depth + 1);
+        };
+        const getOutgoingConnections = (elementId: string, outputName: string = 'output0'): Connection[] => (
+            allConnections.filter((connection) => connection.fromId === elementId && connection.fromOutput === outputName)
+        );
+        const buildActionPlanExpression = (element: CanvasElement, currentDepth = 0): string | null => {
+            if (!element || currentDepth > 24) {
+                return null;
+            }
+
+            const childExpressions = getOutgoingConnections(element.id)
+                .map((connection) => elementMap.get(connection.toId))
+                .filter((child): child is CanvasElement => Boolean(child))
+                .map((child) => buildActionPlanExpression(child, currentDepth + 1))
+                .filter((entry): entry is string => Boolean(entry));
+
+            switch (element.type) {
+                case 'action-block':
+                    return childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : null;
+                case 'action-event': {
+                    const sourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
+                    if (!sourceId) {
+                        return null;
+                    }
+                    const eventType = String(element.data?.actionEventType || 'change');
+                    return `({ type: "event", sourceId: ${serializeGraphFormulaLiteral(sourceId)}, eventType: ${serializeGraphFormulaLiteral(eventType)}, actions: ${childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : '[]'} })`;
+                }
+                case 'action-required':
+                    return `({ type: "required", value: ${element.data?.actionRequired !== false ? 'true' : 'false'} })`;
+                case 'action-min':
+                    return `({ type: "min", value: ${serializeGraphFormulaLiteral(Number(element.data?.actionMin ?? 0))} })`;
+                case 'action-max':
+                    return `({ type: "max", value: ${serializeGraphFormulaLiteral(Number(element.data?.actionMax ?? 100))} })`;
+                case 'action-length':
+                    return `({ type: "length", min: ${serializeGraphFormulaLiteral(Number(element.data?.actionMinLength ?? 0))}, max: ${serializeGraphFormulaLiteral(Number(element.data?.actionMaxLength ?? 0))} })`;
+                case 'action-regex':
+                    return `({ type: "regex", pattern: ${serializeGraphFormulaLiteral(String(element.data?.actionRegexPattern || ''))} })`;
+                case 'action-add-class':
+                    return `({ type: "addClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                case 'action-remove-class':
+                    return `({ type: "removeClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                case 'action-toggle-class':
+                    return `({ type: "toggleClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                default:
+                    return null;
+            }
+        };
+        const buildNodeExpression = (element: CanvasElement, outputIndex = 0, currentDepth = 0): string => {
+            if (!element || currentDepth > 24) {
+                return '0';
+            }
+
+            const connectedInputExpression = (inputIndex: number, fallback?: unknown): string => {
+                const connExpr = getConnectedExpression(element.id, `input${inputIndex}`);
+                if (connExpr !== null && connExpr !== undefined) {
+                    return connExpr;
+                }
+                return fallback !== undefined ? serializeGraphFormulaLiteral(fallback) : '0';
+            };
+
+            switch (element.type) {
+                case 'number': {
+                    const value = element.data?.valueText ?? element.data?.value ?? 0;
+                    const parsed = Number(String(value).replace(',', '.'));
+                    return Number.isFinite(parsed) ? String(parsed) : '0';
+                }
+                case 'constant-boolean':
+                    return Boolean(element.data?.value) ? 'true' : 'false';
+                case 'constant-string':
+                    return serializeGraphFormulaLiteral(String(element.data?.value ?? ''));
+                case 'color':
+                    return serializeGraphFormulaLiteral(String(element.data?.colorValue || '#2563eb'));
+                case 'element': {
+                    const selectedElement = String(element.data?.selectedElement || '').trim();
+                    return selectedElement ? `[${selectedElement}]` : '0';
+                }
+                case 'element-id':
+                    return serializeGraphFormulaLiteral(String(element.data?.elementId || ''));
+                case 'fallback':
+                    return `__nodeFallback(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'concat':
+                case 'multi-concat': {
+                    const inputCount = Math.max(2, getInputCount(element));
+                    const parts = Array.from({ length: inputCount }, (_, index) => connectedInputExpression(index));
+                    return `__nodeConcat(${parts.join(', ')})`;
+                }
+                case 'cut-a':
+                    return `__nodeCutA(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                case 'cut-b':
+                    return `__nodeCutB(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                case 'cut-c':
+                    return `__nodeCutC(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                case 'string-trim':
+                    return `${connectedInputExpression(0)}.trim()`;
+                case 'string-upper':
+                    return `${connectedInputExpression(0)}.toUpperCase()`;
+                case 'string-lower':
+                    return `${connectedInputExpression(0)}.toLowerCase()`;
+                case 'string-to-number':
+                    return `__nodeToNumber(${connectedInputExpression(0)})`;
+                case 'number-to-string':
+                    return `__nodeToString(${connectedInputExpression(0)})`;
+                case 'math':
+                    return connectedInputExpression(0);
+                case 'calculation': {
+                    const defaultOperation = String(element.data?.operation || '+');
+                    const operations = element.data?.inputOperations || {};
+                    const inputCount = Math.max(1, getInputCount(element));
+                    const values = Array.from({ length: inputCount }, (_, index) => (
+                        connectedInputExpression(index, element.data?.inputValues?.[index] ?? 0)
+                    ));
+
+                    if (values.length === 0) {
+                        return '0';
+                    }
+
+                    if (values.length === 1) {
+                        return values[0];
+                    }
+
+                    const allowedOperations = new Set(['+', '-', '*', '/', '**', '%', '===', '!==', '>', '<', '>=', '<=']);
+                    let expression = values[0] || '0';
+                    for (let i = 1; i < values.length; i += 1) {
+                        const opKey = `input${i - 1}`;
+                        const op = String(operations[opKey] || defaultOperation || '+').trim();
+                        const safeOp = allowedOperations.has(op) ? op : '+';
+                        expression = `(${expression} ${safeOp} ${values[i] || '0'})`;
+                    }
+
+                    return expression;
+                }
+                case 'array': {
+                    return '[]';
+                }
+                case 'array-push':
+                    return `__nodeArrayPush(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'array-pop':
+                    return `__nodeArrayPop(${connectedInputExpression(0)})`;
+                case 'array-sort':
+                    return `__nodeArraySort(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(element.data?.sortMode || 'number-asc')}, ${serializeGraphFormulaLiteral(element.data?.arraySortField || '')})`;
+                case 'array-remove-index':
+                    return `__nodeArrayRemove(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'array-replace-index':
+                    return `__nodeArrayReplace(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                case 'image-from-link':
+                    return `__nodeImageFromLink(${connectedInputExpression(0)})`;
+                case 'image-from-element':
+                    return `__nodeImageFromElement(${connectedInputExpression(0)})`;
+                case 'api-request':
+                    return `__nodeApiRequest(${connectedInputExpression(0, element.data?.apiUrl || '')}, ${serializeGraphFormulaLiteral(String(element.data?.apiMethod || 'GET').toUpperCase())})`;
+                case 'api-field': {
+                    const sourceExpr = connectedInputExpression(0);
+                    const pathExpr = connectedInputExpression(1, element.data?.apiFieldPath || '');
+                    const fallbackExpr = serializeGraphFormulaLiteral(element.data?.apiFieldFallback || '');
+                    const baseExpr = `__nodeGetPath(${sourceExpr}, ${pathExpr}, ${fallbackExpr})`;
+                    const fieldType = String(element.data?.apiFieldType || 'string');
+                    switch (fieldType) {
+                        case 'number':
+                            return `__nodeToNumber(${baseExpr})`;
+                        case 'boolean':
+                            return `!!(${baseExpr})`;
+                        case 'string':
+                            return `__nodeToString(${baseExpr})`;
+                        case 'color':
+                        case 'zip':
+                        case 'case':
+                        default:
+                            return baseExpr;
+                    }
+                }
+                case 'api-list-mapper':
+                    return `__nodeApiListMapper(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(String(element.data?.apiListPath || ''))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListLabelField || 'label'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListValueField || 'value'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListMatchMode || 'auto'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListItemType || 'string'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListCustomNodeId || ''))}, ${serializeGraphFormulaLiteral(Array.isArray(element.data?.apiListFieldMappings) ? element.data.apiListFieldMappings : [])})`;
+                case 'chart-data':
+                    return `({ label: ${connectedInputExpression(0, element.data?.chartDataLabel ?? '')}, value: ${connectedInputExpression(1, element.data?.chartDataValue ?? 0)} })`;
+                case 'action-event':
+                case 'action-block':
+                case 'action-required':
+                case 'action-min':
+                case 'action-max':
+                case 'action-length':
+                case 'action-regex':
+                case 'action-add-class':
+                case 'action-remove-class':
+                case 'action-toggle-class': {
+                    const actionExpression = buildActionPlanExpression(element, currentDepth + 1);
+                    return actionExpression || 'null';
+                }
+                case 'custom-node': {
+                    const inputSchema = Array.isArray(element.data?.customInputSchema) && element.data.customInputSchema.length > 0
+                        ? element.data.customInputSchema
+                        : getCustomNodeInputSchema(element.data?.customNodeId);
+                    const outputSchema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                        ? element.data.customOutputSchema
+                        : getCustomNodeOutputSchema(element.data?.customNodeId);
+                    const rawTemplate = String(element.data?.customTemplateFormula || '').trim();
+                    const isTypeCarrier = !!element.data?.customNodeTypeCarrier;
+                    const shouldZipOutput = !!element.data?.zipOutput || isTypeCarrier;
+                    const buildZipExpression = (): string => {
+                        if (rawTemplate) {
+                            let expression = rawTemplate;
+                            const ownSourceIds = new Set<string>();
+
+                            inputSchema.forEach((schemaPin, inputIndex) => {
+                                const inputConn = getConnectionForInput(element.id, `input${inputIndex}`);
+                                const sourceExpr = inputConn
+                                    ? buildNodeExpression(
+                                        elementMap.get(inputConn.fromId) || element,
+                                        Number.parseInt(String(inputConn.fromOutput || '').replace(/^output/i, ''), 10) || 0,
+                                        currentDepth + 1
+                                    )
+                                    : serializeGraphFormulaLiteral(
+                                        Array.isArray(element.data?.customInputValues)
+                                            ? element.data.customInputValues[inputIndex] ?? schemaPin?.defaultValue ?? ''
+                                            : schemaPin?.defaultValue ?? ''
+                                    );
+                                const sourceNodeId = String(schemaPin?.sourceNodeId || schemaPin?.id || '').trim();
+                                if (!sourceNodeId) {
+                                    return;
+                                }
+                                ownSourceIds.add(sourceNodeId);
+                                const pattern = new RegExp(`__customIn\\(("|')${escapeRegExp(sourceNodeId)}\\1\\)`, 'g');
+                                expression = expression.replace(pattern, `(${sourceExpr})`);
+                            });
+
+                            ownSourceIds.forEach((id) => {
+                                const pattern = new RegExp(`__customIn\\(("|')${escapeRegExp(id)}\\1\\)`, 'g');
+                                expression = expression.replace(pattern, '0');
+                            });
+
+                            return `(${expression || '0'})`;
+                        }
+
+                        const schema = outputSchema.length > 0 ? outputSchema : inputSchema;
+                        const entries = schema
+                            .map((outputField, index) => {
+                                const inputExpr = connectedInputExpression(index);
+                                if (!inputExpr) return null;
+                                const key = serializeGraphFormulaLiteral(String(outputField?.id || outputField?.label || `output-${index + 1}`));
+                                return `${key}: ${inputExpr}`;
+                            })
+                            .filter(Boolean);
+
+                        return entries.length > 0 ? `({ ${entries.join(', ')} })` : '({})';
+                    };
+
+                    const zipExpr = buildZipExpression();
+
+                    if (shouldZipOutput) {
+                        return zipExpr;
+                    }
+                    return `__nodeUnzip(${zipExpr}, ${outputIndex})`;
+                }
+                case 'unzip': {
+                    const sourceExpr = connectedInputExpression(0);
+                    const indexExpr = connectedInputExpression(1, element.data?.unzipIndex ?? 0);
+                    return `__nodeUnzip(${sourceExpr}, ${indexExpr})`;
+                }
+                default: {
+                    const fallbackConnection = getConnectionForInput(element.id, `input${outputIndex}`);
+                    if (fallbackConnection) {
+                        const sourceElement = elementMap.get(fallbackConnection.fromId);
+                        if (sourceElement) {
+                            const sourceOutputIndex = Number.parseInt(String(fallbackConnection.fromOutput || '').replace(/^output/i, ''), 10);
+                            return buildNodeExpression(sourceElement, Number.isFinite(sourceOutputIndex) && sourceOutputIndex >= 0 ? sourceOutputIndex : 0, currentDepth + 1);
+                        }
+                    }
+                    return serializeGraphFormulaLiteral(element.data?.value ?? element.data?.valueText ?? 0);
+                }
+            }
+        };
+
+        const outputElements = allElements.filter((element) => element.type === 'output' && String(element.data?.selectedElement || '').trim());
+        const payloadEntries = outputElements
+            .map((element) => {
+                const targetId = String(element.data?.selectedElement || '').trim();
+                if (!targetId) return null;
+
+                const valuePairs = outputPropertyNames
+                    .map((propName, index) => {
+                        const connection = getConnectionForInput(element.id, `input${index}`);
+                        if (!connection) return null;
+                        const sourceElement = elementMap.get(connection.fromId);
+                        if (!sourceElement) return null;
+                        const outputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+                        const expr = buildNodeExpression(
+                            sourceElement,
+                            Number.isFinite(outputIndex) && outputIndex >= 0 ? outputIndex : 0,
+                            depth + 1
+                        );
+                        return `${JSON.stringify(propName)}: ${expr}`;
+                    })
+                    .filter(Boolean);
+
+                const actionPairs = getOutgoingConnections(element.id)
+                    .map((connection) => elementMap.get(connection.toId))
+                    .filter((child): child is CanvasElement => Boolean(child))
+                    .map((child) => buildActionPlanExpression(child, depth + 1))
+                    .filter((entry): entry is string => Boolean(entry));
+
+                if (valuePairs.length === 0 && actionPairs.length === 0) {
+                    return null;
+                }
+
+                const payloadParts = [...valuePairs];
+                if (actionPairs.length > 0) {
+                    payloadParts.push(`actions: [${actionPairs.join(', ')}]`);
+                }
+
+                return `${JSON.stringify(targetId)}: { ${payloadParts.join(', ')} }`;
+            })
+            .filter(Boolean);
+
+        if (payloadEntries.length === 0) {
+            return '';
+        }
+
+        return `({ ${payloadEntries.join(', ')} })`;
+    };
+
+    const updateElementValueTypes = (
+        nextElements: CanvasElement[],
+        nextConnections: Connection[] = connectionsRef.current
+    ): CanvasElement[] => {
+        const elementMap = new Map(nextElements.map((el) => [el.id, el]));
+
+        const getConnectedType = (
+            toId: string,
+            toInput: string
+        ): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | null => {
+            const conn = nextConnections.find((connection) => connection.toId === toId && connection.toInput === toInput);
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
             return fromElement?.valueType || null;
         };
 
-        return nextElements.map(el => {
-            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' = 'number';
+        return nextElements.map((el) => {
+            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' = 'number';
+            let nextData: CanvasElement['data'] | undefined;
 
             switch (el.type) {
                 case 'number':
@@ -2578,20 +4221,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'string';
                     break;
                 case 'element': {
-                    const selectedElement = detectedElementsRef.current.find(de => de.id === el.data?.selectedElement);
+                    const selectedElement = detectedElementsRef.current.find((detected) => detected.id === el.data?.selectedElement);
                     valueType = selectedElement?.outputs?.[0]?.type || 'number';
                     break;
                 }
-                case 'calculation': {
-                    const op = el.data?.operation;
-                    valueType = ['===', '!==', '>', '<', '>=', '<='].includes(op || '')
+                case 'calculation':
+                    valueType = ['===', '!==', '>', '<', '>=', '<='].includes(String(el.data?.operation || ''))
                         ? 'boolean'
                         : 'number';
                     break;
-                }
                 case 'condition':
-                    valueType = 'boolean';
-                    break;
                 case 'regex':
                     valueType = 'boolean';
                     break;
@@ -2599,6 +4238,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'cut-a':
                 case 'cut-b':
                 case 'cut-c':
+                case 'string-split':
+                case 'string-replace':
+                case 'string-trim':
+                case 'string-upper':
+                case 'string-lower':
                     valueType = 'string';
                     break;
                 case 'string-count-chars':
@@ -2608,6 +4252,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'string-to-number':
                 case 'math':
                 case 'bool-count':
+                case 'number-parse':
                     valueType = 'number';
                     break;
                 case 'number-to-string':
@@ -2617,9 +4262,40 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'gradient':
                     valueType = 'color';
                     break;
-                case 'custom-node':
-                    valueType = el.data?.zipOutput ? 'zip' : 'number';
+                case 'custom-node': {
+                    const customInputSchema = Array.isArray(el.data?.customInputSchema) && el.data.customInputSchema.length > 0
+                        ? el.data.customInputSchema
+                        : getCustomNodeInputSchema(el.data?.customNodeId);
+                    const customOutputSchema = Array.isArray(el.data?.customOutputSchema) && el.data.customOutputSchema.length > 0
+                        ? el.data.customOutputSchema
+                        : getCustomNodeOutputSchema(el.data?.customNodeId);
+                    const isTypeCarrier = !!el.data?.customNodeTypeCarrier;
+                    const shouldZipOutput = !!el.data?.zipOutput || isTypeCarrier;
+                    if (!Array.isArray(el.data?.customInputSchema) || el.data.customInputSchema.length === 0) {
+                        nextData = { ...(nextData || el.data), customInputSchema };
+                    }
+                    if (!shouldZipOutput) {
+                        const firstOutputType = customOutputSchema[0]?.type;
+                        valueType = firstOutputType === 'string'
+                            || firstOutputType === 'boolean'
+                            || firstOutputType === 'color'
+                            || firstOutputType === 'case'
+                                ? firstOutputType
+                                : (firstOutputType === 'zip' ? 'zip' : 'number');
+                        if (customOutputSchema.length > 0 && (!Array.isArray(el.data?.customOutputSchema) || el.data.customOutputSchema.length === 0)) {
+                            nextData = { ...(nextData || el.data), customOutputSchema };
+                        }
+                    } else {
+                        valueType = 'zip';
+                        if (customOutputSchema.length > 0 && (!Array.isArray(el.data?.customOutputSchema) || el.data.customOutputSchema.length === 0)) {
+                            nextData = { ...(nextData || el.data), customOutputSchema };
+                        }
+                        if (isTypeCarrier && !el.data?.zipOutput) {
+                            nextData = { ...(nextData || el.data), zipOutput: true };
+                        }
+                    }
                     break;
+                }
                 case 'element-id':
                     valueType = el.data?.customOutputType || 'string';
                     break;
@@ -2648,35 +4324,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = payloadType || 'string';
                     break;
                 }
-                case 'unzip': {
-                    // Unzip always exposes all outputs - element-level valueType is number (per-pin types handled separately)
+                case 'unzip':
                     valueType = 'number';
                     break;
-                }
                 case 'case-range':
                 case 'case-value':
                     valueType = 'case';
                     break;
                 case 'switch': {
                     const switchCaseConnections = nextConnections
-                        .filter(c => c.toId === el.id && getInputIndex(c.toInput) > 0)
+                        .filter((connection) => connection.toId === el.id && getInputIndex(connection.toInput) > 0)
                         .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
-
-                    const firstCase = switchCaseConnections.length > 0
-                        ? elementMap.get(switchCaseConnections[0].fromId)
-                        : null;
-
-                    if (firstCase?.type === 'case-range') {
-                        valueType =
-                            getConnectedType(firstCase.id, 'input2')
-                            || getLiteralType(firstCase.data?.out ?? 0);
-                    } else if (firstCase?.type === 'case-value') {
-                        valueType =
-                            getConnectedType(firstCase.id, 'input1')
-                            || getLiteralType(firstCase.data?.out ?? 0);
-                    } else {
-                        valueType = el.valueType || 'number';
-                    }
+                    const firstCase = switchCaseConnections[0];
+                    const firstCaseType = firstCase ? getConnectedType(el.id, firstCase.toInput) : null;
+                    valueType = (firstCaseType as any) || 'number';
                     break;
                 }
                 case 'node': {
@@ -2695,7 +4356,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'boolean';
                     break;
                 case 'fallback': {
-                    // Fallback inherits type from primary input (input0), or fallback input (input1)
                     const primaryType = getConnectedType(el.id, 'input0');
                     const fallbackType = getConnectedType(el.id, 'input1');
                     valueType = primaryType || fallbackType || el.valueType || 'number';
@@ -2727,42 +4387,639 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'css-join':
                     valueType = 'css';
                     break;
-                case 'string-split':
-                case 'string-replace':
-                case 'string-trim':
-                case 'string-upper':
-                case 'string-lower':
+                case 'array':
+                case 'array-push':
+                case 'array-pop':
+                case 'array-sort':
+                case 'array-remove-index':
+                case 'array-replace-index':
+                    valueType = 'array';
+                    if (el.type === 'array') {
+                        const typeConn = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
+                        const candidateConn = typeConn;
+                        const candidateElement = candidateConn ? elementMap.get(candidateConn.fromId) : null;
+                        const candidateArrayType = candidateElement?.data?.arrayItemType;
+                        const candidateValueType = candidateArrayType === 'number' || candidateArrayType === 'string' || candidateArrayType === 'boolean' || candidateArrayType === 'color' || candidateArrayType === 'zip'
+                            ? candidateArrayType
+                            : candidateElement?.valueType;
+                        const candidateArraySchema = getArrayItemSchemaFromElement(candidateElement);
+                        if (candidateValueType === 'number' || candidateValueType === 'string' || candidateValueType === 'boolean' || candidateValueType === 'color' || candidateValueType === 'zip') {
+                            nextData = { ...el.data, arrayItemType: candidateValueType, arrayItemSchema: candidateArraySchema };
+                        }
+                    } else if (el.type === 'array-sort') {
+                        const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
+                        const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                        const sourceSchema = getArrayItemSchemaFromElement(sourceElement);
+                        const currentField = String(el.data?.arraySortField || '').trim();
+                        const hasField = sourceSchema.some((field) => field.id === currentField || field.label === currentField);
+                        if (sourceSchema.length > 0 && (!currentField || !hasField)) {
+                            nextData = { ...el.data, arraySortField: sourceSchema[0].id };
+                        }
+                    }
+                    break;
+                case 'image-from-link':
+                case 'image-from-element':
                     valueType = 'string';
+                    break;
+                case 'api-request':
+                    valueType = 'zip';
+                    break;
+                case 'api-field': {
+                    const apiFieldType = el.data?.apiFieldType;
+                    valueType = apiFieldType === 'string' || apiFieldType === 'boolean' || apiFieldType === 'color' || apiFieldType === 'case' || apiFieldType === 'zip' || apiFieldType === 'number'
+                        ? apiFieldType
+                        : 'string';
+                    break;
+                }
+                case 'api-list-mapper': {
+                    valueType = 'array';
+                    const normalizedApiListItemType = el.data?.apiListItemType === 'number'
+                        || el.data?.apiListItemType === 'string'
+                        || el.data?.apiListItemType === 'boolean'
+                        || el.data?.apiListItemType === 'color'
+                        || el.data?.apiListItemType === 'zip'
+                        || el.data?.apiListItemType === 'chart-data'
+                        || el.data?.apiListItemType === 'case'
+                        ? el.data.apiListItemType
+                        : 'string';
+                    const normalizedScalarType = normalizedApiListItemType === 'case'
+                        ? 'zip'
+                        : normalizedApiListItemType === 'chart-data'
+                            ? 'zip'
+                        : normalizedApiListItemType;
+                    const mapperSchema = normalizedApiListItemType === 'zip'
+                        ? getApiListMapperSchema(el)
+                        : normalizedApiListItemType === 'chart-data'
+                            ? getApiListMapperSchema(el)
+                        : [
+                            normalizeArraySchemaItem(
+                                {
+                                    id: String(el.data?.apiListValueField || 'value').trim() || 'value',
+                                    label: String(el.data?.apiListValueField || 'value').trim() || 'value',
+                                    type: normalizedScalarType,
+                                    sourceNodeId: el.id,
+                                    sourcePin: String(el.data?.apiListValueField || 'value').trim() || 'value',
+                                },
+                                0,
+                                String(el.data?.apiListValueField || 'value').trim() || 'value'
+                            ),
+                        ];
+                    nextData = {
+                        ...el.data,
+                        apiListItemType: normalizedApiListItemType,
+                        arrayItemType: normalizedScalarType,
+                        arrayItemSchema: mapperSchema,
+                    };
+                    break;
+                }
+                case 'action-event':
+                case 'action-block':
+                case 'action-required':
+                case 'action-min':
+                case 'action-max':
+                case 'action-length':
+                case 'action-regex':
+                case 'action-add-class':
+                case 'action-remove-class':
+                case 'action-toggle-class':
+                    valueType = 'action';
+                    break;
+                case 'chart-data':
+                    valueType = 'zip';
+                    (() => {
+                        const normalizedChartData = normalizeChartDataNodeData(el.data);
+                        const currentChartData = {
+                            chartDataTypeCarrier: !!el.data?.chartDataTypeCarrier,
+                            chartDataLabel: String(el.data?.chartDataLabel ?? 'label'),
+                            chartDataValueText: String(el.data?.chartDataValueText ?? el.data?.chartDataValue ?? '0'),
+                            chartDataValue: Number.isFinite(Number(el.data?.chartDataValue ?? 0)) ? Number(el.data?.chartDataValue ?? 0) : 0,
+                        };
+
+                        const chartDataChanged =
+                            currentChartData.chartDataTypeCarrier !== normalizedChartData.chartDataTypeCarrier
+                            || currentChartData.chartDataLabel !== normalizedChartData.chartDataLabel
+                            || currentChartData.chartDataValueText !== normalizedChartData.chartDataValueText
+                            || currentChartData.chartDataValue !== normalizedChartData.chartDataValue;
+
+                        if (chartDataChanged) {
+                            nextData = {
+                                ...el.data,
+                                ...normalizedChartData,
+                            };
+                        }
+                    })();
                     break;
                 default:
                     valueType = el.valueType || 'number';
                     break;
             }
 
-            if (el.valueType === valueType) {
+            if (el.valueType === valueType && !nextData) {
                 return el;
             }
-            return { ...el, valueType };
+            return {
+                ...el,
+                valueType,
+                ...(nextData ? { data: { ...el.data, ...nextData } } : {})
+            };
         });
     };
 
-    useEffect(() => {
-        setElements(prev => {
-            const updated = updateElementValueTypes(prev, connections);
-            const changed = updated.some((el, idx) => el !== prev[idx]);
-            return changed ? updated : prev;
-        });
-    }, [connections, detectedElements]);
+    const showInfoNotice = (reason: string) => {
+        if (floatingNoticeTimeoutRef.current) {
+            window.clearTimeout(floatingNoticeTimeoutRef.current);
+        }
+        setFloatingNotice(reason);
+        floatingNoticeTimeoutRef.current = window.setTimeout(() => {
+            setFloatingNotice('');
+            floatingNoticeTimeoutRef.current = null;
+        }, 3500);
+    };
 
-    useEffect(() => {
-        if (!customNodeMode && mainElementType !== 'logic') {
+    const cloneCanvasElements = (items: CanvasElement[]): CanvasElement[] => {
+        try {
+            return JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+        } catch {
+            return Array.isArray(items) ? [...items] : [];
+        }
+    };
+
+    const cloneConnections = (items: Connection[]): Connection[] => {
+        try {
+            return JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+        } catch {
+            return Array.isArray(items) ? [...items] : [];
+        }
+    };
+
+    const areSnapshotsEquivalent = (
+        firstSnapshot: Partial<SavedState> | null | undefined,
+        secondSnapshot: Partial<SavedState> | null | undefined
+    ): boolean => {
+        const first = normalizeSnapshotState(firstSnapshot);
+        const second = normalizeSnapshotState(secondSnapshot);
+
+        if (!first || !second) {
+            return false;
+        }
+
+        const firstComparable = {
+            elements: first.elements,
+            connections: first.connections,
+            formula: first.formula,
+            customNodeUi: first.customNodeUi,
+        };
+        const secondComparable = {
+            elements: second.elements,
+            connections: second.connections,
+            formula: second.formula,
+            customNodeUi: second.customNodeUi,
+        };
+
+        try {
+            return JSON.stringify(firstComparable) === JSON.stringify(secondComparable);
+        } catch {
+            return false;
+        }
+    };
+
+    const buildSavedState = (): SavedState => ({
+        elements: cloneCanvasElements(elementsRef.current || elements),
+        connections: cloneConnections(connectionsRef.current || connections),
+        formula: buildGraphFormulaFromState(
+            elementsRef.current || elements,
+            connectionsRef.current || connections
+        ) || (typeof formulaRef.current === 'string' ? formulaRef.current : formula),
+        customNodeUi: customNodeUiRef.current ? normalizeCustomNodeUiState(customNodeUiRef.current) : null,
+        updatedAt: Date.now(),
+    });
+
+    const persistSavedSnapshot = (snapshot: SavedState) => {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot));
+                window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(snapshot));
+            }
+        } catch {
+            // Ignore storage failures and keep the editor usable.
+        }
+    };
+
+    const persistAutosaveSnapshot = (snapshot: SavedState) => {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(snapshot));
+            }
+        } catch {
+            // Ignore storage failures and keep the editor usable.
+        }
+    };
+
+    const normalizeSnapshotState = (snapshot: Partial<SavedState> | null | undefined): SavedState | null => {
+        if (!snapshot || typeof snapshot !== 'object') {
+            return null;
+        }
+
+        return {
+            elements: cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []),
+            connections: cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : []),
+            formula: typeof snapshot.formula === 'string' ? snapshot.formula : '',
+            customNodeUi: snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null,
+            updatedAt: Number.isFinite(Number(snapshot.updatedAt)) ? Number(snapshot.updatedAt) : Date.now(),
+        };
+    };
+
+    const readStoredSnapshot = (storageKey: string): SavedState | null => {
+        if (typeof window === 'undefined' || !window.localStorage) {
+            return null;
+        }
+
+        try {
+            const raw = window.localStorage.getItem(storageKey);
+            if (!raw) {
+                return null;
+            }
+            return normalizeSnapshotState(JSON.parse(raw));
+        } catch {
+            return null;
+        }
+    };
+
+    const applySnapshot = (snapshot: SavedState | null) => {
+        if (!snapshot) {
             return;
         }
-        const { formula: generatedFormula } = generateFormula(elements, connections);
-        const normalizedFormula = generatedFormula || '';
-        setFormula((prev) => (prev === normalizedFormula ? prev : normalizedFormula));
-        formulaRef.current = normalizedFormula;
-    }, [connections, customNodeMode, mainElementType, elements]);
+
+        const nextElements = cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []);
+        const nextConnections = cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : []);
+        const nextFormula = typeof snapshot.formula === 'string' ? snapshot.formula : '';
+        const nextCustomNodeUi = snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null;
+        const normalizedElements = updateElementValueTypes(
+            nextElements.length > 0 ? nextElements : [{
+                id: 'main-block',
+                name: 'Html Element',
+                type: 'main',
+                x: 0,
+                y: 0,
+                data: { formula: '' },
+                connections: []
+            }],
+            nextConnections
+        );
+
+        setElements(normalizedElements);
+        setConnections(nextConnections);
+        setFormula(nextFormula);
+        setCustomNodeUi(nextCustomNodeUi);
+        setSavedState({
+            ...snapshot,
+            elements: normalizedElements,
+            connections: nextConnections,
+            formula: nextFormula,
+            customNodeUi: nextCustomNodeUi,
+            updatedAt: snapshot.updatedAt || Date.now(),
+        });
+        setAutosaveState({
+            ...snapshot,
+            elements: normalizedElements,
+            connections: nextConnections,
+            formula: nextFormula,
+            customNodeUi: nextCustomNodeUi,
+            updatedAt: snapshot.updatedAt || Date.now(),
+        });
+        setRecoverableDraftState({
+            ...snapshot,
+            elements: normalizedElements,
+            connections: nextConnections,
+            formula: nextFormula,
+            customNodeUi: nextCustomNodeUi,
+            updatedAt: snapshot.updatedAt || Date.now(),
+        });
+        setUnsavedChanges(false);
+        setPendingDraftRecovery(null);
+        setShowDraftRecoveryNotice(false);
+        setSelected(normalizedElements.some((element) => element.id === selected) ? selected : (
+            shouldRenderMainBlock
+                ? 'main-block'
+                : (normalizedElements.find((element) => element.id !== 'main-block')?.id || null)
+        ));
+        onUnsavedChange?.(false);
+        onFormulaChange?.(nextFormula);
+        onStateChangeRef.current?.({
+            ...snapshot,
+            elements: normalizedElements,
+            connections: nextConnections,
+            formula: nextFormula,
+            customNodeUi: nextCustomNodeUi,
+            updatedAt: snapshot.updatedAt || Date.now(),
+        });
+    };
+
+    const markGraphDirty = () => {
+        setUnsavedChanges(true);
+        onUnsavedChange?.(true);
+    };
+
+    const createElementFromTreeItem = (item: TreeItem, x: number, y: number): CanvasElement => ({
+        id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: item.name,
+        type: item.type as CanvasElement['type'],
+        x,
+        y,
+        data: (() => {
+            const baseData = getDefaultNodeDataForTreeItem(item.type);
+            if (!item.customNodeId) {
+                return {
+                    ...baseData,
+                };
+            }
+
+            const customNodeRecord = getCustomNodeRecordById(item.customNodeId);
+            const customNodeUi = normalizeCustomNodeUiState(customNodeRecord?.state?.customNodeUi || customNodeRecord?.customNodeUi || null);
+            const customInputSchema = Array.isArray(customNodeRecord?.inputSchema)
+                ? customNodeRecord.inputSchema
+                    .map((entry: any, index: number) => normalizeArraySchemaItem(entry, index, String(entry?.label || entry?.id || `Input ${index + 1}`)))
+                    .filter(Boolean)
+                : [];
+            const customTemplateFormula = String(customNodeRecord?.state?.mainFormula || customNodeRecord?.state?.formula || '').trim();
+            const customOutputSchema = Array.isArray(customNodeRecord?.outputSchema) && customNodeRecord.outputSchema.length > 0
+                ? customNodeRecord.outputSchema
+                    .map((entry: any, index: number) => normalizeArraySchemaItem(entry, index, String(entry?.label || entry?.id || `Output ${index + 1}`)))
+                    .filter(Boolean)
+                : detectElementOutputsFromCustomUi(customNodeUi).map((entry, index) => ({
+                    id: String(entry?.name || '').trim() || `output-${index + 1}`,
+                    label: String(entry?.name || '').trim() || `Output ${index + 1}`,
+                    type: entry?.type || 'string',
+                    sourceNodeId: item.customNodeId,
+                }));
+
+            return {
+                ...baseData,
+                customNodeId: item.customNodeId,
+                customNodeName: item.name,
+                customInputSchema,
+                customOutputSchema,
+                customTemplateFormula,
+                zipOutput: Boolean(customNodeRecord?.state?.zipOutput),
+            };
+        })(),
+        connections: []
+    });
+
+    const finishSidebarDrag = (clientX: number, clientY: number) => {
+        const drag = sidebarDragRef.current;
+        const item = draggedItemRef.current;
+        const canvasEl = canvasRef.current;
+
+        if (!drag || !item || !canvasEl) {
+            setIsDraggingFromSidebar(false);
+            isDraggingFromSidebarRef.current = false;
+            setDraggedItem(null);
+            draggedItemRef.current = null;
+            setDragPreview(null);
+            sidebarDragRef.current = null;
+            return;
+        }
+
+        const movedDistance = Math.hypot(clientX - drag.startX, clientY - drag.startY);
+        const movedEnough = movedDistance >= 5;
+        const rect = canvasEl.getBoundingClientRect();
+        const insideCanvas =
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom;
+
+        if (movedEnough && insideCanvas) {
+            const dropX = (clientX - rect.left - offsetXRef.current) / zoomRef.current;
+            const dropY = (clientY - rect.top - offsetYRef.current) / zoomRef.current;
+            const nextElement = createElementFromTreeItem(
+                item,
+                Math.round(dropX - 90),
+                Math.round(dropY - 30)
+            );
+            setElements((prev) => updateElementValueTypes([...prev, nextElement], connectionsRef.current));
+            setSelected(nextElement.id);
+            markGraphDirty();
+        }
+
+        setIsDraggingFromSidebar(false);
+        isDraggingFromSidebarRef.current = false;
+        setDraggedItem(null);
+        draggedItemRef.current = null;
+        setDragPreview(null);
+        sidebarDragRef.current = null;
+    };
+
+    const handleSaveFormula = () => {
+        const nextFormula = buildGraphFormulaFromState(
+            elementsRef.current || elements,
+            connectionsRef.current || connections
+        ) || (typeof formulaRef.current === 'string' ? formulaRef.current : formula);
+        setFormula(nextFormula);
+        onFormulaChange?.(nextFormula);
+    };
+
+    const fetchJson = React.useCallback(async (path: string) => {
+        const win = typeof window !== 'undefined'
+            ? window as typeof window & {
+                wp?: { apiFetch?: (args: { path: string; method?: string; data?: unknown }) => Promise<unknown> };
+                wpApiSettings?: { nonce?: string };
+            }
+            : undefined;
+
+        if (win?.wp?.apiFetch) {
+            return win.wp.apiFetch({ path });
+        }
+
+        const response = await fetch(`/wp-json${path}`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(win?.wpApiSettings?.nonce ? { 'X-WP-Nonce': win.wpApiSettings.nonce } : {}),
+            },
+        });
+
+        if (!response.ok) {
+            throw new Error(`Request failed (${response.status})`);
+        }
+
+        return response.json();
+    }, []);
+
+    const refreshTemplates = React.useCallback(async () => {
+        if (!templateToolsEnabled) {
+            setTemplates([]);
+            setSelectedTemplateId('');
+            return;
+        }
+
+        try {
+            const response = await fetchJson(`/calcgraph/v1/templates?_t=${Date.now()}`);
+            const rawItems = Array.isArray(response)
+                ? response
+                : Array.isArray((response as { items?: unknown }).items)
+                    ? (response as { items?: unknown[] }).items || []
+                    : [];
+
+            const nextTemplates = rawItems
+                .map((item) => {
+                    if (!item || typeof item !== 'object') {
+                        return null;
+                    }
+
+                    const record = item as Record<string, unknown>;
+                    const id = typeof record.id === 'string' ? record.id.trim() : '';
+                    const name = typeof record.name === 'string' ? record.name.trim() : '';
+                    const state = normalizeSnapshot(record.state);
+                    const updatedAt = Number.isFinite(Number(record.updatedAt)) ? Number(record.updatedAt) : 0;
+
+                    if (!id || !name) {
+                        return null;
+                    }
+
+                    return {
+                        id,
+                        name,
+                        state,
+                        updatedAt,
+                    };
+                })
+                .filter((item): item is GraphTemplateItem => Boolean(item));
+
+            setTemplates(nextTemplates);
+            setSelectedTemplateId((prev) => prev || nextTemplates[0]?.id || '');
+            setTemplateInfo('');
+        } catch {
+            setTemplates([]);
+            setTemplateInfo('Unable to load templates.');
+        }
+    }, [fetchJson, templateToolsEnabled]);
+
+    const handleImportTemplate = React.useCallback(() => {
+        setIsTemplateBusy(true);
+        try {
+            const template = templates.find((item) => item.id === selectedTemplateId);
+            const state = normalizeSnapshot(template?.state);
+
+            if (!template || !state) {
+                setTemplateInfo('Select a valid template.');
+                return;
+            }
+
+            applySnapshot({
+                elements: state.elements as CanvasElement[],
+                connections: state.connections as Connection[],
+                formula: state.mainFormula,
+                eventFormulas: state.eventFormulas,
+                customNodeUi: state.customNodeUi,
+                updatedAt: state.updatedAt,
+            });
+
+            persistSavedSnapshot({
+                elements: cloneCanvasElements(state.elements as CanvasElement[]),
+                connections: cloneConnections(state.connections as Connection[]),
+                formula: state.mainFormula,
+                customNodeUi: state.customNodeUi,
+                updatedAt: Date.now(),
+            });
+
+            setTemplateInfo('Template imported.');
+        } finally {
+            setIsTemplateBusy(false);
+        }
+    }, [applySnapshot, persistSavedSnapshot, selectedTemplateId, templates]);
+
+    useEffect(() => {
+        if (hasInitializedRef.current) {
+            return;
+        }
+
+        hasInitializedRef.current = true;
+        draftRecoveryCheckedRef.current = false;
+
+        const normalizedInitial = normalizeSnapshotState(initialState);
+        const savedFromStorage = readStoredSnapshot(SAVE_KEY);
+        const autosaveFromStorage = readStoredSnapshot(AUTOSAVE_KEY);
+        const activeSnapshot = forceInitialState
+            ? (normalizedInitial || savedFromStorage || autosaveFromStorage)
+            : (savedFromStorage || normalizedInitial || autosaveFromStorage);
+
+        const defaultMainBlock: CanvasElement = {
+            id: 'main-block',
+            name: 'Html Element',
+            type: 'main',
+            x: 0,
+            y: 0,
+            data: { formula: '' },
+            connections: []
+        };
+
+        if (activeSnapshot) {
+            const nextElements = cloneCanvasElements(Array.isArray(activeSnapshot.elements) ? activeSnapshot.elements : []);
+            const nextConnections = cloneConnections(Array.isArray(activeSnapshot.connections) ? activeSnapshot.connections : []);
+            const nextFormula = typeof activeSnapshot.formula === 'string' ? activeSnapshot.formula : '';
+            const nextCustomNodeUi = activeSnapshot.customNodeUi ? normalizeCustomNodeUiState(activeSnapshot.customNodeUi) : null;
+            const normalizedElements = updateElementValueTypes(
+                nextElements.length > 0 ? nextElements : [defaultMainBlock],
+                nextConnections
+            );
+            const nextSavedState = normalizedInitial || savedFromStorage || activeSnapshot;
+            const nextAutosaveState = autosaveFromStorage || nextSavedState;
+            const hasRecoverableDraft = Boolean(
+                autosaveFromStorage
+                && nextSavedState
+                && !areSnapshotsEquivalent(autosaveFromStorage, nextSavedState)
+            );
+
+            setElements(normalizedElements);
+            setConnections(nextConnections);
+            setFormula(nextFormula);
+            setCustomNodeUi(nextCustomNodeUi);
+            setSavedState(nextSavedState);
+            setAutosaveState(nextAutosaveState);
+            setRecoverableDraftState(hasRecoverableDraft ? autosaveFromStorage : nextAutosaveState);
+            setPendingDraftRecovery(hasRecoverableDraft && !templateMode && !customNodeMode ? autosaveFromStorage : null);
+            setShowDraftRecoveryNotice(hasRecoverableDraft && !templateMode && !customNodeMode);
+            setUnsavedChanges(false);
+            setSelected(
+                normalizedElements.some((element) => element.id === 'main-block')
+                    ? (shouldRenderMainBlock ? 'main-block' : (normalizedElements.find((element) => element.id !== 'main-block')?.id || null))
+                    : (normalizedElements.find((element) => element.id !== 'main-block')?.id || (shouldRenderMainBlock ? 'main-block' : null))
+            );
+            onUnsavedChange?.(false);
+            onFormulaChange?.(nextFormula);
+            setIsStateLoaded(true);
+            isStateLoadedRef.current = true;
+            return;
+        }
+
+        setElements([defaultMainBlock]);
+        setConnections([]);
+        setFormula('');
+        setCustomNodeUi(null);
+        setSavedState(null);
+        setAutosaveState(null);
+        setRecoverableDraftState(null);
+        setPendingDraftRecovery(null);
+        setShowDraftRecoveryNotice(false);
+        setUnsavedChanges(false);
+        setSelected(shouldRenderMainBlock ? 'main-block' : null);
+        onUnsavedChange?.(false);
+        setIsStateLoaded(true);
+        isStateLoadedRef.current = true;
+    }, [AUTOSAVE_KEY, SAVE_KEY, customNodeMode, forceInitialState, initialState, onFormulaChange, onUnsavedChange, shouldRenderMainBlock, templateMode]);
+
+    useEffect(() => {
+        if (!isStateLoaded || templateMode || customNodeMode || !unsavedChanges) {
+            return;
+        }
+
+        const snapshot = buildSavedState();
+        setAutosaveState(snapshot);
+        persistAutosaveSnapshot(snapshot);
+    }, [connections, customNodeMode, elements, formula, isStateLoaded, persistAutosaveSnapshot, templateMode, customNodeUi, unsavedChanges]);
 
     useLayoutEffect(() => {
         const rafId = window.requestAnimationFrame(() => {
@@ -2771,7 +5028,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             calcNodes.forEach((node) => {
                 const connectedCalcInputs = getConnectedInputIndexesForElement(node.id, connections);
-                if (connectedCalcInputs.length === 0) {
+                const nodeInputCount = Math.max(0, getInputCount(node));
+                const highestConnectedIndex = connectedCalcInputs.length > 0 ? connectedCalcInputs[connectedCalcInputs.length - 1] : -1;
+                const hasGapError = Boolean(dynamicInputGapErrors[node.id]);
+
+                if (connectedCalcInputs.length === 0 || (connectedCalcInputs.length < 2 && !hasGapError)) {
                     next[node.id] = [];
                     return;
                 }
@@ -2780,6 +5041,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (!nodeEl) {
                     return;
                 }
+
                 const nodeRect = nodeEl.getBoundingClientRect();
                 const safeWidth = Math.max(1, getNodeWidth(node));
                 const safeHeight = Math.max(1, getNodeHeight(node));
@@ -2822,8 +5084,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 };
 
                 const segments: CalcFlowSegment[] = [];
-                const operatorPoints = connectedCalcInputs
-                    .map((_, operatorIndex) => getOperatorPoints(operatorIndex))
+                const operatorPoints = Array.from({ length: Math.max(0, nodeInputCount - 1) }, (_, operatorIndex) => getOperatorPoints(operatorIndex))
                     .filter((point): point is {
                         left: { x: number; y: number };
                         right: { x: number; y: number };
@@ -2836,18 +5097,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const fallbackTopY = safeHeight * 0.42;
                 const fallbackBottomY = safeHeight * 0.58;
 
-                connectedCalcInputs.forEach((sourceInputIndex, activeIndex) => {
+                for (let sourceInputIndex = 0; sourceInputIndex < nodeInputCount; sourceInputIndex += 1) {
                     const inputPoint = getInputPinPoint(sourceInputIndex);
                     if (!inputPoint) {
-                        return;
+                        continue;
                     }
 
-                    const targetOperatorIndex = activeIndex <= 1
-                        ? 0
-                        : Math.min(operatorPoints.length - 1, activeIndex - 1);
+                    const isConnected = connectedCalcInputs.includes(sourceInputIndex);
+                    if (!isConnected && !hasGapError) {
+                        continue;
+                    }
+                    if (!isConnected && sourceInputIndex > highestConnectedIndex) {
+                        continue;
+                    }
+
+                    const targetOperatorIndex = Math.min(operatorPoints.length - 1, Math.max(0, sourceInputIndex - 1));
                     const targetOperator = operatorPoints[targetOperatorIndex];
                     const badgeX = targetOperator?.left.x ?? fallbackOperatorX;
-                    const badgeY = activeIndex === 0
+                    const badgeY = sourceInputIndex === 0
                         ? (targetOperator?.top.y ?? fallbackTopY)
                         : (targetOperator?.bottom.y ?? fallbackBottomY);
                     const leftToRight = inputPoint.x <= badgeX;
@@ -2855,7 +5122,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const lineEndY = badgeY;
                     const spanX = Math.max(14, Math.abs(lineEndX - inputPoint.x));
                     const spanY = lineEndY - inputPoint.y;
-                    const wobble = activeIndex % 2 === 0 ? -12 : 12;
+                    const wobble = sourceInputIndex % 2 === 0 ? -12 : 12;
                     const c1x = inputPoint.x + ((leftToRight ? 1 : -1) * Math.max(12, spanX * 0.4));
                     const c1y = inputPoint.y + (spanY * 0.2) + wobble;
                     const c2x = lineEndX - ((leftToRight ? 1 : -1) * Math.max(10, spanX * 0.2));
@@ -2864,11 +5131,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     segments.push({
                         key: `input-flow-${sourceInputIndex}`,
                         d: `M ${inputPoint.x} ${inputPoint.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${lineEndX} ${lineEndY}`,
-                        step: activeIndex + 1,
+                        step: sourceInputIndex + 1,
                         badgeX,
                         badgeY,
+                        ghost: !isConnected,
                     });
-                });
+                }
 
                 next[node.id] = segments;
             });
@@ -2883,2758 +5151,402 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return () => window.cancelAnimationFrame(rafId);
     }, [elements, connections]);
 
-    // Check if connection types are compatible
-    const areTypesCompatible = (fromElement: CanvasElement, toElement: CanvasElement, fromOutputIndex: number, toInputIndex: number, connectionType?: 'normal' | 'case'): boolean => {
-        // Special case connections (case nodes to switch)
-        if (connectionType === 'case') {
-            return isCaseNodeType(fromElement.type) && toElement.type === 'switch' && toInputIndex > 0;
-        }
-
-        // For unzip node and unzipped custom-node, each output pin has its own type
-        const fromType = (fromElement.type === 'unzip' || (fromElement.type === 'custom-node' && !fromElement.data?.zipOutput))
-            ? (getOutputPinType(fromElement, fromOutputIndex) || 'number')
-            : (fromElement.valueType || 'number');
-
-        const accepted = getAcceptedTypesForPin(toElement, toInputIndex);
-        
-        // Event types can only connect to event types - no mixing with other types
-        if (fromType === 'event' && !accepted.includes('event')) {
-            return false;
-        }
-        if (fromType !== 'event' && accepted.includes('event') && accepted.length === 1) {
-            return false;
-        }
-        
-        return accepted.includes(fromType);
-    };
-
-    // Generate formula string from connected nodes.
-    const generateFormula = (elements: CanvasElement[], connections: Connection[], traceSteps?: string[]): { formula: string; steps: string[] } => {
-        const steps: string[] = traceSteps || [];
-        let result = '';
-        const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const customPlaceholderForNode = (nodeId: string): string => `__customIn("${nodeId}")`;
-        const elementById = new Map<string, CanvasElement>();
-        const connectionsByTargetInput = new Map<string, Connection>();
-        const connectionsByTargetId = new Map<string, Connection[]>();
-
-        elements.forEach((element) => {
-            elementById.set(element.id, element);
-        });
-        connections.forEach((connection) => {
-            connectionsByTargetInput.set(getConnectionLookupKey(connection.toId, connection.toInput), connection);
-            const targetConnections = connectionsByTargetId.get(connection.toId);
-            if (targetConnections) {
-                targetConnections.push(connection);
-            } else {
-                connectionsByTargetId.set(connection.toId, [connection]);
-            }
-        });
-
-        const getConnectionToInput = (toId: string, toInput: string): Connection | undefined => {
-            return connectionsByTargetInput.get(getConnectionLookupKey(toId, toInput));
-        };
-        const getConnectionsToElement = (toId: string): Connection[] => {
-            return connectionsByTargetId.get(toId) || [];
-        };
-
-        // Helper: build expression from a connection, passing the correct output pin index
-        const buildFromConn = (conn: Connection, depth: number): string => {
-            const outIdx = parseInt(conn.fromOutput.replace('output', ''), 10);
-            return buildExpression(conn.fromId, depth, Number.isFinite(outIdx) ? outIdx : 0);
-        };
-
-        const buildExpression = (elementId: string, depth: number = 0, outputIndex: number = 0): string => {
-            const element = elementById.get(elementId);
-            if (!element) return '';
-
-            const indent = '  '.repeat(depth);
-
-            const getInputConnection = (inputName: string): Connection | undefined =>
-                getConnectionToInput(element.id, inputName);
-            
-            switch (element.type) {
-                case 'number': {
-                    if (customNodeMode) {
-                        // Hidden nodes use their literal default value instead of a placeholder
-                        if (element.data?.hidden) {
-                            const parsed = Number(element.data?.valueText ?? element.data?.value ?? 0);
-                            const val = Number.isFinite(parsed) ? parsed : 0;
-                            steps.push(`${indent}custom-input number "${element.name}" (hidden): ${val}`);
-                            return String(val);
-                        }
-                        const expr = customPlaceholderForNode(element.id);
-                        steps.push(`${indent}custom-input number "${element.name}": ${expr}`);
-                        return expr;
-                    }
-                    const parsed = Number(element.data?.valueText ?? element.data?.value ?? 0);
-                    const value = Number.isFinite(parsed) ? parsed : Number(element.data?.value ?? 0) || 0;
-                    steps.push(`${indent}number node "${element.name}": ${value}`);
-                    return String(value);
-                }
-
-                case 'constant-boolean': {
-                    if (customNodeMode) {
-                        if (element.data?.hidden) {
-                            const raw = element.data?.value;
-                            const result = (raw === true || String(raw).toLowerCase() === 'true') ? 'true' : 'false';
-                            steps.push(`${indent}custom-input boolean "${element.name}" (hidden): ${result}`);
-                            return result;
-                        }
-                        const expr = customPlaceholderForNode(element.id);
-                        steps.push(`${indent}custom-input boolean "${element.name}": ${expr}`);
-                        return expr;
-                    }
-                    const raw = element.data?.value;
-                    const boolValue = raw === true || String(raw).toLowerCase() === 'true';
-                    const result = boolValue ? 'true' : 'false';
-                    steps.push(`${indent}boolean constant "${element.name}": ${result}`);
-                    return result;
-                }
-
-                case 'constant-string': {
-                    if (customNodeMode) {
-                        if (element.data?.hidden) {
-                            const text = String(element.data?.value ?? '');
-                            const result = JSON.stringify(text);
-                            steps.push(`${indent}custom-input string "${element.name}" (hidden): ${result}`);
-                            return result;
-                        }
-                        const expr = customPlaceholderForNode(element.id);
-                        steps.push(`${indent}custom-input string "${element.name}": ${expr}`);
-                        return expr;
-                    }
-                    const text = String(element.data?.value ?? '');
-                    const result = JSON.stringify(text);
-                    steps.push(`${indent}string constant "${element.name}": ${result}`);
-                    return result;
-                }
-
-                case 'element-id': {
-                    const elementId = String(element.data?.elementId || '');
-                    const result = JSON.stringify(elementId);
-                    steps.push(`${indent}element-id node "${element.name}": ${result}`);
-                    return result;
-                }
-
-                case 'memory-read-number':
-                case 'memory-read-string':
-                case 'memory-read-boolean': {
-                    const variableKey = String(element.data?.variableKey || '');
-                    const defaultValue = element.data?.defaultValue;
-                    const persistVariable = element.data?.persistVariable || false;
-                    const literal = toFormulaLiteral(defaultValue);
-                    const expr = `__nodeMemoryGet(${JSON.stringify(variableKey)}, ${literal}, ${persistVariable})`;
-                    steps.push(`${indent}${element.type} node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'memory-write-number':
-                case 'memory-write-string':
-                case 'memory-write-boolean': {
-                    const variableKey = String(element.data?.variableKey || '');
-                    const valueConn = getInputConnection('input0');
-                    const resetConn = getInputConnection('input1');
-                    const defaultWriteValue = element.type === 'memory-write-boolean' ? false : element.type === 'memory-write-number' ? 0 : '';
-                    const valueExpr = valueConn ? buildFromConn(valueConn, depth + 1) : toFormulaLiteral(defaultWriteValue);
-                    const resetExpr = resetConn ? buildFromConn(resetConn, depth + 1) : 'false';
-                    const expr = `__nodeMemorySet(${JSON.stringify(variableKey)}, ${valueExpr}, ${resetExpr})`;
-                    steps.push(`${indent}${element.type} node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'event-element':
-                case 'event-id': {
-                    const eventTarget = element.type === 'event-element'
-                        ? String(element.data?.eventElement || '')
-                        : String(element.data?.eventId || '');
-                    const eventType = String(element.data?.eventType || 'click');
-                    const expr = `__nodeEvent(${JSON.stringify(eventTarget)}, ${JSON.stringify(eventType)})`;
-                    steps.push(`${indent}${element.type} node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'event-processor': {
-                    const eventConn = getInputConnection('input0');
-                    const payloadConn = getInputConnection('input1');
-                    const passOnlyOnEvent = element.data?.passOnlyOnEvent === true;
-                    const eventExpr = eventConn ? buildFromConn(eventConn, depth + 1) : 'undefined';
-                    const payloadExpr = payloadConn ? buildFromConn(payloadConn, depth + 1) : 'undefined';
-                    const expr = `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${passOnlyOnEvent})`;
-                    steps.push(`${indent}event-processor node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'element': {
-                    const sourceId = element.data?.selectedElement || 'unknown-element';
-                    steps.push(`${indent}element node "${element.name}": ${sourceId}`);
-                    return `[${sourceId}]`;
-                }
-
-                case 'calculation': {
-                    const defaultOp = element.data?.operation || '+';
-                    const operations = element.data?.inputOperations || {};
-                    const inputCount = getInputCount(element);
-
-                    steps.push(`${indent}calculation node "${element.name}":`);
-
-                    const values = Array.from({ length: inputCount }).map((_, idx) => {
-                        const inputConn = getInputConnection(`input${idx}`);
-                        return inputConn
-                            ? buildExpression(inputConn.fromId, depth + 1)
-                            : String(element.data?.inputValues?.[idx] ?? 0);
-                    });
-
-                    if (values.length === 0) {
-                        steps.push(`${indent}  = 0`);
-                        return '0';
-                    }
-
-                    if (values.length === 1) {
-                        steps.push(`${indent}  = ${values[0]}`);
-                        return values[0];
-                    }
-
-                    let expression = values[0] || '0';
-                    for (let i = 1; i < values.length; i++) {
-                        const opKey = `input${i - 1}`;
-                        const currentOp = operations[opKey] || defaultOp;
-                        expression += ` ${currentOp} ${values[i]}`;
-                    }
-
-                    const calcResult = `(${expression})`;
-                    steps.push(`${indent}  = ${calcResult}`);
-                    return calcResult;
-                }
-
-                case 'condition': {
-                    const condLeft = getInputConnection('input0');
-                    const condRight = getInputConnection('input1');
-                    const condOp = (!element.data?.operation || element.data.operation === '+')
-                        ? '==='
-                        : element.data.operation;
-
-                    steps.push(`${indent}condition node "${element.name}" (${condOp}):`);
-
-                    const condLeftVal = condLeft ? buildExpression(condLeft.fromId, depth + 1) : '0';
-                    const condRightVal = condRight ? buildExpression(condRight.fromId, depth + 1) : '0';
-
-                    const condResult = `(${condLeftVal} ${condOp} ${condRightVal})`;
-                    steps.push(`${indent}  = ${condResult}`);
-                    return condResult;
-                }
-
-                case 'node': {
-                    const condInput = getInputConnection('input0');
-                    const trueInput = getInputConnection('input1');
-                    const falseInput = getInputConnection('input2');
-
-                    steps.push(`${indent}if node "${element.name}":`);
-
-                    const condition = condInput
-                        ? buildExpression(condInput.fromId, depth + 1)
-                        : 'true';
-
-                    const trueVal = trueInput
-                        ? buildExpression(trueInput.fromId, depth + 1)
-                        : 'undefined';
-
-                    const falseVal = falseInput
-                        ? buildExpression(falseInput.fromId, depth + 1)
-                        : 'undefined';
-
-                    const ifExpr = `((${condition}) ? (${trueVal}) : (${falseVal}))`;
-
-                    steps.push(`${indent}  = ${ifExpr}`);
-                    return ifExpr;
-                }
-
-                case 'switch': {
-                    steps.push(`${indent}switch node "${element.name}":`);
-
-                    const switchConn = getInputConnection('input0');
-
-                    const switchValue = switchConn
-                        ? buildExpression(switchConn.fromId, depth + 1)
-                        : 'undefined';
-
-                    steps.push(`${indent}  on value: ${switchValue}`);
-
-                    const caseConnections = getConnectionsToElement(element.id)
-                        .filter(c => getInputIndex(c.toInput) > 0)
-                        .sort((a, b) =>
-                            getInputIndex(a.toInput) - getInputIndex(b.toInput)
-                        );
-
-                    const caseClauses: Array<{ condition: string; result: string }> = [];
-
-                    for (const conn of caseConnections) {
-                        const caseElement = elementById.get(conn.fromId);
-                        if (!caseElement) continue;
-
-                        // CASE-VALUE
-                        if (caseElement.type === 'case-value') {
-                            const valConn = getConnectionToInput(caseElement.id, 'input0');
-
-                            const val = valConn
-                                ? buildExpression(valConn.fromId, depth + 1)
-                                : toFormulaLiteral(caseElement.data?.caseValue ?? 0);
-
-                            const outConn = getConnectionToInput(caseElement.id, 'input1');
-
-                            const outVal = outConn
-                                ? buildExpression(outConn.fromId, depth + 1)
-                                : toFormulaLiteral(caseElement.data?.out ?? 0);
-
-                            caseClauses.push({
-                                condition: `__nodeCaseEquals(${switchValue}, ${val})`,
-                                result: outVal,
-                            });
-                        }
-
-                        // CASE-RANGE
-                        if (caseElement.type === 'case-range') {
-                            const minConn = getConnectionToInput(caseElement.id, 'input0');
-                            const minVal = minConn
-                                ? buildExpression(minConn.fromId, depth + 1)
-                                : toFormulaLiteral(caseElement.data?.min ?? 0);
-
-                            const maxConn = getConnectionToInput(caseElement.id, 'input1');
-                            const maxVal = maxConn
-                                ? buildExpression(maxConn.fromId, depth + 1)
-                                : toFormulaLiteral(caseElement.data?.max ?? 0);
-
-                            const outConn = getConnectionToInput(caseElement.id, 'input2');
-                            const outVal = outConn
-                                ? buildExpression(outConn.fromId, depth + 1)
-                                : toFormulaLiteral(caseElement.data?.out ?? 0);
-
-                            caseClauses.push({
-                                condition:
-                                    `(Number(${switchValue}) >= Math.min(Number(${minVal}), Number(${maxVal}))` +
-                                    ` && Number(${switchValue}) <= Math.max(Number(${minVal}), Number(${maxVal})))`,
-                                result: outVal,
-                            });
-                        }
-                    }
-
-                    let switchExpr = '0';
-                    for (let index = caseClauses.length - 1; index >= 0; index -= 1) {
-                        const clause = caseClauses[index];
-                        switchExpr = `((${clause.condition}) ? (${clause.result}) : (${switchExpr}))`;
-                    }
-                    steps.push(`${indent}  = ${switchExpr}`);
-                    return switchExpr;
-                }
-
-
-                case 'case-range': {
-                    // input0 = min
-                    const minConn = getConnectionToInput(element.id, 'input0');
-                    const minVal = minConn
-                        ? buildExpression(minConn.fromId, depth + 1)
-                        : toFormulaLiteral(element.data?.min ?? 0);
-
-                    // input1 = max
-                    const maxConn = getConnectionToInput(element.id, 'input1');
-                    const maxVal = maxConn
-                        ? buildExpression(maxConn.fromId, depth + 1)
-                        : toFormulaLiteral(element.data?.max ?? 0);
-
-                    steps.push(`${indent}case-range node: ${minVal} to ${maxVal}`);
-                    return `[${minVal}..${maxVal}]`;
-                }
-
-
-                case 'case-value': {
-                    // input0 = case value
-                    const valConn = getConnectionToInput(element.id, 'input0');
-                    const val = valConn
-                        ? buildExpression(valConn.fromId, depth + 1)
-                        : toFormulaLiteral(element.data?.caseValue ?? 0);
-
-                    steps.push(`${indent}case-value node: value = ${val}`);
-                    return val;
-                }
-
-                case 'regex': {
-                    const inputConn = getInputConnection('input0');
-                    const textExpr = inputConn ? buildExpression(inputConn.fromId, depth + 1) : '""';
-                    const pattern = element.data?.regexPattern || '';
-                    const regexExpr = `__nodeRegex(${textExpr}, ${JSON.stringify(pattern)})`;
-                    steps.push(`${indent}regex node "${element.name}": ${regexExpr}`);
-                    return regexExpr;
-                }
-
-                case 'concat': {
-                    const firstConn = getInputConnection('input0');
-                    const secondConn = getInputConnection('input1');
-                    const first = firstConn ? buildExpression(firstConn.fromId, depth + 1) : '""';
-                    const second = secondConn ? buildExpression(secondConn.fromId, depth + 1) : '""';
-                    const concatExpr = `__nodeConcat(${first}, ${second})`;
-                    steps.push(`${indent}concat node "${element.name}": ${concatExpr}`);
-                    return concatExpr;
-                }
-
-                case 'multi-concat': {
-                    const inputCount = Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
-                    const parts = Array.from({ length: inputCount }, (_, i) => {
-                        const conn = getInputConnection(`input${i}`);
-                        return conn ? buildFromConn(conn, depth + 1) : '""';
-                    });
-                    const expr = `__nodeConcat(${parts.join(', ')})`;
-                    steps.push(`${indent}multi-concat node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'cut-a': {
-                    const sourceConn = getInputConnection('input0');
-                    const needleConn = getInputConnection('input1');
-                    const source = sourceConn ? buildExpression(sourceConn.fromId, depth + 1) : '""';
-                    const needle = needleConn ? buildExpression(needleConn.fromId, depth + 1) : '""';
-                    const reverse = element.data?.reverse ? 'true' : 'false';
-                    const cutExpr = `__nodeCutA(${source}, ${needle}, ${reverse})`;
-                    steps.push(`${indent}cut-a node "${element.name}": ${cutExpr}`);
-                    return cutExpr;
-                }
-
-                case 'cut-b': {
-                    const sourceConn = getInputConnection('input0');
-                    const indexConn = getInputConnection('input1');
-                    const source = sourceConn ? buildExpression(sourceConn.fromId, depth + 1) : '""';
-                    const indexValue = indexConn ? buildExpression(indexConn.fromId, depth + 1) : '0';
-                    const reverse = element.data?.reverse ? 'true' : 'false';
-                    const cutExpr = `__nodeCutB(${source}, ${indexValue}, ${reverse})`;
-                    steps.push(`${indent}cut-b node "${element.name}": ${cutExpr}`);
-                    return cutExpr;
-                }
-
-                case 'cut-c': {
-                    const sourceConn = getInputConnection('input0');
-                    const startConn = getInputConnection('input1');
-                    const endConn = getInputConnection('input2');
-                    const source = sourceConn ? buildExpression(sourceConn.fromId, depth + 1) : '""';
-                    const start = startConn ? buildExpression(startConn.fromId, depth + 1) : '0';
-                    const end = endConn ? buildExpression(endConn.fromId, depth + 1) : '0';
-                    const reverse = element.data?.reverse ? 'true' : 'false';
-                    const cutExpr = `__nodeCutC(${source}, ${start}, ${end}, ${reverse})`;
-                    steps.push(`${indent}cut-c node "${element.name}": ${cutExpr}`);
-                    return cutExpr;
-                }
-
-                case 'string-count-chars': {
-                    const textConn = getInputConnection('input0');
-                    const text = textConn ? buildExpression(textConn.fromId, depth + 1) : '""';
-                    const expr = `__nodeCountChars(${text})`;
-                    steps.push(`${indent}count-chars node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'string-count-words': {
-                    const textConn = getInputConnection('input0');
-                    const text = textConn ? buildExpression(textConn.fromId, depth + 1) : '""';
-                    const expr = `__nodeCountWords(${text})`;
-                    steps.push(`${indent}count-words node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'string-find-start': {
-                    const textConn = getInputConnection('input0');
-                    const queryConn = getInputConnection('input1');
-                    const text = textConn ? buildExpression(textConn.fromId, depth + 1) : '""';
-                    const query = queryConn ? buildExpression(queryConn.fromId, depth + 1) : '""';
-                    const expr = `__nodeFindStart(${text}, ${query})`;
-                    steps.push(`${indent}find-start node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'string-find-end': {
-                    const textConn = getInputConnection('input0');
-                    const queryConn = getInputConnection('input1');
-                    const text = textConn ? buildExpression(textConn.fromId, depth + 1) : '""';
-                    const query = queryConn ? buildExpression(queryConn.fromId, depth + 1) : '""';
-                    const expr = `__nodeFindEnd(${text}, ${query})`;
-                    steps.push(`${indent}find-end node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'string-to-number': {
-                    const inputConn = getInputConnection('input0');
-                    const text = inputConn ? buildExpression(inputConn.fromId, depth + 1) : '""';
-                    const expr = `__nodeToNumber(${text})`;
-                    steps.push(`${indent}string-to-number node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'number-to-string': {
-                    const inputConn = getInputConnection('input0');
-                    const value = inputConn ? buildExpression(inputConn.fromId, depth + 1) : '0';
-                    const expr = `__nodeToString(${value})`;
-                    steps.push(`${indent}number-to-string node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'bool-count': {
-                    const inputCount = getInputCount(element);
-                    const values = Array.from({ length: inputCount }).map((_, idx) => {
-                        const inputConn = getInputConnection(`input${idx}`);
-                        return inputConn ? buildExpression(inputConn.fromId, depth + 1) : 'false';
-                    });
-                    const expr = `__nodeCountTrue(${values.join(', ')})`;
-                    steps.push(`${indent}count-true node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'color': {
-                    if (customNodeMode) {
-                        const expr = customPlaceholderForNode(element.id);
-                        steps.push(`${indent}custom-input color "${element.name}": ${expr}`);
-                        return expr;
-                    }
-                    const color = String(element.data?.colorValue || '#2563eb');
-                    const expr = JSON.stringify(color);
-                    steps.push(`${indent}color node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'gradient': {
-                    const colorCount = getGradientColorCount(element);
-                    const colorValues = Array.from({ length: colorCount }).map((_, colorIndex) => {
-                        const colorConn = getInputConnection(`input${colorIndex}`);
-                        if (colorConn) {
-                            return buildExpression(colorConn.fromId, depth + 1);
-                        }
-                        return JSON.stringify(getGradientColorByIndex(element, colorIndex));
-                    });
-
-                    const angleInputIndex = colorCount;
-                    const angleConn = getInputConnection(`input${angleInputIndex}`);
-                    const angleValue = angleConn
-                        ? buildExpression(angleConn.fromId, depth + 1)
-                        : String(Number(element.data?.gradientAngle ?? 90) || 90);
-                    const expr = `__nodeGradient(${angleValue}, ${colorValues.join(', ')})`;
-                    steps.push(`${indent}gradient node "${element.name}": ${expr}`);
-                    return expr;
-                }
-
-                case 'math': {
-                    const inputConn = getInputConnection('input0');
-                    const valueExpr = inputConn ? buildExpression(inputConn.fromId, depth + 1) : '0';
-                    const fn = String(element.data?.mathFunction || 'sin');
-                    const functionMap: Record<string, string> = {
-                        sin: 'Math.sin',
-                        cos: 'Math.cos',
-                        tan: 'Math.tan',
-                        asin: 'Math.asin',
-                        acos: 'Math.acos',
-                        atan: 'Math.atan',
-                        sqrt: 'Math.sqrt',
-                        abs: 'Math.abs',
-                        log: 'Math.log',
-                        exp: 'Math.exp',
-                        floor: 'Math.floor',
-                        ceil: 'Math.ceil',
-                        round: 'Math.round',
-                    };
-                    const selectedFn = functionMap[fn] || 'Math.sin';
-                    const expr = `${selectedFn}(${valueExpr})`;
-                    steps.push(`${indent}math node "${element.name}" (${fn}): ${expr}`);
-                    return expr;
-                }
-
-                case 'custom-node': {
-                    const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
-                    const rawTemplate = String(element.data?.customTemplateFormula || '').trim();
-                    const templateExpr = rawTemplate || '({})';
-                    let expression = templateExpr;
-
-                    // Track which sourceNodeIds belong to this node's schema
-                    const ownSourceIds = new Set<string>();
-
-                    schema.forEach((schemaPin, inputIndex) => {
-                        const inputConn = getInputConnection(`input${inputIndex}`);
-                        const sourceExpr = inputConn
-                            ? buildFromConn(inputConn, depth + 1)
-                            : toFormulaLiteral(
-                                Array.isArray(element.data?.customInputValues)
-                                    ? element.data?.customInputValues[inputIndex]
-                                    : (schemaPin.defaultValue || '')
-                            );
-
-                        const sourceNodeId = String(schemaPin.sourceNodeId || schemaPin.id || '').trim();
-                        if (!sourceNodeId) {
-                            return;
-                        }
-
-                        ownSourceIds.add(sourceNodeId);
-                        const pattern = new RegExp(`__customIn\\((\"|')${escapeRegExp(sourceNodeId)}\\1\\)`, 'g');
-                        expression = expression.replace(pattern, `(${sourceExpr})`);
-                    });
-
-                    // Only replace __customIn for IDs that belong to THIS node's schema
-                    // (unconnected inputs with no match). Leave any other __customIn untouched
-                    // so outer custom nodes can substitute them.
-                    ownSourceIds.forEach(id => {
-                        const pattern = new RegExp(`__customIn\\((\"|')${escapeRegExp(id)}\\1\\)`, 'g');
-                        expression = expression.replace(pattern, '0');
-                    });
-
-                    const zipExpr = `(${expression})`;
-
-                    // When unzipped (default), each output pin extracts its own index directly
-                    if (!element.data?.zipOutput) {
-                        const expr = `__nodeUnzip(${zipExpr}, ${outputIndex})`;
-                        steps.push(`${indent}custom node "${element.name}" [output ${outputIndex}]: ${expr}`);
-                        return expr;
-                    }
-
-                    steps.push(`${indent}custom node "${element.name}": ${zipExpr}`);
-                    return zipExpr;
-                }
-
-                case 'unzip': {
-                    const zipConn = getInputConnection('input0');
-                    const zipExpr = zipConn ? buildFromConn(zipConn, depth + 1) : '({})';
-                    // Always unzip all - each output pin extracts by its index
-                    const expr = `__nodeUnzip(${zipExpr}, ${outputIndex})`;
-                    steps.push(`${indent}unzip node "${element.name}" [output ${outputIndex}]: ${expr}`);
-                    return expr;
-                }
-
-                case 'not': {
-                    const a = getInputConnection('input0');
-                    const aExpr = a ? buildFromConn(a, depth + 1) : 'false';
-                    return `(!${aExpr})`;
-                }
-                case 'and': {
-                    const a = getInputConnection('input0');
-                    const b = getInputConnection('input1');
-                    const aExpr = a ? buildFromConn(a, depth + 1) : 'false';
-                    const bExpr = b ? buildFromConn(b, depth + 1) : 'false';
-                    return `(${aExpr} && ${bExpr})`;
-                }
-                case 'or': {
-                    const a = getInputConnection('input0');
-                    const b = getInputConnection('input1');
-                    const aExpr = a ? buildFromConn(a, depth + 1) : 'false';
-                    const bExpr = b ? buildFromConn(b, depth + 1) : 'false';
-                    return `(${aExpr} || ${bExpr})`;
-                }
-                case 'fallback': {
-                    const primary = getInputConnection('input0');
-                    const fallback = getInputConnection('input1');
-                    const primaryExpr = primary ? buildFromConn(primary, depth + 1) : 'undefined';
-                    const fallbackExpr = fallback ? buildFromConn(fallback, depth + 1) : 'undefined';
-                    return `(__nodeFallback(${primaryExpr}, ${fallbackExpr}))`;
-                }
-                case 'clamp': {
-                    const v = getInputConnection('input0');
-                    const mn = getInputConnection('input1');
-                    const mx = getInputConnection('input2');
-                    const vExpr = v ? buildFromConn(v, depth + 1) : '0';
-                    const mnExpr = mn ? buildFromConn(mn, depth + 1) : '0';
-                    const mxExpr = mx ? buildFromConn(mx, depth + 1) : '100';
-                    return `(Math.min(Math.max(Number(${vExpr}), Number(${mnExpr})), Number(${mxExpr})))`;
-                }
-                case 'min-val': {
-                    const a = getInputConnection('input0');
-                    const b = getInputConnection('input1');
-                    const aExpr = a ? buildFromConn(a, depth + 1) : '0';
-                    const bExpr = b ? buildFromConn(b, depth + 1) : '0';
-                    return `(Math.min(Number(${aExpr}), Number(${bExpr})))`;
-                }
-                case 'max-val': {
-                    const a = getInputConnection('input0');
-                    const b = getInputConnection('input1');
-                    const aExpr = a ? buildFromConn(a, depth + 1) : '0';
-                    const bExpr = b ? buildFromConn(b, depth + 1) : '0';
-                    return `(Math.max(Number(${aExpr}), Number(${bExpr})))`;
-                }
-                case 'string-split': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    const delim = JSON.stringify(String(element.data?.splitDelimiter ?? ','));
-                    const idx = Number.isFinite(Number(element.data?.splitIndex)) ? Number(element.data.splitIndex) : 0;
-                    return `(__nodeToString(${srcExpr}).split(${delim})[${idx}] ?? "")`;
-                }
-                case 'string-replace': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    const find = JSON.stringify(String(element.data?.replaceFind ?? ''));
-                    const repl = JSON.stringify(String(element.data?.replaceWith ?? ''));
-                    return `(__nodeToString(${srcExpr}).split(${find}).join(${repl}))`;
-                }
-                case 'string-trim': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    return `(__nodeToString(${srcExpr}).trim())`;
-                }
-                case 'string-upper': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    return `(__nodeToString(${srcExpr}).toUpperCase())`;
-                }
-                case 'string-lower': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    return `(__nodeToString(${srcExpr}).toLowerCase())`;
-                }
-                case 'string-includes': {
-                    const src = getInputConnection('input0');
-                    const needle = getInputConnection('input1');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    const needleExpr = needle ? buildFromConn(needle, depth + 1) : '""';
-                    return `(__nodeToString(${srcExpr}).includes(__nodeToString(${needleExpr})))`;
-                }
-                case 'number-parse': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '""';
-                    const radix = Number.isFinite(Number(element.data?.parseRadix)) ? Number(element.data.parseRadix) : 10;
-                    return `(parseInt(__nodeToString(${srcExpr}), ${radix}))`;
-                }
-                case 'number-to-base': {
-                    const src = getInputConnection('input0');
-                    const srcExpr = src ? buildFromConn(src, depth + 1) : '0';
-                    const radix = Number.isFinite(Number(element.data?.parseRadix)) ? Number(element.data.parseRadix) : 16;
-                    const minLen = Number.isFinite(Number(element.data?.minLength)) ? Number(element.data.minLength) : 0;
-                    return `(__nodeToBase(${srcExpr}, ${radix}, ${minLen}))`;
-                }
-                case 'css-join': {
-                    const inputCount = Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
-                    const parts = Array.from({ length: inputCount }, (_, i) => {
-                        const conn = getInputConnection(`input${i}`);
-                        return conn ? buildFromConn(conn, depth + 1) : '""';
-                    });
-                    return `(__nodeCssJoin(${parts.join(', ')}))`;
-                }
-
-                case 'css-unit': {
-                    const src = getInputConnection('input0');
-                    const fallbackValueRaw = String(element.data?.cssUnitValue ?? '0').trim();
-                    const fallbackValue = Number.isFinite(Number(fallbackValueRaw)) ? fallbackValueRaw : '0';
-                    const numExpr = src ? buildFromConn(src, depth + 1) : fallbackValue;
-                    const unit = JSON.stringify(String(element.data?.cssUnit || 'px'));
-                    return `(__nodeToString(${numExpr}) + ${unit})`;
-                }
-
-                case 'css-margin': {
-                    const top = getInputConnection('input0');
-                    const right = getInputConnection('input1');
-                    const bottom = getInputConnection('input2');
-                    const left = getInputConnection('input3');
-                    const topExpr = top ? buildFromConn(top, depth + 1) : '"0px"';
-                    const rightExpr = right ? buildFromConn(right, depth + 1) : '"0px"';
-                    const bottomExpr = bottom ? buildFromConn(bottom, depth + 1) : '"0px"';
-                    const leftExpr = left ? buildFromConn(left, depth + 1) : '"0px"';
-                    return `(__nodeConcat("margin: ", __nodeToString(${topExpr}).trim(), " ", __nodeToString(${rightExpr}).trim(), " ", __nodeToString(${bottomExpr}).trim(), " ", __nodeToString(${leftExpr}).trim()))`;
-                }
-
-                case 'css-padding': {
-                    const top = getInputConnection('input0');
-                    const right = getInputConnection('input1');
-                    const bottom = getInputConnection('input2');
-                    const left = getInputConnection('input3');
-                    const topExpr = top ? buildFromConn(top, depth + 1) : '"0px"';
-                    const rightExpr = right ? buildFromConn(right, depth + 1) : '"0px"';
-                    const bottomExpr = bottom ? buildFromConn(bottom, depth + 1) : '"0px"';
-                    const leftExpr = left ? buildFromConn(left, depth + 1) : '"0px"';
-                    return `(__nodeConcat("padding: ", __nodeToString(${topExpr}).trim(), " ", __nodeToString(${rightExpr}).trim(), " ", __nodeToString(${bottomExpr}).trim(), " ", __nodeToString(${leftExpr}).trim()))`;
-                }
-
-                case 'css-width': {
-                    const src = getInputConnection('input0');
-                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"0px"';
-                    return `(__nodeConcat("width: ", __nodeToString(${valueExpr}).trim()))`;
-                }
-
-                case 'css-height': {
-                    const src = getInputConnection('input0');
-                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"0px"';
-                    return `(__nodeConcat("height: ", __nodeToString(${valueExpr}).trim()))`;
-                }
-
-                case 'css-font-size': {
-                    const src = getInputConnection('input0');
-                    const valueExpr = src ? buildFromConn(src, depth + 1) : '"16px"';
-                    return `(__nodeConcat("font-size: ", __nodeToString(${valueExpr}).trim()))`;
-                }
-
-                case 'css-display': {
-                    const display = String(element.data?.cssDisplay || 'block').trim() || 'block';
-                    return JSON.stringify(`display: ${display}`);
-                }
-
-                case 'css-color': {
-                    const src = getInputConnection('input0');
-                    if (src) {
-                        const srcExpr = buildFromConn(src, depth + 1);
-                        return `(__nodeConcat("color: ", __nodeToString(${srcExpr}).trim()))`;
-                    }
-                    const fallbackColor = String(element.data?.colorValue || '#2563eb').trim() || '#2563eb';
-                    return JSON.stringify(`color: ${fallbackColor}`);
-                }
-
-                case 'css-text': {
-                    return JSON.stringify(String(element.data?.cssText || ''));
-                }
-
-                default:
-                    return '';
-            }
-        };
-
-        const mainBlock = elements.find(el => el.type === 'main');
-        const outputNodeForCustom = !mainBlock ? elements.find(el => el.type === 'output') : null;
-
-        if (mainBlock || outputNodeForCustom) {
-            const sinkBlock = mainBlock || outputNodeForCustom!;
-            if (customNodeMode) {
-                const outputConnections = getConnectionsToElement(sinkBlock.id)
-                    .filter(c => c.toInput.startsWith('input'))
-                    .map((conn) => {
-                        const idx = getInputIndex(conn.toInput);
-                        return { conn, idx: idx >= 0 ? idx : 0 };
-                    })
-                    .sort((a, b) => a.idx - b.idx);
-
-                if (outputConnections.length > 0) {
-                    const outputs = outputConnections
-                        .map(({ conn, idx }) => `o${idx}: (${buildFromConn(conn, 0)})`)
-                        .join(', ');
-                    result = `({ ${outputs} })`;
-                } else {
-                    result = '({})';
-                }
-                steps.push('Custom Node Formula:');
-                steps.push(result);
-                return { formula: result, steps };
-            }
-
-            const valueConn = getConnectionToInput(sinkBlock.id, 'input0');
-            const backgroundConn = getConnectionToInput(sinkBlock.id, 'input1');
-            const colorConn = getConnectionToInput(sinkBlock.id, 'input2');
-            const disabledConn = getConnectionToInput(sinkBlock.id, 'input3');
-            const cssConn = getConnectionToInput(sinkBlock.id, 'input4');
-
-            if (valueConn) {
-                steps.push('=== Formula Generation ===');
-                const valueExpr = buildFromConn(valueConn, 0);
-                const backgroundExpr = backgroundConn ? buildFromConn(backgroundConn, 0) : '';
-                const colorExpr = colorConn ? buildFromConn(colorConn, 0) : '';
-                const disabledExpr = disabledConn ? buildFromConn(disabledConn, 0) : '';
-                const cssExpr = cssConn ? buildFromConn(cssConn, 0) : '';
-
-                const hasPresentation = Boolean(backgroundExpr || colorExpr || disabledExpr || cssExpr);
-                if (hasPresentation) {
-                    const backgroundPart = backgroundExpr ? `background: (${backgroundExpr}), ` : '';
-                    const colorPart = colorExpr ? `color: (${colorExpr}), ` : '';
-                    const disabledPart = disabledExpr ? `disabled: (${disabledExpr}), ` : '';
-                    const cssPart = cssExpr ? `"custom-css": (${cssExpr}), ` : '';
-                    result = `({ value: (${valueExpr}), ${backgroundPart}${colorPart}${disabledPart}${cssPart} })`;
-                } else {
-                    result = valueExpr;
-                }
-
-                steps.push('');
-                steps.push('Final Formula:');
-                steps.push(result);
-            } else {
-                steps.push('No formula: Html Element has no Value input connection');
-            }
-        }
-
-        // Logic mode: collect all output nodes (no main-block needed)
-        if (mainElementType === 'logic') {
-            const outputNodes = elements.filter(el => el.type === 'output');
-            const slotParts: string[] = [];
-
-            for (const outNode of outputNodes) {
-                const targetId = String(outNode.data?.selectedElement || '').trim();
-                if (!targetId) continue;
-
-                const getConn = (idx: number) => getConnectionToInput(outNode.id, `input${idx}`);
-
-                const parts: string[] = [];
-                let hasAny = false;
-                outputPropertyNames.forEach((prop, i) => {
-                    const conn = getConn(i);
-                    if (conn) {
-                        hasAny = true;
-                        parts.push(`${JSON.stringify(prop)}: (${buildFromConn(conn, 0)})`);
-                    }
-                });
-
-                if (!hasAny) continue;
-                slotParts.push(`${JSON.stringify(targetId)}: { ${parts.join(', ')} }`);
-            }
-
-            result = slotParts.length > 0 ? `({ ${slotParts.join(', ')} })` : '({})';
-            steps.push('Logic Formula:');
-            steps.push(result);
-        }
-
-        return { formula: result, steps };
-    };
-
-    // Get input label for an element
-    const getInputLabel = (element: CanvasElement, index: number): string => {
-        switch (element.type) {
-            case 'calculation':
-                return `Input ${index + 1}`;
-            case 'condition':
-                if (index === 0) return 'Left';
-                if (index === 1) return 'Right';
-                return '';
-            case 'switch':
-                if (index === 0) return 'Value';
-                return `Case ${index}`;
-            case 'case-range':
-                if (index === 0) return 'Min';
-                if (index === 1) return 'Max';
-                if (index === 2) return 'Out';
-                return '';
-            case 'case-value':
-                if (index === 0) return 'Value';
-                if (index === 1) return 'Out';
-                return '';
-            case 'regex':
-                return 'Text';
-            case 'concat':
-                return index === 0 ? 'A' : 'B';
-            case 'cut-a':
-                return index === 0 ? 'Text' : 'Find';
-            case 'cut-b':
-                return index === 0 ? 'Text' : 'Index';
-            case 'cut-c':
-                if (index === 0) return 'Text';
-                if (index === 1) return 'Start';
-                if (index === 2) return 'End';
-                return '';
-            case 'string-count-chars':
-                return 'Text';
-            case 'string-count-words':
-                return 'Text';
-            case 'string-find-start':
-            case 'string-find-end':
-                return index === 0 ? 'Text' : 'Find';
-            case 'string-to-number':
-                return 'Text';
-            case 'number-to-string':
-                return 'Value';
-            case 'memory-write-number':
-            case 'memory-write-string':
-            case 'memory-write-boolean':
-                return index === 0 ? 'Value' : 'Reset';
-            case 'event-processor':
-                return index === 0 ? 'Event' : 'Payload';
-            case 'bool-count':
-                return `Bool ${index + 1}`;
-            case 'color':
-                return '';
-            case 'gradient':
-                {
-                    const colorCount = getGradientColorCount(element);
-                    if (index < colorCount) {
-                        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-                        const suffix = index < alphabet.length ? alphabet[index] : String(index + 1);
-                        return `Color ${suffix}`;
-                    }
-                    if (index === colorCount) return 'Angle';
-                }
-                return '';
-            case 'custom-node': {
-                const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
-                return schema[index]?.label || `Input ${index + 1}`;
-            }
-            case 'unzip':
-                return 'Zip';
-            case 'math':
-                return 'Value';
-            case 'element':
-                return '';
-            case 'number':
-                return 'Value';
-            case 'constant-boolean':
-                return '';
-            case 'constant-string':
-                return '';
-            case 'main':
-                if (customNodeMode) {
-                    return `Output ${index + 1}`;
-                }
-                if (mainElementType === 'logic') {
-                    const slotIndex = Math.floor(index / 4);
-                    const slotPin = index % 4;
-                    const slotLabel = `[${slotIndex + 1}]`;
-                    if (slotPin === 0) return `${slotLabel} Value`;
-                    if (slotPin === 1) return `${slotLabel} Background`;
-                    if (slotPin === 2) return `${slotLabel} Color`;
-                    return `${slotLabel} Disabled`;
-                }
-                if (index === 0) return 'Value';
-                if (index === 1) return 'Background';
-                if (index === 2) return 'Color';
-                if (index === 3) return 'Disabled';
-                return '';
-            case 'output': {
-                if (customNodeMode && element.data?.outputLabels) {
-                    return element.data.outputLabels[index] || outputInputLabels[index] || '';
-                }
-                return outputInputLabels[index] || '';
-            }
-            case 'node':
-                if (index === 0) return 'Condition';
-                if (index === 1) return 'True';
-                if (index === 2) return 'False';
-                return '';
-            case 'css-unit': return 'Number';
-            case 'css-margin':
-            case 'css-padding':
-                if (index === 0) return 'Top';
-                if (index === 1) return 'Right';
-                if (index === 2) return 'Bottom';
-                return 'Left';
-            case 'css-width': return 'Value';
-            case 'css-height': return 'Value';
-            case 'css-font-size': return 'Value';
-            case 'css-color': return 'Color';
-            case 'css-text': return '';
-            case 'css-display': return '';
-            case 'and': return index === 0 ? 'A' : 'B';
-            case 'or': return index === 0 ? 'A' : 'B';
-            case 'fallback': return index === 0 ? 'Primary' : 'Fallback';
-            case 'clamp':
-                if (index === 0) return 'Value';
-                if (index === 1) return 'Min';
-                return 'Max';
-            case 'min-val': return index === 0 ? 'A' : 'B';
-            case 'max-val': return index === 0 ? 'A' : 'B';
-            case 'string-split': return 'Text';
-            case 'string-replace': return 'Text';
-            case 'string-trim': return 'Text';
-            case 'string-upper': return 'Text';
-            case 'string-lower': return 'Text';
-            case 'string-includes': return index === 0 ? 'Text' : 'Find';
-            case 'number-parse': return 'Text';
-            case 'number-to-base': return 'Number';
-            case 'multi-concat': return `Text ${index + 1}`;
-            case 'css-join': return `CSS ${index + 1}`;
-            default:
-                return `Input ${index + 1}`;
-        }
-    };
-
-    // Get output label for an element
-    const getOutputLabel = (element: CanvasElement, index: number): string => {
-        switch (element.type) {
-            case 'case-range':
-                return 'Result';
-            case 'case-value':
-                return 'Result';
-            case 'switch':
-                return 'Result';
-            case 'node':
-                return 'Result';
-            case 'calculation':
-                return 'Result';
-            case 'condition':
-                return 'Result';
-            case 'element-id':
-                return 'Value';
-            case 'memory-read-number':
-            case 'memory-read-string':
-            case 'memory-read-boolean':
-                return 'Value';
-            case 'memory-write-number':
-            case 'memory-write-string':
-            case 'memory-write-boolean':
-                return 'Value';
-            case 'event-element':
-            case 'event-id':
-            case 'event-processor':
-                return 'Value';
-            case 'element':
-                return 'Value';
-            case 'number':
-                return 'Value';
-            case 'constant-boolean':
-                return 'Value';
-            case 'constant-string':
-                return 'Value';
-            case 'regex':
-                return 'Match';
-            case 'concat':
-                return 'Text';
-            case 'cut-a':
-            case 'cut-b':
-            case 'cut-c':
-                return 'Text';
-            case 'string-count-chars':
-                return 'Characters';
-            case 'string-count-words':
-                return 'Words';
-            case 'string-find-start':
-                return 'Start';
-            case 'string-find-end':
-                return 'End';
-            case 'string-to-number':
-                return 'Number';
-            case 'number-to-string':
-                return 'Text';
-            case 'bool-count':
-                return 'Count';
-            case 'color':
-                return 'Color';
-            case 'gradient':
-                return 'Color';
-            case 'custom-node': {
-                if (!element.data?.zipOutput) {
-                    const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
-                    return schema[index]?.label || `Output ${index + 1}`;
-                }
-                return 'Zip';
-            }
-            case 'unzip': {
-                const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
-                return schema[index]?.label || `Output ${index + 1}`;
-            }
-            case 'main':
-                return 'Output';
-            case 'operator':
-                return 'Result';
-            case 'math':
-                return 'Result';
-            case 'comparison':
-                return 'Result';
-            case 'logic':
-                return 'Result';
-            case 'constant':
-                return 'Value';
-            case 'variable':
-                return 'Value';
-            case 'css-unit':
-            case 'css-margin':
-            case 'css-padding':
-            case 'css-width':
-            case 'css-height':
-            case 'css-font-size':
-            case 'css-display':
-            case 'css-color':
-            case 'css-text':
-            case 'css-join':
-                return 'CSS';
-            case 'not': return 'Result';
-            case 'and': return 'Result';
-            case 'or': return 'Result';
-            case 'fallback': return 'Value';
-            case 'clamp': return 'Value';
-            case 'min-val': return 'Min';
-            case 'max-val': return 'Max';
-            case 'string-split': return 'Part';
-            case 'string-replace': return 'Text';
-            case 'string-trim': return 'Text';
-            case 'string-upper': return 'Text';
-            case 'string-lower': return 'Text';
-            case 'string-includes': return 'Found';
-            case 'number-parse': return 'Number';
-            case 'number-to-base': return 'String';
-            case 'multi-concat': return 'Text';
-            case 'css-join': return 'CSS';
-            default:
-                return `Output-${index + 1}`;
-        }
-    };
-
-    // Get number of output pins for an element
-    const getOutputCount = (element: CanvasElement): number => {
-        switch (element.type) {
-            case 'case-range':
-                return 1; // true/false output
-            case 'case-value':
-                return 1; // true/false output
-            case 'switch':
-                return 1; // Only result output
-            case 'node':
-                return 1; // Only result output (out is input now)
-            case 'operator':
-                return 1; // All operators output one value
-            case 'math':
-                return 1; // All math operations output one value
-            case 'comparison':
-                return 1; // All comparisons output boolean
-            case 'logic':
-                return 1; // All logic operations output boolean
-            case 'element':
-                return 1; // Element nodes output their value
-            case 'element-id':
-                return 1;
-            case 'memory-read-number':
-                return 1;
-            case 'memory-read-string':
-                return 1;
-            case 'memory-read-boolean':
-                return 1;
-            case 'memory-write-number':
-                return 1;
-            case 'memory-write-string':
-                return 1;
-            case 'memory-write-boolean':
-                return 1;
-            case 'event-element':
-                return 1;
-            case 'event-id':
-                return 1;
-            case 'event-processor':
-                return 1;
-            case 'number':
-                return 1;
-            case 'constant-boolean':
-                return 1;
-            case 'constant-string':
-                return 1;
-            case 'regex':
-                return 1;
-            case 'concat':
-                return 1;
-            case 'cut-a':
-                return 1;
-            case 'cut-b':
-                return 1;
-            case 'cut-c':
-                return 1;
-            case 'string-count-chars':
-                return 1;
-            case 'string-count-words':
-                return 1;
-            case 'string-find-start':
-                return 1;
-            case 'string-find-end':
-                return 1;
-            case 'string-to-number':
-                return 1;
-            case 'number-to-string':
-                return 1;
-            case 'bool-count':
-                return 1;
-            case 'color':
-                return 1;
-            case 'gradient':
-                return 1;
-            case 'custom-node': {
-                if (!element.data?.zipOutput) {
-                    const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
-                    return Math.max(1, schema.length);
-                }
-                return 1;
-            }
-            case 'not':
-            case 'and':
-            case 'or':
-            case 'fallback':
-            case 'clamp':
-            case 'min-val':
-            case 'max-val':
-            case 'string-split':
-            case 'string-replace':
-            case 'string-trim':
-            case 'string-upper':
-            case 'string-lower':
-            case 'string-includes':
-            case 'number-parse':
-            case 'number-to-base':
-            case 'multi-concat':
-                return 1;
-            case 'css-unit':
-            case 'css-margin':
-            case 'css-padding':
-            case 'css-width':
-            case 'css-height':
-            case 'css-font-size':
-            case 'css-display':
-            case 'css-color':
-            case 'css-text':
-            case 'css-join':
-                return 1;
-            case 'unzip': {
-                const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
-                return Math.max(1, schema.length);
-            }
-            case 'constant':
-                return 1; // Constant nodes output their value
-            case 'variable':
-                return 1; // Variable nodes output their value
-            case 'main':
-                return 0; // Main calculator has no output, generates formula
-            case 'output':
-                return 0; // Output node is a sink - no output pins
-            case 'calculation':
-                return 1; // Calculation nodes output result
-            case 'condition':
-                return 1; // Condition nodes output boolean
-            default:
-                return 1;
-        }
-    };
-
-    // Get the value type for a specific output pin (used for unzipped unzip/custom-node pins)
-    const getOutputPinType = (element: CanvasElement, index: number): CanvasElement['valueType'] => {
-        if (element.type === 'unzip' || (element.type === 'custom-node' && !element.data?.zipOutput)) {
-            const schema = Array.isArray(element.data?.customOutputSchema) ? element.data.customOutputSchema : [];
-            const pinType = schema[index]?.type;
-            if (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'case') {
-                return pinType;
-            }
-            return 'number';
-        }
-        return element.valueType || 'number';
-    };
-
-    const NODE_FIXED_WIDTH = 220;
-
-    // Keep node width stable to avoid layout shifts and pin drift.
-    const getNodeWidth = (_element: CanvasElement): number => NODE_FIXED_WIDTH;
-
-    // Get node height based on content
-    const getCenterControlRowCount = (element: CanvasElement): number => {
-        switch (element.type) {
-            case 'css-unit':
-            case 'number-to-base':
-                return 2;
-            default:
-                return 1;
-        }
-    };
-
-    const getNodeHeight = (element: CanvasElement): number => {
-        const inputCount = getInputCount(element);
-        const outputCount = getOutputCount(element);
-        const centerRows = getCenterControlRowCount(element);
-        const maxRows = Math.max(inputCount, outputCount, centerRows);
-        // Header (24px) + padding (16px) + rows (32px each) + bottom padding (8px)
-        return 26 + 16 + (maxRows * 34) + 10;
-    };
-
-    // Calculate pin position purely from node geometry fallback (if DOM not available)
-    const calculatePinPosition = (
-        element: CanvasElement,
-        type: 'input' | 'output',
-        index: number
-    ): { x: number; y: number } => {
-        const nodeX = element.x * zoomRef.current + offsetXRef.current;
-        const nodeY = element.y * zoomRef.current + offsetYRef.current;
-        const nodeWidth = getNodeWidth(element);
-        const rowHeight = 32;
-        const headerHeight = 24;
-        const paddingTop = 16;
-        const rowY = nodeY + headerHeight + paddingTop + (index * rowHeight) + (rowHeight / 2);
-
-        if (type === 'input') {
-            return {
-                x: nodeX - 6, // left edge
-                y: rowY
-            };
-        }
-
-        return {
-            x: nodeX + nodeWidth + 6, // right edge
-            y: rowY
-        };
-    };
-
-    // Calculate pin position with delta simulation for predictive smooth updates
-    const calculatePinPositionWithDelta = (
-        element: CanvasElement,
-        type: 'input' | 'output',
-        index: number,
-        applyDelta: boolean = true
-    ): { x: number; y: number } => {
-        // Start with element position, apply drag delta if active
-        let elementX = element.x;
-        let elementY = element.y;
-        
-        if (applyDelta && dragElementDeltaRef.current && dragElementDeltaRef.current.elementId === element.id) {
-            elementX += dragElementDeltaRef.current.deltaX;
-            elementY += dragElementDeltaRef.current.deltaY;
-        }
-        
-        // Apply zoom and offset changes (current + delta)
-        const currentZoom = zoomRef.current * zoomDeltaRef.current;
-        const currentOffsetX = offsetXRef.current + offsetDeltaRef.current.x;
-        const currentOffsetY = offsetYRef.current + offsetDeltaRef.current.y;
-        
-        const nodeX = elementX * currentZoom + currentOffsetX;
-        const nodeY = elementY * currentZoom + currentOffsetY;
-        const nodeWidth = getNodeWidth(element);
-        const rowHeight = 32;
-        const headerHeight = 24;
-        const paddingTop = 16;
-        const rowY = nodeY + headerHeight + paddingTop + (index * rowHeight) + (rowHeight / 2);
-
-        if (type === 'input') {
-            return {
-                x: nodeX - 6, // left edge
-                y: rowY
-            };
-        }
-
-        return {
-            x: nodeX + nodeWidth + 6, // right edge
-            y: rowY
-        };
-    };
-
-    // Get pin position in realtime from DOM (preferred), fallback to geometry only if missing.
-    const getPinPosition = (
-        element: CanvasElement,
-        type: 'input' | 'output',
-        index: number
-    ): { x: number; y: number } => {
-        const pinSelector = `.pin.${type}[data-element-id="${element.id}"][data-pin-id="${type}-${index}"]`;
-        const pinEl = document.querySelector(pinSelector) as HTMLElement | null;
-        const canvasEl = canvasRef.current;
-
-        // Priority 1: DOM realtime position (most accurate)
-        if (pinEl && canvasEl) {
-            const pinRect = pinEl.getBoundingClientRect();
-            const canvasRect = canvasEl.getBoundingClientRect();
-            return {
-                x: pinRect.left + pinRect.width / 2 - canvasRect.left,
-                y: pinRect.top + pinRect.height / 2 - canvasRect.top
-            };
-        }
-
-        // Priority 2: Delta simulation (predictive, smooth during drag/pan/zoom)
-        if (isDraggingCanvasElementRef.current || isPanningRef.current || (dragElementDeltaRef.current && dragElementDeltaRef.current.elementId === element.id) || zoomDeltaRef.current !== 1 || (offsetDeltaRef.current.x !== 0 || offsetDeltaRef.current.y !== 0)) {
-            return calculatePinPositionWithDelta(element, type, index, true);
-        }
-
-        // Fallback: pure geometry (when idle)
-        return calculatePinPosition(element, type, index);
-    };
-
-    // Render input control for an element
-    const renderInputControl = (element: CanvasElement, index: number): React.ReactNode => {
-        switch (element.type) {
-            case 'calculation':
-                const connected = connections.some(c => c.toId === element.id && c.toInput === `input${index}`);
-                const inputValue = element.data?.inputValues?.[index] ?? 0;
-                if (!connected) {
-                    return (
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={String(inputValue)}
-                            onChange={(e) => {
-                                const value = parseFloat(e.target.value) || 0;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem => {
-                                            if (elem.id !== element.id) return elem;
-                                            const currentInputs = [...(elem.data?.inputValues || [])];
-                                            currentInputs[index] = value;
-                                            return { ...elem, data: { ...elem.data, inputValues: currentInputs } };
-                                        })
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder={`Input ${index + 1}`}
-                        />
-                    );
-                }
-                return null;
-            case 'number':
-                return null;
-            case 'element':
-                return null; // Selectors rendered in node header
-            case 'condition':
-                // No input controls for condition - operator is separate
-                return null;
-            case 'case-range':
-                const hasMinConnection = connections.some(c => c.toId === element.id && c.toInput === 'input0');
-                const hasMaxConnection = connections.some(c => c.toId === element.id && c.toInput === 'input1');
-                const hasOutConnection = connections.some(c => c.toId === element.id && c.toInput === 'input2');
-                
-                if (index === 0) {
-                    return !hasMinConnection ? (
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={element.data?.min || 0}
-                            onChange={(e) => {
-                                const min = parseFloat(e.target.value) || 0;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, min } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="Min"
-                        />
-                    ) : <div className="input-placeholder"></div>; // Invisible placeholder
-                } else if (index === 1) {
-                    return !hasMaxConnection ? (
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={element.data?.max || 100}
-                            onChange={(e) => {
-                                const max = parseFloat(e.target.value) || 100;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, max } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="Max"
-                        />
-                    ) : <div className="input-placeholder"></div>; // Invisible placeholder
-                } else if (index === 2) {
-                    return !hasOutConnection ? (
-                        <input
-                            type="text"
-                            className="input-control"
-                            value={element.data?.out || ''}
-                            onChange={(e) => {
-                                const out = e.target.value;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, out } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="Out value"
-                        />
-                    ) : <div className="input-placeholder"></div>; // Invisible placeholder
-                }
-                return null;
-            case 'case-value':
-                const hasValueConnection = connections.some(c => c.toId === element.id && c.toInput === 'input0');
-                const hasOutConnection2 = connections.some(c => c.toId === element.id && c.toInput === 'input1');
-                
-                if (index === 0) {
-                    return !hasValueConnection ? (
-                        <input
-                            type="text"
-                            className="input-control"
-                            value={String(element.data?.caseValue ?? '')}
-                            onChange={(e) => {
-                                const caseValue = e.target.value;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, caseValue } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="Value"
-                        />
-                    ) : <div className="input-placeholder"></div>; // Invisible placeholder
-                } else if (index === 1) {
-                    return !hasOutConnection2 ? (
-                        <input
-                            type="text"
-                            className="input-control"
-                            value={element.data?.out || ''}
-                            onChange={(e) => {
-                                const out = e.target.value;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, out } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="Out value"
-                        />
-                    ) : <div className="input-placeholder"></div>; // Invisible placeholder
-                }
-                return null;
-            case 'switch':
-                // No input controls for switch
-                return null;
-            case 'regex':
-                if (index !== 0) return null;
-                return (
-                    <input
-                        type="text"
-                        className="input-control"
-                        value={element.data?.regexPattern || ''}
-                        onChange={(e) => {
-                            const regexPattern = e.target.value;
-                            setElements(prev =>
-                                updateElementValueTypes(
-                                    prev.map(elem =>
-                                        elem.id === element.id
-                                            ? { ...elem, data: { ...elem.data, regexPattern } }
-                                            : elem
-                                    )
-                                )
-                            );
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="/regex/i"
-                    />
-                );
-            case 'cut-a':
-            case 'cut-b':
-            case 'cut-c':
-                if (index !== 0) return null;
-                return (
-                    <label
-                        className="reverse-toggle"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <input
-                            type="checkbox"
-                            checked={Boolean(element.data?.reverse)}
-                            onChange={(e) => {
-                                const reverse = e.target.checked;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, reverse } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                        />
-                        Reverse
-                    </label>
-                );
-            case 'gradient': {
-                const colorCount = getGradientColorCount(element);
-                const angleIndex = colorCount;
-
-                if (index < colorCount) {
-                    const hasColorConnection = connections.some(
-                        c => c.toId === element.id && c.toInput === `input${index}`
-                    );
-                    const colorValue = getGradientColorByIndex(element, index);
-
-                    return !hasColorConnection ? (
-                        <div
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                width: '100%'
-                            }}
-                        >
-                            <input
-                                type="text"
-                                className="input-control"
-                                value={colorValue}
-                                onChange={(e) => {
-                                    const nextValue = e.target.value;
-                                    setElements(prev =>
-                                        updateElementValueTypes(
-                                            prev.map(elem => {
-                                                if (elem.id !== element.id) return elem;
-                                                const nextColors = ensureGradientColors(elem.data?.gradientColors, getGradientColorCount(elem));
-                                                nextColors[index] = nextValue;
-                                                return {
-                                                    ...elem,
-                                                    data: {
-                                                        ...elem.data,
-                                                        gradientColors: nextColors,
-                                                        gradientFrom: nextColors[0],
-                                                        gradientMid: nextColors[1],
-                                                        gradientTo: nextColors[2],
-                                                    }
-                                                };
-                                            })
-                                        )
-                                    );
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                                placeholder="#22c55e"
-                                style={{ maxWidth: '96px' }}
-                            />
-                        </div>
-                    ) : <div className="input-placeholder"></div>;
-                }
-
-                if (index === angleIndex) {
-                    const hasAngleConnection = connections.some(
-                        c => c.toId === element.id && c.toInput === `input${angleIndex}`
-                    );
-                    return !hasAngleConnection ? (
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={String(element.data?.gradientAngle ?? 90)}
-                            onChange={(e) => {
-                                const parsed = Number(e.target.value);
-                                const gradientAngle = Number.isFinite(parsed) ? parsed : 90;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, gradientAngle } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="90"
-                        />
-                    ) : <div className="input-placeholder"></div>;
-                }
-
-                return null;
-            }
-            case 'custom-node': {
-                const schema = Array.isArray(element.data?.customInputSchema) ? element.data?.customInputSchema : [];
-                const schemaPin = schema[index];
-                if (!schemaPin) {
-                    return null;
-                }
-
-                const hasConnection = connections.some(
-                    c => c.toId === element.id && c.toInput === `input${index}`
-                );
-                if (hasConnection) {
-                    return <div className="input-placeholder"></div>;
-                }
-
-                const values = Array.isArray(element.data?.customInputValues)
-                    ? [...element.data.customInputValues]
-                    : [];
-                const currentValue = values[index] ?? schemaPin.defaultValue ?? '';
-
-                const updateValue = (nextValue: string | number | boolean) => {
-                    const nextValues = Array.isArray(element.data?.customInputValues)
-                        ? [...element.data.customInputValues]
-                        : [];
-                    nextValues[index] = nextValue;
-                    setElements(prev =>
-                        updateElementValueTypes(
-                            prev.map(elem =>
-                                elem.id === element.id
-                                    ? { ...elem, data: { ...elem.data, customInputValues: nextValues } }
-                                    : elem
-                            )
-                        )
-                    );
-                };
-
-                if (schemaPin.type === 'boolean') {
-                    return (
-                        <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
-                            <input
-                                type="checkbox"
-                                checked={String(currentValue).toLowerCase() === 'true' || currentValue === true}
-                                onChange={(e) => updateValue(e.target.checked)}
-                                onClick={(e) => e.stopPropagation()}
-                            />
-                            Value
-                        </label>
-                    );
-                }
-
-                if (schemaPin.type === 'number') {
-                    return (
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={String(currentValue)}
-                            onChange={(e) => updateValue(e.target.value)}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="0"
-                        />
-                    );
-                }
-
-                if (schemaPin.type === 'color') {
-                    return (
-                        <div
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                width: '100%'
-                            }}
-                        >
-                            <input
-                                type="color"
-                                className="input-control"
-                                value={String(currentValue || '#2563eb')}
-                                onChange={(e) => updateValue(e.target.value)}
-                                onClick={(e) => e.stopPropagation()}
-                                style={{ width: '34px', maxWidth: '34px', padding: '1px' }}
-                            />
-                            <input
-                                type="text"
-                                className="input-control"
-                                value={String(currentValue)}
-                                onChange={(e) => updateValue(e.target.value)}
-                                onClick={(e) => e.stopPropagation()}
-                                placeholder="#2563eb"
-                                style={{ maxWidth: '80px' }}
-                            />
-                        </div>
-                    );
-                }
-
-                return (
-                    <input
-                        type="text"
-                        className="input-control"
-                        value={String(currentValue)}
-                        onChange={(e) => updateValue(e.target.value)}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Value"
-                    />
-                );
-            }
-            case 'not':
-            case 'and':
-            case 'or':
-            case 'clamp':
-            case 'min-val':
-            case 'max-val':
-            case 'string-trim':
-            case 'string-upper':
-            case 'string-lower':
-            case 'string-includes':
-                return null;
-            case 'string-split':
-                if (index === 0) return null;
-                return null;
-            case 'string-replace':
-                if (index === 0) return null;
-                return null;
-            case 'number-parse':
-                return null;
-            case 'number-to-base':
-                return null;
-            case 'multi-concat':
-                return null;
-            case 'css-color': {
-                if (index !== 0) return null;
-                const hasColorConnection = connections.some(
-                    c => c.toId === element.id && c.toInput === 'input0'
-                );
-                if (hasColorConnection) {
-                    return <div className="input-placeholder"></div>;
-                }
-                const currentColor = String(element.data?.colorValue || '#2563eb');
-                return (
-                    <div
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            width: '100%'
-                        }}
-                    >
-                        <input
-                            type="color"
-                            className="input-control"
-                            value={currentColor}
-                            onChange={(e) => {
-                                const colorValue = e.target.value;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, colorValue } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            style={{ width: '34px', maxWidth: '34px', padding: '1px' }}
-                        />
-                        <input
-                            type="text"
-                            className="input-control"
-                            value={currentColor}
-                            onChange={(e) => {
-                                const colorValue = e.target.value;
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, colorValue } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            placeholder="#2563eb"
-                            style={{ maxWidth: '80px' }}
-                        />
-                    </div>
-                );
-            }
-            case 'css-join':
-                return null;
-            case 'output':
-                if (index === 0) {
-                    return (
-                        <select
-                            className="input-control"
-                            value={element.data?.selectedElement || ''}
-                            onChange={(e) => {
-                                const selectedElementId = e.target.value;
-                                const selectedElement = detectedElements.find(el => el.id === selectedElementId);
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, selectedElement: selectedElementId, outputs: selectedElement?.outputs || [] }, name: selectedElementId || 'Output' }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <option value="">-- Target Element --</option>
-                            {detectedElements.map(detectedEl => (
-                                <option key={detectedEl.id} value={detectedEl.id}>
-                                    {detectedEl.name} ({detectedEl.type})
-                                </option>
-                            ))}
-                        </select>
-                    );
-                }
-                return null;
-            case 'main':
-                if (mainElementType === 'logic' && index % 4 === 0) {
-                    const slotIndex = Math.floor(index / 4);
-                    const targets = Array.isArray(element.data?.logicTargets) ? [...element.data.logicTargets] : [];
-                    const currentTarget = targets[slotIndex] || '';
-                    return (
-                        <select
-                            className="input-control"
-                            value={currentTarget}
-                            onChange={(e) => {
-                                const nextTargets = Array.isArray(element.data?.logicTargets)
-                                    ? [...element.data.logicTargets]
-                                    : [];
-                                while (nextTargets.length <= slotIndex) nextTargets.push('');
-                                nextTargets[slotIndex] = e.target.value;
-                                // Add a new empty slot if this was the last one and it now has a value
-                                if (e.target.value && slotIndex === nextTargets.length - 1) {
-                                    nextTargets.push('');
-                                }
-                                setElements(prev =>
-                                    updateElementValueTypes(
-                                        prev.map(elem =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, logicTargets: nextTargets } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <option value="">-- Target Element --</option>
-                            {detectedElements.map(detectedEl => (
-                                <option key={detectedEl.id} value={detectedEl.id}>
-                                    {detectedEl.name} ({detectedEl.type})
-                                </option>
-                            ))}
-                        </select>
-                    );
-                }
-                return null;
-            default:
-                return null;
-        }
-    };
-
-    const renderOutputControl = (element: CanvasElement, index: number): React.ReactNode => {
-        if (element.type !== 'gradient' || index !== 0) {
-            return null;
-        }
-
-        const colorCount = getGradientColorCount(element);
-
-        return (
-            <input
-                type="number"
-                className="input-control gradient-count-control"
-                min={GRADIENT_MIN_COLORS}
-                max={GRADIENT_MAX_COLORS}
-                value={String(colorCount)}
-                onChange={(e) => {
-                    const nextCount = normalizeGradientColorCount(e.target.value, colorCount);
-                    if (nextCount === colorCount) {
-                        return;
-                    }
-
-                    setConnections((prevConnections) => {
-                        const nextConnections = reconcileGradientConnections(
-                            prevConnections,
-                            element.id,
-                            colorCount,
-                            nextCount
-                        );
-                        connectionsRef.current = nextConnections;
-
-                        setElements((prevElements) =>
-                            updateElementValueTypes(
-                                prevElements.map((elem) => {
-                                    if (elem.id !== element.id) return elem;
-                                    const nextColors = ensureGradientColors(elem.data?.gradientColors, nextCount);
-                                    return {
-                                        ...elem,
-                                        data: {
-                                            ...elem.data,
-                                            gradientColorCount: nextCount,
-                                            gradientColors: nextColors,
-                                            gradientFrom: nextColors[0],
-                                            gradientMid: nextColors[1],
-                                            gradientTo: nextColors[2],
-                                        }
-                                    };
-                                }),
-                                nextConnections
-                            )
-                        );
-
-                        return nextConnections;
-                    });
-                }}
-                onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) => e.stopPropagation()}
-                title="Number of colors"
-            />
-        );
-    };
-
-    // Smart bezier routing for connections
-    const getBezierPath = (
-        fromPos: { x: number; y: number },
-        toPos: { x: number; y: number }
-    ): string => {
-        const distance = Math.abs(fromPos.x - toPos.x);
-        const controlPointDistance = Math.min(distance / 2, 100);
-        
-        return `M ${fromPos.x} ${fromPos.y} 
-                C ${fromPos.x + controlPointDistance} ${fromPos.y},
-                  ${toPos.x - controlPointDistance} ${toPos.y},
-                  ${toPos.x} ${toPos.y}`;
-    };
-
-    // Use useEffect to add non-passive wheel listener
-    React.useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-
-        const handleWheelPassive = (e: WheelEvent) => {
-            e.preventDefault();
-
-            if (!canvasRef.current) return;
-
-            const rect = canvasRef.current.getBoundingClientRect();
-
-            // Mouse position relative to canvas
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
-
-            // Calculate new zoom
-            const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-            const newZoom = Math.max(0.1, Math.min(5, zoom * zoomFactor));
-
-            // Adjust offset to keep the point under mouse fixed
-            const newOffsetX = mouseX - (mouseX - offsetX) * (newZoom / zoom);
-            const newOffsetY = mouseY - (mouseY - offsetY) * (newZoom / zoom);
-
-            setZoom(newZoom);
-            setOffsetX(newOffsetX);
-            setOffsetY(newOffsetY);
-        };
-
-        canvas.addEventListener('wheel', handleWheelPassive, { passive: false });
-
-        return () => {
-            canvas.removeEventListener('wheel', handleWheelPassive);
-        };
-    }, [zoom, offsetX, offsetY]);
-    
-    // Handle global mouse move for connection drawing
-    React.useEffect(() => {
-        const processGlobalMouseMove = (e: MouseEvent) => {
-            // Update connection in progress
-            if (connectionInProgressRef.current) {
-                const rect = canvasRef.current?.getBoundingClientRect();
-                if (rect) {
-                    const mouseX = e.clientX - rect.left;
-                    const mouseY = e.clientY - rect.top;
-                    const canvasX = mouseX;
-                    const canvasY = mouseY; // Since SVG is positioned at 0,0 with 100% width/height
-                    setConnectionInProgress(prev =>
-                        prev ? { ...prev, x: canvasX, y: canvasY } : null
-                    );
-                }
-            }
-            
-            // Drag element on canvas - SAFE capture of ref
-            if (elementDragRef.current && isDraggingCanvasElementRef.current) {
-                const dragRef = elementDragRef.current;
-                const deltaX = (e.clientX - dragRef.startX) / zoomRef.current;
-                const deltaY = (e.clientY - dragRef.startY) / zoomRef.current;
-                
-                // Update predictive delta for smooth pin positions during drag
-                setDragElementDelta({
-                    elementId: dragRef.elementId,
-                    deltaX: deltaX,
-                    deltaY: deltaY
-                });
-                
-                setElements(prev =>
-                    prev.map(elem =>
-                        elem.id === dragRef.elementId
-                            ? {
-                                ...elem,
-                                x: dragRef.elementX + deltaX,
-                                y: dragRef.elementY + deltaY
-                            }
-                            : elem
-                    )
-                );
-            }
-            
-            // Drag from sidebar - show preview
-            if (sidebarDragRef.current && isDraggingFromSidebarRef.current) {
-                const rect = canvasRef.current?.getBoundingClientRect();
-                if (rect) {
-                    setDragPreview({
-                        x: e.clientX - rect.left,
-                        y: e.clientY - rect.top,
-                        name: sidebarDragRef.current.item.name
-                    });
-                }
-            }
-        };
-
-        let pendingMouseMoveEvent: MouseEvent | null = null;
-        let mouseMoveRafId: number | null = null;
-        const handleGlobalMouseMove = (e: MouseEvent) => {
-            pendingMouseMoveEvent = e;
-            if (mouseMoveRafId !== null) {
-                return;
-            }
-            mouseMoveRafId = window.requestAnimationFrame(() => {
-                mouseMoveRafId = null;
-                if (!pendingMouseMoveEvent) return;
-                processGlobalMouseMove(pendingMouseMoveEvent);
-            });
-        };
-        
-        const handleGlobalMouseUp = (e: MouseEvent) => {
-            // Handle sidebar drop
-            if (sidebarDragRef.current && isDraggingFromSidebarRef.current) {
-                const dragRef = sidebarDragRef.current;
-                const rect = canvasRef.current?.getBoundingClientRect();
-                if (rect) {
-                    const mouseX = e.clientX - rect.left;
-                    const mouseY = e.clientY - rect.top;
-                    
-                    // Check if within canvas bounds
-                    if (mouseX >= 0 && mouseY >= 0 && mouseX <= rect.width && mouseY <= rect.height) {
-                        const canvasX = (mouseX - offsetXRef.current) / zoomRef.current;
-                        const canvasY = (mouseY - offsetYRef.current) / zoomRef.current;
-                        
-                        const elementType = dragRef.item.type as CanvasElement['type'];
-                        const customDefinition = elementType === 'custom-node'
-                            ? customNodesRef.current.find((item) => item.id === dragRef.item.customNodeId)
-                            : null;
-                        const defaultData = getDefaultNodeData(elementType);
-
-                        // Handle control drag
-                        if (dragRef.item.id.startsWith('control-')) {
-                            const controlId = dragRef.item.id.replace('control-', '');
-                            const detectedEl = detectedElementsRef.current.find(de => de.id === controlId);
-                            if (detectedEl) {
-                                const newElement: CanvasElement = {
-                                    id: Date.now().toString(),
-                                    name: detectedEl.name,
-                                    type: 'element',
-                                    x: canvasX,
-                                    y: canvasY,
-                                    data: {
-                                        ...defaultData,
-                                        selectedElement: controlId,
-                                        outputs: detectedEl.outputs || []
-                                    }
-                                };
-                                setElements(prev => updateElementValueTypes([...prev, newElement], connectionsRef.current));
-                            }
-                        } else {
-                            if (elementType === 'custom-node' && customDefinition) {
-                                const inputSchema = Array.isArray(customDefinition.inputSchema)
-                                    ? customDefinition.inputSchema
-                                    : [];
-                                const outputSchema = Array.isArray(customDefinition.outputSchema)
-                                    ? customDefinition.outputSchema
-                                    : [];
-
-                                if (defaultData) {
-                                    defaultData.customNodeId = customDefinition.id;
-                                    defaultData.customNodeName = customDefinition.name;
-                                    defaultData.customInputSchema = inputSchema;
-                                    defaultData.customOutputSchema = outputSchema;
-                                    defaultData.customTemplateFormula = String(customDefinition.state?.mainFormula || customDefinition.state?.formula || '');
-                                    defaultData.customInputValues = inputSchema.map((pin) => {
-                                        if (pin.type === 'boolean') {
-                                            return String(pin.defaultValue || '').toLowerCase() === 'true';
-                                        }
-                                        if (pin.type === 'number') {
-                                            const num = Number(pin.defaultValue);
-                                            return Number.isFinite(num) ? num : 0;
-                                        }
-                                        return pin.defaultValue || '';
-                                    });
-                                }
-                            }
-
-                            const newElement: CanvasElement = {
-                                id: Date.now().toString(),
-                                name: customDefinition?.name || dragRef.item.name,
-                                type: elementType,
-                                x: canvasX,
-                                y: canvasY,
-                                data: defaultData,
-                                valueType:
-                                    elementType === 'condition' ? 'boolean'
-                                        : elementType === 'switch' ? 'number'
-                                            : elementType === 'case-range' ? 'case'
-                                                : elementType === 'case-value' ? 'case'
-                                                    : elementType === 'custom-node' ? 'number'
-                                                        : elementType === 'unzip' ? 'number'
-                                                            : elementType === 'memory-read-number' ? 'number'
-                                                            : elementType === 'memory-read-string' ? 'string'
-                                                            : elementType === 'memory-read-boolean' ? 'boolean'
-                                                            : elementType === 'memory-write-number' ? 'number'
-                                                            : elementType === 'memory-write-string' ? 'string'
-                                                            : elementType === 'memory-write-boolean' ? 'boolean'
-                                                            : elementType === 'element-id' ? 'string'
-                                                            : elementType === 'event-element' ? 'string'
-                                                            : elementType === 'event-id' ? 'string'
-                                                            : elementType === 'event-processor' ? 'string'
-                                                            : elementType === 'number' ? 'number'
-                                                                : elementType === 'constant-boolean' ? 'boolean'
-                                                                    : elementType === 'constant-string' ? 'string'
-                                                                        : elementType === 'regex' ? 'boolean'
-                                                                            : elementType === 'concat' ? 'string'
-                                                                                : elementType === 'cut-a' ? 'string'
-                                                                                    : elementType === 'cut-b' ? 'string'
-                                                                                        : elementType === 'cut-c' ? 'string'
-                                                                                            : elementType === 'string-count-chars' ? 'number'
-                                                                                                : elementType === 'string-count-words' ? 'number'
-                                                                                                    : elementType === 'string-find-start' ? 'number'
-                                                                                                        : elementType === 'string-find-end' ? 'number'
-                                                                                                            : elementType === 'string-to-number' ? 'number'
-                                                                                                                : elementType === 'number-to-string' ? 'string'
-                                                                                                                    : elementType === 'bool-count' ? 'number'
-                                                                                                                    : elementType === 'color' ? 'color'
-                                                                                                                        : elementType === 'gradient' ? 'color'
-                                                                                                                            : elementType === 'math' ? 'number'
-                                                                                                                                : 'number'
-                            };
-                            
-                            setElements(prev => updateElementValueTypes([...prev, newElement], connectionsRef.current));
-                        }
-                    }
-                }
-            }
-            
-            // Handle connection end
-            if (connectionInProgressRef.current) {
-                const element = e.target as HTMLElement;
-                const pinElement = element.closest('.pin') as HTMLElement;
-
-                
-                if (pinElement) {
-                    const elementId = pinElement.getAttribute('data-element-id');
-                    const pinId = pinElement.getAttribute('data-pin-id');
-                    const pinType = pinElement.classList.contains('input') ? 'input' : 'output';
-                    const pinIndex = parseInt(pinId?.split('-')[1] || '0');
-                    const connInProgressRef = connectionInProgressRef.current;
-                    
-                    if (elementId && pinType !== connInProgressRef.pinType && elementId !== connInProgressRef.elementId) {
-                        const fromElement = elementsRef.current.find(el => el.id === connInProgressRef.elementId);
-                        const toElement = elementsRef.current.find(el => el.id === elementId);
-                        
-                        if (fromElement && toElement) {
-                            const sourceElement = connInProgressRef.pinType === 'output' ? fromElement : toElement;
-                            const targetElement = connInProgressRef.pinType === 'output' ? toElement : fromElement;
-                            const sourcePinIndex = connInProgressRef.pinType === 'output' ? connInProgressRef.pinIndex : pinIndex;
-                            const targetPinIndex = connInProgressRef.pinType === 'output' ? pinIndex : connInProgressRef.pinIndex;
-
-                            const connectionType: 'normal' | 'case' =
-                                (isCaseNodeType(sourceElement.type) && targetElement.type === 'switch')
-                                    ? 'case'
-                                    : 'normal';
-
-                            const compatible = areTypesCompatible(
-                                sourceElement,
-                                targetElement,
-                                sourcePinIndex,
-                                targetPinIndex,
-                                connectionType
-                            );
-
-                            if (!compatible) {
-                                console.warn('Incompatible types for connection');
-                            } else {
-                                const connId = Date.now().toString();
-                                const newConnection: Connection = {
-                                    id: connId,
-                                    fromId: sourceElement.id,
-                                    fromOutput: `output${sourcePinIndex}`,
-                                    toId: targetElement.id,
-                                    toInput: `input${targetPinIndex}`,
-                                    operation: '+',
-                                    valueType: sourceElement.valueType,
-                                    connectionType
-                                };
-
-                                setConnections(prev => {
-                                    let next = prev.filter(conn =>
-                                        !(conn.toId === targetElement.id && conn.toInput === `input${targetPinIndex}`)
-                                    );
-
-                                    if (
-                                        connectionType === 'case'
-                                        && targetElement.type === 'switch'
-                                        && isCaseNodeType(sourceElement.type)
-                                    ) {
-                                        const existingCaseConnections = next.filter(conn =>
-                                            conn.toId === targetElement.id
-                                            && conn.connectionType === 'case'
-                                            && getInputIndex(conn.toInput) > 0
-                                        );
-
-                                        const existingCaseTypes = new Set(
-                                            existingCaseConnections
-                                                .map(conn => elementsRef.current.find(el => el.id === conn.fromId)?.type)
-                                                .filter((type): type is 'case-range' | 'case-value' => type !== undefined && isCaseNodeType(type))
-                                        );
-
-                                        if (
-                                            existingCaseTypes.size > 0
-                                            && (existingCaseTypes.size > 1 || !existingCaseTypes.has(sourceElement.type))
-                                        ) {
-                                            next = next.filter(conn =>
-                                                !(conn.toId === targetElement.id && conn.connectionType === 'case' && getInputIndex(conn.toInput) > 0)
-                                            );
-                                        }
-                                    }
-
-                                    next = [...next, newConnection];
-                                    connectionsRef.current = next;
-                                    setElements(prevElements => {
-                                        let updated = updateElementValueTypes(prevElements, next);
-                                        // When anything connects to unzip input0, resolve and store the schema
-                                        if (targetElement.type === 'unzip' && targetPinIndex === 0) {
-                                            const srcSchema = resolveZipSchema(sourceElement.id, updated, next);
-                                            if (srcSchema.length > 0) {
-                                                updated = updated.map(elem =>
-                                                    elem.id === targetElement.id
-                                                        ? { ...elem, data: { ...elem.data, customOutputSchema: srcSchema } }
-                                                        : elem
-                                                );
-                                            }
-                                        }
-                                        return updated;
-                                    });
-                                    return next;
-                                });
-                            }
-                            /*const caseConnections = connections.filter(c => c.toId === toElement.id && c.toInput.startsWith('input') && parseInt(c.toInput.replace('input', '')) > 0).length;
-
-                            const connectedInputIndexes = Array.from(new Set(connections
-                                .filter(c => c.toId === toElement.id && c.toInput.startsWith('input'))
-                                .map(c => parseInt(c.toInput.replace('input', '')))
-                                .filter(i => !isNaN(i))
-                            ));
-                            const inputCount = Math.max(1, connectedInputIndexes.length);
-                            console.log()
-                            updateAcceptedTypes(acceptedTypes, inputCount, caseConnections);*/
-                        }
-                    }
-                }
-            }
-            
-            // Clean up
-            setIsDraggingFromSidebar(false);
-            setIsDraggingCanvasElement(false);
-            setConnectionInProgress(null);
-            setDragPreview(null);
-            setDragElementDelta(null);
-            setZoomDelta(1);
-            setOffsetDelta({ x: 0, y: 0 });
-            elementDragRef.current = null;
-            sidebarDragRef.current = null;
-        };
-        
-        document.addEventListener('mousemove', handleGlobalMouseMove);
-        document.addEventListener('mouseup', handleGlobalMouseUp);
-        
-        return () => {
-            if (mouseMoveRafId !== null) {
-                window.cancelAnimationFrame(mouseMoveRafId);
-                mouseMoveRafId = null;
-            }
-            document.removeEventListener('mousemove', handleGlobalMouseMove);
-            document.removeEventListener('mouseup', handleGlobalMouseUp);
-        };
-    }, []);
-
-    const handleTreeToggleFolder = (itemId: string) => {
-        setExpandedFolders(prev => {
-            const newSet = new Set(prev);
-            if (newSet.has(itemId)) {
-                newSet.delete(itemId);
-            } else {
-                newSet.add(itemId);
-            }
-            return newSet;
-        });
-    };
-
-    const isNodeLockedForCurrentPlan = (_item: TreeItem): boolean => {
-        return false;
-    };
-
-    const showInfoNotice = (reason: string) => {
-        setTemplateInfo(reason);
-    };
-
-    const handleTreeStartDrag = (e: React.MouseEvent, item: TreeItem) => {
-        if (isNodeLockedForCurrentPlan(item)) {
-            e.preventDefault();
-            showInfoNotice(`"${item.name}" is unavailable in this context.`);
-            return;
-        }
-
-        if (item.type === 'custom-node' && !item.customNodeId) {
-            e.preventDefault();
-            setTemplateInfo('Custom node definition is missing. Refresh list.');
-            return;
-        }
-
-        if (!e.ctrlKey && !e.shiftKey) {
-            e.preventDefault();
-            sidebarDragRef.current = {
-                startX: e.clientX,
-                startY: e.clientY,
-                item: item
-            };
-            setDraggedItem(item);
-            setIsDraggingFromSidebar(true);
-        }
-    };
-
-    const handleSaveFormula = () => {
-        const { formula } = generateFormula(elements, connections);
-        setFormula(formula);
-        onFormulaChange?.(formula);
-    };
-
-    const getCurrentStateSnapshot = (): SavedState => {
-        return {
-            elements: elementsRef.current,
-            connections: connectionsRef.current,
-            formula: formulaRef.current,
-            updatedAt: Date.now(),
-        };
-    };
-
-    const refreshTemplates = React.useCallback(async () => {
-        try {
-            const nextTemplates = await fetchGraphTemplates(true);
-            setTemplates(nextTemplates);
-            setSelectedTemplateId((prev) => (prev ? prev : (nextTemplates[0]?.id || '')));
-        } catch (error) {
-            setTemplateInfo('Unable to load templates.');
-        }
-    }, []);
-
-    const refreshCustomNodes = React.useCallback(async () => {
-        if (!customNodeLibraryEnabled) {
-            setCustomNodes([]);
-            return;
-        }
-
-        try {
-            const nextCustomNodes = await fetchGraphCustomNodes(true);
-            setCustomNodes(nextCustomNodes);
-        } catch {
-            // Keep editor usable even when custom node endpoint is unavailable.
-            setCustomNodes((prev) => prev);
-        }
-    }, [customNodeLibraryEnabled]);
-
     useEffect(() => {
-        if (!customNodeLibraryEnabled) {
-            setCustomNodes([]);
-            return;
-        }
-        refreshCustomNodes();
-    }, [customNodeLibraryEnabled, refreshCustomNodes]);
-
-    useEffect(() => {
-        if (!customNodes.length) {
+        if (!templateToolsEnabled) {
+            setTemplates([]);
+            setSelectedTemplateId('');
+            setTemplateInfo('');
             return;
         }
 
-        setElements((prev) =>
-            updateElementValueTypes(
-                prev.map((element) => {
-                    if (element.type !== 'custom-node') {
-                        return element;
-                    }
-
-                    const customId = String(element.data?.customNodeId || '').trim();
-                    if (!customId) {
-                        return element;
-                    }
-                    const definition = customNodes.find((item) => item.id === customId);
-                    if (!definition) {
-                        return element;
-                    }
-
-                    return {
-                        ...element,
-                        name: definition.name || element.name,
-                        data: {
-                            ...element.data,
-                            customNodeId: definition.id,
-                            customNodeName: definition.name,
-                            customInputSchema: definition.inputSchema || [],
-                            customOutputSchema: definition.outputSchema || [],
-                            customTemplateFormula: String(definition.state?.mainFormula || definition.state?.formula || element.data?.customTemplateFormula || ''),
-                            customInputValues: Array.isArray(element.data?.customInputValues)
-                                ? element.data?.customInputValues
-                                : (definition.inputSchema || []).map((pin) => pin.defaultValue || ''),
-                        },
-                    };
-                }),
-                connections
-            )
-        );
-    }, [connections, customNodes]);
-
-    useEffect(() => {
-        if (!customNodeLibraryEnabled) {
-            return undefined;
-        }
-        if (typeof window === 'undefined') return undefined;
-
-        const handleWindowFocus = () => {
-            refreshCustomNodes();
-        };
-        const handleVisibilityChange = () => {
-            if (document.visibilityState === 'visible') {
-                refreshCustomNodes();
-            }
-        };
-
-        window.addEventListener('focus', handleWindowFocus);
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-
-        return () => {
-            window.removeEventListener('focus', handleWindowFocus);
-            document.removeEventListener('visibilitychange', handleVisibilityChange);
-        };
-    }, [customNodeLibraryEnabled, refreshCustomNodes]);
-
-    useEffect(() => {
-        if (!templateToolsEnabled) return;
         refreshTemplates();
     }, [refreshTemplates, templateToolsEnabled]);
 
-    const handleSaveTemplate = async () => {
-        const name = templateName.trim();
-        if (!name) {
-            setTemplateInfo('Enter a template name.');
+    useEffect(() => {
+        if (!isStateLoaded || templateMode || customNodeMode || draftRecoveryCheckedRef.current) {
             return;
         }
 
-        const normalizedName = name.toLowerCase();
-        const existingTemplate = templates.find((item) => item.name.trim().toLowerCase() === normalizedName);
-        setIsTemplateBusy(true);
-        setTemplateInfo('');
-        try {
-            const savedTemplate = await saveGraphTemplate(
-                name,
-                getCurrentStateSnapshot(),
-                existingTemplate?.id
-            );
-            await refreshTemplates();
-            if (savedTemplate.id) {
-                setSelectedTemplateId(savedTemplate.id);
+        draftRecoveryCheckedRef.current = true;
+
+        if (autosaveState && (!savedState || !areSnapshotsEquivalent(autosaveState, savedState))) {
+            setRecoverableDraftState(autosaveState);
+            setPendingDraftRecovery(autosaveState);
+            setShowDraftRecoveryNotice(true);
+            return;
+        }
+
+        setRecoverableDraftState(null);
+        setPendingDraftRecovery(null);
+        setShowDraftRecoveryNotice(false);
+    }, [autosaveState, customNodeMode, isStateLoaded, savedState, templateMode]);
+
+    useEffect(() => {
+        const handleWindowMouseUp = (event: MouseEvent) => {
+            if (!isDraggingFromSidebarRef.current || !draggedItemRef.current) {
+                return;
             }
-            setTemplateName('');
-            setTemplateInfo('Template saved.');
-        } catch (error) {
-            const message = error instanceof Error && error.message
-                ? error.message
-                : 'Unable to save template.';
-            setTemplateInfo(message);
-            if (message.toLowerCase().includes('template') || message.toLowerCase().includes('limit')) {
-                showInfoNotice(message);
+            finishSidebarDrag(event.clientX, event.clientY);
+        };
+
+        window.addEventListener('mouseup', handleWindowMouseUp);
+        return () => {
+            window.removeEventListener('mouseup', handleWindowMouseUp);
+            if (floatingNoticeTimeoutRef.current) {
+                window.clearTimeout(floatingNoticeTimeoutRef.current);
+                floatingNoticeTimeoutRef.current = null;
             }
-        } finally {
-            setIsTemplateBusy(false);
+        };
+    }, []);
+
+    const handleSave = () => {
+        const snapshot = buildSavedState();
+        setSavedState(snapshot);
+        setAutosaveState(snapshot);
+        setRecoverableDraftState(snapshot);
+        setUnsavedChanges(false);
+        setPendingDraftRecovery(null);
+        setShowDraftRecoveryNotice(false);
+        onUnsavedChange?.(false);
+        onStateChangeRef.current?.(snapshot);
+        persistSavedSnapshot(snapshot);
+    };
+
+    const handleRestore = () => {
+        const snapshot = savedState || autosaveState || recoverableDraftState;
+        applySnapshot(snapshot);
+        if (snapshot) {
+            persistSavedSnapshot(snapshot);
         }
     };
 
-    const fillTemplateElementInputs = (templateElements: CanvasElement[]): CanvasElement[] => {
-        const detected = detectedElementsRef.current;
-        if (detected.length === 0) {
-            return templateElements;
+    const handleRestoreUnsaved = () => {
+        const previousSavedState = savedState;
+        applySnapshot(pendingDraftRecovery || recoverableDraftState || autosaveState || savedState);
+        setSavedState(previousSavedState);
+        setUnsavedChanges(true);
+        onUnsavedChange?.(true);
+    };
+
+    const handleDismissDraftRecovery = () => {
+        setShowDraftRecoveryNotice(false);
+        setPendingDraftRecovery(null);
+    };
+
+    const getDefaultNodeDataForTreeItem = (type: TreeItem['type']): CanvasElement['data'] => {
+        switch (type) {
+            case 'array':
+                return { arrayItemType: 'number', arrayItemSchema: [] };
+            case 'chart-data':
+                return { chartDataLabel: 'label', chartDataValue: 0, chartDataValueText: '0', chartDataTypeCarrier: false };
+            case 'array-push':
+            case 'array-pop':
+            case 'array-remove-index':
+            case 'array-replace-index':
+                return { arrayItemType: 'number', arrayItemSchema: [] };
+            case 'array-sort':
+                return { arrayItemType: 'number', sortMode: 'number-asc', arraySortField: '' };
+            case 'image-from-link':
+                return { imageUrl: '' };
+            case 'image-from-element':
+                return { elementSelector: '' };
+            case 'api-request':
+                return { apiUrl: '', apiMethod: 'GET' };
+            case 'api-field':
+                return { apiFieldPath: '', apiFieldType: 'string', apiFieldFallback: '' };
+            case 'api-list-mapper':
+                return {
+                    apiListPath: '',
+                    apiListValueField: 'value',
+                    apiListMatchMode: 'auto',
+                    apiListItemType: 'string',
+                    apiListCustomNodeId: '',
+                    apiListFieldMappings: [],
+                    arrayItemType: 'string',
+                    arrayItemSchema: [
+                        {
+                            id: 'value',
+                            label: 'value',
+                            type: 'string',
+                        },
+                    ],
+                };
+            case 'action-event':
+                return { actionEventType: 'change', actionTargetId: '', actionTargetManualId: '' };
+            case 'action-block':
+                return {};
+            case 'action-required':
+                return { actionRequired: true };
+            case 'action-min':
+                return { actionMin: 0 };
+            case 'action-max':
+                return { actionMax: 100 };
+            case 'action-length':
+                return { actionMinLength: 0, actionMaxLength: 0 };
+            case 'action-regex':
+                return { actionRegexPattern: '' };
+            case 'action-add-class':
+            case 'action-remove-class':
+            case 'action-toggle-class':
+                return { actionClassName: '' };
+            default:
+                return {};
+        }
+    };
+
+    const handleDelete = (elementId: string) => {
+        if (elementId === 'main-block') {
+            return;
+        }
+        setElements((prev) => {
+            const next = prev.filter((element) => element.id !== elementId);
+            if (selected === elementId) {
+                setSelected(next[0]?.id || null);
+            }
+            return next;
+        });
+        setConnections((prev) => prev.filter((connection) => connection.fromId !== elementId && connection.toId !== elementId));
+        markGraphDirty();
+    };
+
+    const handleMouseDown = (event: React.MouseEvent<HTMLElement>) => {
+        if (event.button !== 0) {
+            return;
         }
 
-        const isValidDetectedId = (id: string) => detected.some((item) => item.id === id);
-        const usedDetectedIds = new Set<string>();
+        const target = event.target as HTMLElement | null;
+        if (target?.closest('.pin') || target?.closest('.input-control') || target?.closest('.delete-btn') || target?.closest('.api-list-mapper-scroll')) {
+            return;
+        }
 
-        templateElements.forEach((el) => {
-            if (el.type !== 'element') return;
-            const selectedId = String(el.data?.selectedElement || '');
-            if (selectedId && isValidDetectedId(selectedId)) {
-                usedDetectedIds.add(selectedId);
-            }
-        });
+        if (isDraggingFromSidebarRef.current && draggedItemRef.current) {
+            return;
+        }
 
-        const pickDetectedElement = (expectedType?: 'number' | 'string' | 'boolean' | 'color') => {
-            const matchesType = (candidate: DetectedElement) =>
-                !expectedType || candidate.outputs?.some((output) => output.type === expectedType);
-
-            let candidate = detected.find((item) => !usedDetectedIds.has(item.id) && matchesType(item));
-            if (!candidate) {
-                candidate = detected.find((item) => !usedDetectedIds.has(item.id));
-            }
-            if (!candidate && expectedType) {
-                candidate = detected.find((item) => matchesType(item));
-            }
-            return candidate || null;
-        };
-
-        return templateElements.map((el) => {
-            if (el.type !== 'element') {
-                return el;
+        const currentTarget = event.currentTarget as HTMLElement;
+        const elementId = currentTarget?.dataset?.elementId;
+        if (elementId) {
+            const element = elementsRef.current.find((item) => item.id === elementId);
+            if (!element) {
+                return;
             }
 
-            const selectedId = String(el.data?.selectedElement || '');
-            const stillExists = selectedId ? detected.find((item) => item.id === selectedId) : null;
-
-            if (stillExists) {
-                return {
-                    ...el,
-                    data: {
-                        ...el.data,
-                        selectedElement: stillExists.id,
-                        outputs: stillExists.outputs || [],
-                    },
-                };
-            }
-
-            const expectedType =
-                el.valueType === 'number'
-                || el.valueType === 'string'
-                || el.valueType === 'boolean'
-                || el.valueType === 'color'
-                    ? el.valueType
-                    : undefined;
-            const picked = pickDetectedElement(expectedType);
-
-            if (!picked) {
-                return {
-                    ...el,
-                    data: {
-                        ...el.data,
-                        selectedElement: '',
-                        outputs: [],
-                    },
-                };
-            }
-
-            usedDetectedIds.add(picked.id);
-            return {
-                ...el,
-                data: {
-                    ...el.data,
-                    selectedElement: picked.id,
-                    outputs: picked.outputs || [],
-                },
+            setSelected(elementId);
+            setIsClick(true);
+            setIsDraggingCanvasElement(true);
+            isDraggingCanvasElementRef.current = true;
+            setDraggedElementId(elementId);
+            elementDragRef.current = {
+                elementId,
+                startX: event.clientX,
+                startY: event.clientY,
+                elementX: element.x,
+                elementY: element.y
             };
-        });
-    };
-
-    const handleImportTemplate = () => {
-        const template = templates.find((item) => item.id === selectedTemplateId);
-        const state = normalizeSnapshot(template?.state);
-
-        if (!template || !state) {
-            setTemplateInfo('Select a valid template.');
+            const nextDragDelta = { elementId, deltaX: 0, deltaY: 0 };
+            dragElementDeltaRef.current = nextDragDelta;
+            setDragElementDelta(nextDragDelta);
             return;
         }
 
-        const importedElements = fillTemplateElementInputs(
-            ensureMainBlock(normalizeLoadedElements(state.elements || []))
-        );
-        const loaded = applyLoadedState({
-            elements: importedElements,
-            connections: state.connections || [],
-            formula: state.formula || '',
-        });
-        const data: SavedState = {
-            elements: loaded.elements,
-            connections: loaded.connections,
-            formula: loaded.formula,
-            updatedAt: Date.now(),
-        };
-
-        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
-        setSavedState(data);
-        setAutosaveState(data);
-
-        onFormulaChange?.(data.formula);
-        onStateChange?.(data);
-        setTemplateInfo(`Imported template: ${template.name}`);
+        setIsPanning(true);
+        isPanningRef.current = true;
+        setIsClick(true);
+        lastPanPointRef.current = { x: event.clientX, y: event.clientY };
     };
 
+    const handleMouseMove = (event: React.MouseEvent<HTMLElement>) => {
+        const nextPoint = { x: event.clientX, y: event.clientY };
+        pendingCanvasMouseRef.current = nextPoint;
+
+        if (draggedItemRef.current && isDraggingFromSidebarRef.current) {
+            const drag = sidebarDragRef.current;
+            if (drag) {
+                const movedDistance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+                if (movedDistance >= 5) {
+                    setDragPreview({ x: event.clientX, y: event.clientY, name: draggedItemRef.current.name });
+                }
+            }
+        }
+
+        if (isPanningRef.current) {
+            const dx = event.clientX - lastPanPointRef.current.x;
+            const dy = event.clientY - lastPanPointRef.current.y;
+            if (dx !== 0 || dy !== 0) {
+                setOffsetX((prev) => prev + dx);
+                setOffsetY((prev) => prev + dy);
+                setIsClick(false);
+            }
+            lastPanPointRef.current = nextPoint;
+        }
+
+        if (isDraggingCanvasElementRef.current && elementDragRef.current) {
+            const drag = elementDragRef.current;
+            const dx = (event.clientX - drag.startX) / zoomRef.current;
+            const dy = (event.clientY - drag.startY) / zoomRef.current;
+            if (dx !== 0 || dy !== 0) {
+                const nextDragDelta = { elementId: drag.elementId, deltaX: dx, deltaY: dy };
+                dragElementDeltaRef.current = nextDragDelta;
+                setDragElementDelta(nextDragDelta);
+                setIsClick(false);
+            }
+        }
+
+        if (connectionInProgressRef.current) {
+            const canvasEl = canvasRef.current;
+            if (canvasEl) {
+                const rect = canvasEl.getBoundingClientRect();
+                const canvasPoint = {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top,
+                };
+                setConnectionInProgress((prev) => prev ? { ...prev, x: canvasPoint.x, y: canvasPoint.y } : prev);
+            }
+        }
+    };
+
+    const handleWheel = (event: WheelEvent | React.WheelEvent<HTMLElement>) => {
+        const target = event.target as HTMLElement | null;
+        if (apiListMapperScrollLockRef.current || target?.closest('.api-list-mapper-scroll')) {
+            return;
+        }
+
+        event.preventDefault();
+
+        if (isDraggingCanvasElementRef.current || isDraggingFromSidebarRef.current || connectionInProgressRef.current) {
+            return;
+        }
+
+        const canvasEl = canvasRef.current;
+        if (!canvasEl) {
+            return;
+        }
+
+        const rect = canvasEl.getBoundingClientRect();
+        const cursorX = event.clientX - rect.left;
+        const cursorY = event.clientY - rect.top;
+        const zoomFactor = event.deltaY < 0 ? 1.08 : 0.92;
+        const nextZoom = Math.min(2.5, Math.max(0.35, zoomRef.current * zoomFactor));
+
+        const worldX = (cursorX - offsetXRef.current) / zoomRef.current;
+        const worldY = (cursorY - offsetYRef.current) / zoomRef.current;
+
+        const nextOffsetX = cursorX - (worldX * nextZoom);
+        const nextOffsetY = cursorY - (worldY * nextZoom);
+
+        setZoom(nextZoom);
+        setOffsetX(nextOffsetX);
+        setOffsetY(nextOffsetY);
+    };
+
+    const handleMouseUp = (event: React.MouseEvent<HTMLElement>) => {
+        const nextPoint = { x: event.clientX, y: event.clientY };
+
+        if (isDraggingCanvasElementRef.current && elementDragRef.current) {
+            const drag = elementDragRef.current;
+            const dx = (event.clientX - drag.startX) / zoomRef.current;
+            const dy = (event.clientY - drag.startY) / zoomRef.current;
+            if (dx !== 0 || dy !== 0) {
+                setElements((prev) => prev.map((element) => (
+                    element.id === drag.elementId
+                        ? { ...element, x: drag.elementX + dx, y: drag.elementY + dy }
+                        : element
+                )));
+                markGraphDirty();
+            }
+            setDragElementDelta(null);
+            dragElementDeltaRef.current = null;
+            setIsDraggingCanvasElement(false);
+            isDraggingCanvasElementRef.current = false;
+            setDraggedElementId(null);
+            elementDragRef.current = null;
+        }
+
+        if (connectionInProgressRef.current) {
+            const connectionState = connectionInProgressRef.current;
+            const pointerTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+            const targetPinEl = pointerTarget?.closest('.pin') as HTMLElement | null;
+            const targetElementId = targetPinEl?.dataset?.elementId || '';
+            const targetPinId = targetPinEl?.dataset?.pinId || '';
+            const targetPinType = targetPinId.startsWith('input-')
+                ? 'input'
+                : targetPinId.startsWith('output-')
+                    ? 'output'
+                    : null;
+            const targetPinIndex = targetPinType
+                ? Number.parseInt(targetPinId.replace(/^(input|output)-/, ''), 10)
+                : -1;
+
+            let sourceElementId = connectionState.elementId;
+            let sourcePinIndex = connectionState.pinIndex;
+            let destinationElementId = '';
+            let destinationPinIndex = -1;
+
+            if (targetPinType === 'input' && connectionState.pinType === 'output') {
+                destinationElementId = targetElementId;
+                destinationPinIndex = targetPinIndex;
+            } else if (targetPinType === 'output' && connectionState.pinType === 'input') {
+                sourceElementId = targetElementId;
+                sourcePinIndex = targetPinIndex;
+                destinationElementId = connectionState.elementId;
+                destinationPinIndex = connectionState.pinIndex;
+            }
+
+            const sourceElement = elementsRef.current.find((element) => element.id === sourceElementId) || null;
+            const destinationElement = elementsRef.current.find((element) => element.id === destinationElementId) || null;
+
+            const canCompleteConnection =
+                Boolean(targetPinEl)
+                && Boolean(targetPinType)
+                && Boolean(sourceElement)
+                && Boolean(destinationElement)
+                && sourceElementId !== destinationElementId
+                && sourcePinIndex >= 0
+                && destinationPinIndex >= 0;
+
+            if (canCompleteConnection && sourceElement && destinationElement) {
+                const sourceValueType = getOutputPinType(sourceElement, sourcePinIndex);
+                const targetAcceptedTypes = getAcceptedTypesForPin(destinationElement, destinationPinIndex);
+
+                if (arePinTypesCompatible(sourceValueType, targetAcceptedTypes)) {
+                    const nextConnections = connectionsRef.current.filter((connection) => (
+                        connection.toId !== destinationElementId || connection.toInput !== `input${destinationPinIndex}`
+                    ));
+
+                    nextConnections.push({
+                        id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        fromId: sourceElementId,
+                        fromOutput: `output${sourcePinIndex}`,
+                        toId: destinationElementId,
+                        toInput: `input${destinationPinIndex}`,
+                        valueType: sourceValueType || 'number',
+                        connectionType: 'normal',
+                    });
+
+                    syncConnectionsAndTypes(nextConnections);
+                    markGraphDirty();
+                    clearConnectionDrag(false);
+                } else {
+                    showInfoNotice(`Cannot connect ${sourceValueType || 'unknown'} output to this pin.`);
+                    clearConnectionDrag(false);
+                }
+            } else {
+                clearConnectionDrag(false);
+            }
+        }
+
+        if (isPanningRef.current) {
+            setIsPanning(false);
+            isPanningRef.current = false;
+        }
+
+        finishSidebarDrag(event.clientX, event.clientY);
+        pendingCanvasMouseRef.current = nextPoint;
+    };
+
+    const isMainInputType = INPUT_MAIN_TYPES.has(mainElementType);
     return (
+
         <div className="graph-editor">
             {showDraftRecoveryNotice && pendingDraftRecovery && (
                 <div
@@ -5696,13 +5608,46 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     </div>
                 </div>
             )}
+            {floatingNotice && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        top: '12px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 7000,
+                        width: 'min(760px, calc(100vw - 32px))',
+                        pointerEvents: 'none',
+                        padding: '10px 12px',
+                        borderRadius: '8px',
+                        background: '#1f2937',
+                        color: '#fbbf24',
+                        border: '1px solid #374151',
+                        fontSize: '12px',
+                        lineHeight: '1.4',
+                        boxShadow: '0 10px 30px rgba(0, 0, 0, 0.35)',
+                    }}
+                >
+                    {floatingNotice}
+                </div>
+            )}
             <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
                 <button className="toggle-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
                     {sidebarOpen ? '\u25C0' : '\u25B6'}
                 </button>
                 {sidebarOpen && (
                     <div className="tree-container">
-                        {treeData.map((item) => (
+                        <div style={{ padding: '10px 14px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                            <input
+                                type="text"
+                                className="input-control"
+                                value={sidebarSearch}
+                                onChange={(e) => setSidebarSearch(e.target.value)}
+                                placeholder="Search nodes..."
+                                style={{ width: '100%', boxSizing: 'border-box' }}
+                            />
+                        </div>
+                        {visibleSidebarTreeData.map((item) => (
                             <TreeNode
                                 key={item.id}
                                 item={item}
@@ -5785,12 +5730,58 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 </button>
                             )}
 
-                            {selected && (selected !== 'main-block' || customNodeMode) && (() => {
+                            {templateToolsEnabled && !templateMode && !customNodeMode && (
+                                <div style={{ marginTop: '12px', borderTop: '1px solid #555', paddingTop: '12px' }}>
+                                    <div style={{ color: '#ddd', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>Graph Templates</div>
+                                    <select
+                                        className="input-control"
+                                        value={selectedTemplateId}
+                                        onChange={(e) => setSelectedTemplateId(e.target.value)}
+                                        style={{ width: '100%', marginTop: '8px' }}
+                                    >
+                                        <option value="">Select template</option>
+                                        {templates.map((template) => (
+                                            <option key={template.id} value={template.id}>
+                                                {template.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        onClick={handleImportTemplate}
+                                        disabled={isTemplateBusy || !selectedTemplateId}
+                                        style={{
+                                            ...buttonStyle,
+                                            backgroundColor: '#8e24aa',
+                                            opacity: isTemplateBusy || !selectedTemplateId ? 0.75 : 1,
+                                            cursor: isTemplateBusy || !selectedTemplateId ? 'not-allowed' : 'pointer',
+                                        }}
+                                    >
+                                        {isTemplateBusy ? 'Importing...' : 'Import Template'}
+                                    </button>
+                                    {templateInfo && (
+                                        <div style={{ color: '#cfd8dc', fontSize: '11px', marginTop: '6px', lineHeight: '1.3' }}>
+                                            {templateInfo}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {selected && (() => {
                                 const selEl = elements.find(e => e.id === selected);
                                 if (!selEl) return null;
                                 const isConstantInput = customNodeMode && (
                                     selEl.type === 'number' || selEl.type === 'constant-boolean'
                                     || selEl.type === 'constant-string' || selEl.type === 'color'
+                                );
+                                const isConstantCarrier = customNodeMode && (
+                                    selEl.type === 'number' || selEl.type === 'constant-boolean'
+                                    || selEl.type === 'constant-string' || selEl.type === 'color'
+                                ) && !!selEl.data?.constantTypeCarrier;
+                                const isArrayCarrierConstant = (
+                                    selEl.type === 'number'
+                                    || selEl.type === 'constant-boolean'
+                                    || selEl.type === 'constant-string'
+                                    || selEl.type === 'color'
                                 );
                                 const isZipOutput = customNodeMode && selEl.type === 'main';
                                 return (
@@ -5798,36 +5789,61 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                                         {isConstantInput && (
                                             <>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Input Label</div>
-                                                    <input
-                                                        type="text"
-                                                        className="input-control"
-                                                        value={selEl.name}
-                                                        placeholder="Input label"
-                                                        onChange={(e) => {
-                                                            const name = e.target.value;
-                                                            setElements(prev => prev.map(elem =>
-                                                                elem.id === selected ? { ...elem, name } : elem
-                                                            ));
-                                                        }}
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                </div>
                                                 <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
                                                     <input
                                                         type="checkbox"
-                                                        checked={!!selEl.data?.hidden}
+                                                        checked={!!selEl.data?.constantTypeCarrier}
                                                         onChange={(e) => {
-                                                            const hidden = e.target.checked;
-                                                            setElements(prev => prev.map(elem =>
-                                                                elem.id === selected ? { ...elem, data: { ...elem.data, hidden } } : elem
-                                                            ));
+                                                            const constantTypeCarrier = e.target.checked;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, constantTypeCarrier } }
+                                                                            : elem
+                                                                    ),
+                                                                    connectionsRef.current
+                                                                )
+                                                            );
                                                         }}
                                                         style={{ cursor: 'pointer' }}
                                                     />
-                                                    Hidden (use default value)
+                                                    Constant type carrier
                                                 </label>
+                                                {!isConstantCarrier && (
+                                                    <>
+                                                        <div>
+                                                            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Input Label</div>
+                                                            <input
+                                                                type="text"
+                                                                className="input-control"
+                                                                value={selEl.name}
+                                                                placeholder="Input label"
+                                                                onChange={(e) => {
+                                                                    const name = e.target.value;
+                                                                    setElements(prev => prev.map(elem =>
+                                                                        elem.id === selected ? { ...elem, name } : elem
+                                                                    ));
+                                                                }}
+                                                                style={{ width: '100%' }}
+                                                            />
+                                                        </div>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!selEl.data?.hidden}
+                                                                onChange={(e) => {
+                                                                    const hidden = e.target.checked;
+                                                                    setElements(prev => prev.map(elem =>
+                                                                        elem.id === selected ? { ...elem, data: { ...elem.data, hidden } } : elem
+                                                                    ));
+                                                                }}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Hidden (use default value)
+                                                        </label>
+                                                    </>
+                                                )}
                                             </>
                                         )}
 
@@ -5876,34 +5892,120 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                             );
                                         })()}
 
-                                        {selEl.type === 'custom-node' && (
+                                        {isArrayCarrierConstant && (
                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
                                                 <input
                                                     type="checkbox"
-                                                    checked={!!selEl.data?.zipOutput}
+                                                    checked={!!selEl.data?.arrayTypeCarrier}
                                                     onChange={(e) => {
-                                                        const zipOutput = e.target.checked;
+                                                        const arrayTypeCarrier = e.target.checked;
                                                         setElements(prev =>
                                                             updateElementValueTypes(
                                                                 prev.map(elem =>
                                                                     elem.id === selected
-                                                                        ? { ...elem, data: { ...elem.data, zipOutput }, valueType: zipOutput ? 'zip' : 'number' }
+                                                                        ? { ...elem, data: { ...elem.data, arrayTypeCarrier } }
                                                                         : elem
                                                                 ),
                                                                 connectionsRef.current
                                                             )
                                                         );
-                                                        // Remove output connections that no longer exist when switching modes
-                                                        setConnections(prev => {
-                                                            const next = prev.filter(c => c.fromId !== selected);
-                                                            connectionsRef.current = next;
-                                                            return next;
-                                                        });
                                                     }}
                                                     style={{ cursor: 'pointer' }}
                                                 />
-                                                Zip Output
+                                                Array type carrier
                                             </label>
+                                        )}
+
+                                        {selEl.type === 'chart-data' && (
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!selEl.data?.chartDataTypeCarrier}
+                                                    onChange={(e) => {
+                                                        const chartDataTypeCarrier = e.target.checked;
+                                                        setElements(prev =>
+                                                            updateElementValueTypes(
+                                                                prev.map(elem =>
+                                                                    elem.id === selected
+                                                                        ? { ...elem, data: { ...elem.data, chartDataTypeCarrier } }
+                                                                        : elem
+                                                                ),
+                                                                connectionsRef.current
+                                                            )
+                                                        );
+                                                    }}
+                                                    style={{ cursor: 'pointer' }}
+                                                />
+                                                Chart data type carrier
+                                            </label>
+                                        )}
+
+                                        {selEl.type === 'custom-node' && (
+                                            <>
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={!!selEl.data?.zipOutput}
+                                                        onChange={(e) => {
+                                                            const zipOutput = e.target.checked;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, zipOutput }, valueType: zipOutput ? 'zip' : 'number' }
+                                                                            : elem
+                                                                    ),
+                                                                    connectionsRef.current
+                                                                )
+                                                            );
+                                                            // Remove output connections that no longer exist when switching modes
+                                                            setConnections(prev => {
+                                                                const next = prev.filter(c => c.fromId !== selected);
+                                                                connectionsRef.current = next;
+                                                                return next;
+                                                            });
+                                                        }}
+                                                        style={{ cursor: 'pointer' }}
+                                                    />
+                                                    Zip Output
+                                                </label>
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={!!selEl.data?.customNodeTypeCarrier}
+                                                        onChange={(e) => {
+                                                            const customNodeTypeCarrier = e.target.checked;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? {
+                                                                                ...elem,
+                                                                                data: {
+                                                                                    ...elem.data,
+                                                                                    customNodeTypeCarrier,
+                                                                                    zipOutput: customNodeTypeCarrier ? true : !!elem.data?.zipOutput,
+                                                                                },
+                                                                                valueType: customNodeTypeCarrier ? 'zip' : 'number',
+                                                                            }
+                                                                            : elem
+                                                                    ),
+                                                                    connectionsRef.current
+                                                                )
+                                                            );
+                                                            setConnections(prev => {
+                                                                const next = customNodeTypeCarrier
+                                                                    ? prev.filter(c => c.fromId !== selected && c.toId !== selected)
+                                                                    : prev;
+                                                                connectionsRef.current = next;
+                                                                return next;
+                                                            });
+                                                        }}
+                                                        style={{ cursor: 'pointer' }}
+                                                    />
+                                                    Type carrier
+                                                </label>
+                                            </>
                                         )}
 
                                         {selEl.type === 'element-id' && (
@@ -6232,41 +6334,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 );
                             })()}
 
-                            {templateToolsEnabled && (
-                            <div style={{ marginTop: '12px', borderTop: '1px solid #555', paddingTop: '12px' }}>
-                                <div style={{ color: '#ddd', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>
-                                    Graph Templates
-                                </div>
-                                <select
-                                    className="input-control"
-                                    value={selectedTemplateId}
-                                    onChange={(e) => setSelectedTemplateId(e.target.value)}
-                                    style={{ width: '100%', marginTop: '8px' }}
-                                >
-                                    <option value="">Select template</option>
-                                    {templates.map((template) => (
-                                        <option key={template.id} value={template.id}>
-                                            {template.name}
-                                        </option>
-                                    ))}
-                                </select>
-
-                                <button
-                                    onClick={handleImportTemplate}
-                                    style={{
-                                        ...buttonStyle,
-                                        backgroundColor: '#8e24aa'
-                                    }}
-                                >
-                                    Import Template
-                                </button>
-                                {templateInfo && (
-                                    <div style={{ color: '#cfd8dc', fontSize: '11px', marginTop: '6px', lineHeight: '1.3' }}>
-                                        {templateInfo}
-                                    </div>
-                                )}
-                            </div>
-                            )}
                         </div>
                     </div>
                 )}
@@ -6274,12 +6341,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             <div className="main-content">
                 <div
-                    ref={canvasRef}
-                    className="canvas"
-                    onMouseDown={handleMouseDown}
-                    onMouseMove={handleMouseMove}
-                    onMouseUp={handleMouseUp}
-                    style={{
+                ref={canvasRef}
+                className="canvas"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                style={{
                         width: '100%',
                         height: '100%',
                         position: 'relative',
@@ -6358,9 +6425,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     {dragPreview && (
                         <div
                             style={{
-                                position: 'absolute',
-                                left: `${dragPreview.x - 50}px`,
-                                top: `${dragPreview.y - 30}px`,
+                                position: 'fixed',
+                                left: `${dragPreview.x}px`,
+                                top: `${dragPreview.y}px`,
+                                transform: 'translate(-50%, -50%)',
                                 width: '100px',
                                 height: '60px',
                                 backgroundColor: '#444',
@@ -6383,12 +6451,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     )}
                     
                     {elements.map((el) => {
+                        if (el.id === 'main-block' && !shouldRenderMainBlock) {
+                            return null;
+                        }
                         const inputCount = getInputCount(el);
                         const outputCount = getOutputCount(el);
                         const nodeHeight = getNodeHeight(el);
                         const nodeWidth = getNodeWidth(el);
                         const noInputPins = inputCount === 0;
                         const noOutputPins = outputCount === 0;
+                        const isChartDataCarrier = el.type === 'chart-data' && !!el.data?.chartDataTypeCarrier;
                         const nodePinClass = [
                             noInputPins ? 'no-input-pins' : '',
                             noOutputPins ? 'no-output-pins' : '',
@@ -6420,19 +6492,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'css-font-size'
                             || el.type === 'css-join'
                             || el.type === 'css-display'
-                            || el.type === 'css-text';
+                            || el.type === 'css-text'
+                            || el.type === 'array'
+                            || el.type === 'array-push'
+                            || el.type === 'array-pop'
+                            || el.type === 'array-sort'
+                            || el.type === 'array-remove-index'
+                            || el.type === 'array-replace-index'
+                            || el.type === 'image-from-link'
+                            || el.type === 'image-from-element'
+                            || el.type === 'api-request'
+                            || el.type === 'api-field'
+                            || el.type === 'api-list-mapper';
                         const calcSegments = el.type === 'calculation' ? (calcFlowByNode[el.id] || []) : [];
                         const calcMarkerId = `calc-flow-arrow-${el.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+                        const activeDragDelta = dragElementDelta?.elementId === el.id ? dragElementDelta : null;
+                        const visualX = el.x + (activeDragDelta?.deltaX || 0);
+                        const visualY = el.y + (activeDragDelta?.deltaY || 0);
 
 
                         return (
                             <div
                                 key={el.id}
-                                className={`canvas-element type-${el.type} ${nodePinClass} ${selected === el.id ? 'selected' : ''} ${dynamicInputGapErrors[el.id] ? 'node-error' : ''}`}
+                                className={`canvas-element type-${el.type} ${nodePinClass} ${isChartDataCarrier ? 'chart-data-carrier' : ''} ${selected === el.id ? 'selected' : ''} ${dynamicInputGapErrors[el.id] ? 'node-error' : ''}`}
                                 data-element-id={el.id}
                                 style={{ 
-                                    left: `${el.x * zoom + offsetX}px`, 
-                                    top: `${el.y * zoom + offsetY}px`,
+                                    left: `${Math.round(visualX * zoom + offsetX)}px`, 
+                                    top: `${Math.round(visualY * zoom + offsetY)}px`,
                                     width: `${nodeWidth}px`,
                                     height: `${nodeHeight}px`,
                                     transform: `scale(${zoom})`,
@@ -6477,11 +6563,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                         {calcSegments.map((segment) => (
                                             <g key={segment.key}>
                                                 <path
-                                                    className="calc-flow-path"
+                                                    className={`calc-flow-path ${segment.ghost ? 'calc-flow-path--ghost' : ''}`}
                                                     d={segment.d}
                                                     markerEnd={`url(#${calcMarkerId})`}
                                                 />
-                                                <g transform={`translate(${segment.badgeX}, ${segment.badgeY})`} className="calc-flow-badge">
+                                                <g transform={`translate(${segment.badgeX}, ${segment.badgeY})`} className={`calc-flow-badge ${segment.ghost ? 'calc-flow-badge--ghost' : ''}`}>
                                                     <circle r="7" />
                                                     <text textAnchor="middle" dominantBaseline="middle">
                                                         {segment.step}
@@ -6530,13 +6616,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                                 pinType: 'output',
                                                                                 pinIndex: fromPinIndex,
                                                                                 x: fromPinPos.x,
-                                                                                y: fromPinPos.y
+                                                                                y: fromPinPos.y,
+                                                                                reconnectingConnection: existingConnection
                                                                             });
-                                                                            setConnections(prev => {
-                                                                                const next = prev.filter(conn => conn.id !== existingConnection.id);
-                                                                                connectionsRef.current = next;
-                                                                                return next;
-                                                                            });
+                                                                            const next = connectionsRef.current.filter((conn) => conn.id !== existingConnection.id);
+                                                                            syncConnectionsAndTypes(next);
                                                                         }
                                                                     } else {
                                                                         setConnectionInProgress({
@@ -6583,12 +6667,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="<=">{'<='}</option>
                                                     </select>
                                                 </div>
-                                            ) : el.type === 'calculation' ? (
+        ) : el.type === 'calculation' ? (
                                                 (() => {
-                                                    const connectedCalcInputs = getConnectedInputIndexesForElement(el.id);
-                                                    const operatorRowCount = Math.max(0, connectedCalcInputs.length - 1);
-                                                    return Array.from({ length: operatorRowCount }).map((_, i) => {
-                                                        const keyName = `input${i}`;
+            const connectedCalcInputs = getConnectedInputIndexesForElement(el.id);
+            const stableOperatorRowCount = Math.max(0, connectedCalcInputs.length - 1);
+            if (!dynamicInputGapErrors[el.id]) {
+                calculationOperatorCountRef.current[el.id] = stableOperatorRowCount;
+            }
+            const operatorRowCount = dynamicInputGapErrors[el.id]
+                ? (calculationOperatorCountRef.current[el.id] ?? stableOperatorRowCount)
+                : stableOperatorRowCount;
+            return Array.from({ length: operatorRowCount }).map((_, i) => {
+                const keyName = `input${i}`;
                                                         return (
                                                             <div key={`operator-row-${i}`} className="input-row-special calc-op-row">
                                                                 <select
@@ -6653,6 +6743,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'number' ? (
                                                 (() => {
+                                                    if (el.data?.constantTypeCarrier) {
+                                                        return <div style={{ minHeight: '32px' }} />;
+                                                    }
                                                     return (
                                                         <div>
                                                             <input
@@ -6700,6 +6793,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'constant-boolean' ? (
                                                 (() => {
+                                                    if (el.data?.constantTypeCarrier) {
+                                                        return <div style={{ minHeight: '32px' }} />;
+                                                    }
                                                     return (
                                                         <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
                                                             <input
@@ -6725,6 +6821,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'constant-string' ? (
                                                 (() => {
+                                                    if (el.data?.constantTypeCarrier) {
+                                                        return <div style={{ minHeight: '32px' }} />;
+                                                    }
                                                     return (
                                                         <div>
                                                             <input
@@ -6751,6 +6850,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'color' ? (
                                                 (() => {
+                                                    if (el.data?.constantTypeCarrier) {
+                                                        return <div style={{ minHeight: '32px' }} />;
+                                                    }
                                                     return (
                                                         <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                                                             <input
@@ -6794,10 +6896,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     );
                                                 })()
-                                            ) : el.type === 'element-id' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
+                                              ) : el.type === 'api-request' || el.type === 'api-field' || el.type === 'api-list-mapper' ? (
+                                                  renderApiNodeControls(el)
+                                              ) : el.type === 'element-id' ? (
+                                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
                                                     Configure in sidebar ->
-                                                </div>
+                                                  </div>
                                             ) : el.type === 'memory-read-number' || el.type === 'memory-read-string' || el.type === 'memory-read-boolean' || el.type === 'memory-write-number' || el.type === 'memory-write-string' || el.type === 'memory-write-boolean' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
                                                     Configure in sidebar ->
@@ -7089,7 +7193,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     y: pinPos.y
                                                                 });
                                                             }}
-                                                            title={`Output ${i + 1}`}
+                                                            title={el.type === 'output' ? 'Action' : `Output ${i + 1}`}
                                                         />
                                                         <div className="output-label">
                                                             {getOutputLabel(el, i)}
@@ -7102,67 +7206,77 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 ) : (
                                     // Standard layout
                                     <>
-                                        {inputCount > 0 && (
+                                        {(inputCount > 0 || isChartDataCarrier) && (
                                             <div className="inputs-column">
                                                 {/* Input pins and controls */}
-                                                {Array.from({ length: inputCount }).map((_, i) => {
-                                                    const types = getAcceptedTypesForPin(el, i);
-                                                    return (
-                                                    <div key={`input-row-${i}`} className="input-row">
-                                                        <div className="input-label">
-                                                            {getInputLabel(el, i)}
-                                                        </div>
-                                                        <div className="input-control-container">
-                                                            {renderInputControl(el, i)}
-                                                        </div>
+                                                {inputCount > 0 ? (
+                                                    Array.from({ length: inputCount }).map((_, i) => {
+                                                        const types = getAcceptedTypesForPin(el, i);
+                                                        return (
                                                         <div
-                                                            className={
-                                                                `pin input ` +
-                                                                types
-                                                                    .map(t => `type-${t}`)
-                                                                    .join(' ')
+                                                            key={`input-row-${i}`}
+                                                            className="input-row"
+                                                            style={
+                                                                isChartDataCarrier
+                                                                    ? { visibility: 'hidden', pointerEvents: 'none' }
+                                                                    : undefined
                                                             }
-                                                            style={getPinStyleByTypes(types) as PinStyle}
-                                                            data-pin-id={`input-${i}`}
-                                                            data-element-id={el.id}
-                                                            onMouseDown={(e) => {
-                                                                e.stopPropagation();
-                                                                const pinPos = getPinPosition(el, 'input', i);
+                                                        >
+                                                            <div className="input-label">
+                                                                {getInputLabel(el, i)}
+                                                            </div>
+                                                            <div className="input-control-container">
+                                                                {renderInputControl(el, i)}
+                                                            </div>
+                                                            <div
+                                                                className={
+                                                                    `pin input ` +
+                                                                    types
+                                                                        .map(t => `type-${t}`)
+                                                                        .join(' ')
+                                                                }
+                                                                style={getPinStyleByTypes(types) as PinStyle}
+                                                                data-pin-id={`input-${i}`}
+                                                                data-element-id={el.id}
+                                                                onMouseDown={(e) => {
+                                                                    e.stopPropagation();
+                                                                    const pinPos = getPinPosition(el, 'input', i);
 
-                                                                const existingConnection = connectionsByTargetInput.get(getConnectionLookupKey(el.id, `input${i}`));
+                                                                    const existingConnection = connectionsByTargetInput.get(getConnectionLookupKey(el.id, `input${i}`));
 
-                                                                if (existingConnection) {
-                                                                    const fromElement = elementsById.get(existingConnection.fromId);
-                                                                    if (fromElement) {
-                                                                        const fromPinIndex = parseInt(existingConnection.fromOutput.replace('output', ''), 10) || 0;
-                                                                        const fromPinPos = getPinPosition(fromElement, 'output', fromPinIndex);
+                                                                    if (existingConnection) {
+                                                                        const fromElement = elementsById.get(existingConnection.fromId);
+                                                                        if (fromElement) {
+                                                                            const fromPinIndex = parseInt(existingConnection.fromOutput.replace('output', ''), 10) || 0;
+                                                                            const fromPinPos = getPinPosition(fromElement, 'output', fromPinIndex);
+                                                                            setConnectionInProgress({
+                                                                                elementId: existingConnection.fromId,
+                                                                                pinType: 'output',
+                                                                                pinIndex: fromPinIndex,
+                                                                                x: fromPinPos.x,
+                                                                                y: fromPinPos.y,
+                                                                                reconnectingConnection: existingConnection
+                                                                            });
+                                                                            const next = connectionsRef.current.filter((conn) => conn.id !== existingConnection.id);
+                                                                            syncConnectionsAndTypes(next);
+                                                                        }
+                                                                    } else {
                                                                         setConnectionInProgress({
-                                                                            elementId: existingConnection.fromId,
-                                                                            pinType: 'output',
-                                                                            pinIndex: fromPinIndex,
-                                                                            x: fromPinPos.x,
-                                                                            y: fromPinPos.y
-                                                                        });
-                                                                        setConnections(prev => {
-                                                                            const next = prev.filter(conn => conn.id !== existingConnection.id);
-                                                                            connectionsRef.current = next;
-                                                                            return next;
+                                                                            elementId: el.id,
+                                                                            pinType: 'input',
+                                                                            pinIndex: i,
+                                                                            x: pinPos.x,
+                                                                            y: pinPos.y
                                                                         });
                                                                     }
-                                                                } else {
-                                                                    setConnectionInProgress({
-                                                                        elementId: el.id,
-                                                                        pinType: 'input',
-                                                                        pinIndex: i,
-                                                                        x: pinPos.x,
-                                                                        y: pinPos.y
-                                                                    });
-                                                                }
-                                                            }}
-                                                            title={`Input ${i + 1}`}
-                                                        />
-                                                    </div>
-                                                );})}
+                                                                }}
+                                                                title={`Input ${i + 1}`}
+                                                            />
+                                                        </div>
+                                                    );})
+                                                ) : (
+                                                    <div className="chart-data-carrier-spacer" aria-hidden="true" />
+                                                )}
                                             </div>
                                         )}
 
@@ -7189,7 +7303,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     y: pinPos.y
                                                                 });
                                                             }}
-                                                            title={`Output ${i + 1}`}
+                                                            title={el.type === 'output' ? 'Action' : `Output ${i + 1}`}
                                                         />
                                                         <div className="output-label">
                                                             {getOutputLabel(el, i)}
@@ -7201,7 +7315,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                     </>
                                 )}
                                 
-                                {selected === el.id && (el.id !== 'main-block' || mainElementType === 'logic' || templateMode) && (
+                                {selected === el.id && el.id !== 'main-block' && (
                                     <button
                                         className="delete-btn"
                                         onClick={(e) => {
@@ -7270,3 +7384,4 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 };
 
 export default GraphEditor;
+

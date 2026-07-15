@@ -1,6 +1,6 @@
 === NodeLogic Graph Builder ===
 Contributors: nodelogicwp
-Tags: calculator, calculator builder, gutenberg, wordpress blocks, no-code, workflow builder, conditional logic, dynamic content, visual builder, reusable templates
+Tags: calculator, gutenberg, no-code, conditional logic, workflow builder
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
@@ -72,6 +72,7 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 
 = 1.4.3 =
 * Added Actions system — new Action nodes in the graph editor (Action Event, Action Block, Set Required, Set Min, Set Max, Set Length, Set Regex, Add Class, Remove Class, Toggle Class)
+* Added Events nodes — Event Element Node, Event ID Node, Event Processor now available in the free version
 * Fixed broken Calculation Node — formula evaluation was blocked when any action nodes were connected to an Output Node
 * Fixed element freeze when actions were attached — output payload was incorrectly used as the element value, causing seekbar and other inputs to reset visually
 * Fixed connection line endpoints for Action Nodes — pin positions now correctly align to the center of each pin

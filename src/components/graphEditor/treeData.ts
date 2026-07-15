@@ -119,6 +119,16 @@ export const TREE_DATA = [
         ],
     },
     {
+        id: '61',
+        name: 'Events',
+        type: 'folder',
+        children: [
+            { id: '62', name: 'Event Element Node', type: 'event-element' },
+            { id: '63', name: 'Event ID Node', type: 'event-id' },
+            { id: '64', name: 'Event Processor', type: 'event-processor' },
+        ],
+    },
+    {
         id: '98',
         name: 'Actions',
         type: 'folder',

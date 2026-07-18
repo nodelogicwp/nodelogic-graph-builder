@@ -1,6 +1,6 @@
 import { useEffect } from '@wordpress/element';
 import { useBlockProps, InspectorControls, PanelColorSettings } from '@wordpress/block-editor';
-import { PanelBody, TextControl, Button, ToggleControl } from '@wordpress/components';
+import { PanelBody, TextControl, Button, ToggleControl, SelectControl } from '@wordpress/components';
 import { v4 as uuid } from 'uuid';
 
 const shortId = () => uuid().replace(/-/g, '').slice(0, 6);
@@ -14,7 +14,31 @@ export default function TriggerGroupEdit({ attributes = {}, setAttributes, clien
         buttonBackground = '#7c3aed',
         buttonHover = '#6d28d9',
         buttonText = '#ffffff',
-        buttonSpacing = 8,
+        buttonGap = 8,
+        buttonLayout = '',
+        buttonJustify = 'center',
+        buttonAlign = 'center',
+        containerGap = 10,
+        containerLayout = '',
+        containerJustify = 'start',
+        containerAlign = 'start',
+        paddingTop = 0,
+        paddingRight = 0,
+        paddingBottom = 0,
+        paddingLeft = 0,
+        marginTop = 0,
+        marginRight = 0,
+        marginBottom = 0,
+        marginLeft = 0,
+        backgroundMode = 'default',
+        backgroundColor = '',
+        borderWidth = 0,
+        borderStyle = 'solid',
+        borderColor = '',
+        borderRadius = 0,
+        width = '',
+        height = '',
+        minHeight = '',
     } = attributes;
 
     // Generate unique groupId on first render
@@ -69,6 +93,23 @@ export default function TriggerGroupEdit({ attributes = {}, setAttributes, clien
         fontWeight: 600,
         fontSize: '14px',
     };
+    const wrapperStyle = {
+        boxSizing: 'border-box',
+        width: width || '100%',
+        height: height || undefined,
+        minHeight: minHeight || undefined,
+        paddingTop: paddingTop ? `${paddingTop}px` : undefined,
+        paddingRight: paddingRight ? `${paddingRight}px` : undefined,
+        paddingBottom: paddingBottom ? `${paddingBottom}px` : undefined,
+        paddingLeft: paddingLeft ? `${paddingLeft}px` : undefined,
+        marginTop: marginTop ? `${marginTop}px` : undefined,
+        marginRight: marginRight ? `${marginRight}px` : undefined,
+        marginBottom: marginBottom ? `${marginBottom}px` : undefined,
+        marginLeft: marginLeft ? `${marginLeft}px` : undefined,
+        backgroundColor: backgroundMode === 'custom' && backgroundColor ? backgroundColor : undefined,
+        border: borderWidth ? `${borderWidth}px ${borderStyle} ${borderColor || 'rgba(148, 163, 184, 0.22)'}` : undefined,
+        borderRadius: borderRadius ? `${borderRadius}px` : undefined,
+    };
 
     return (
         <>
@@ -99,11 +140,44 @@ export default function TriggerGroupEdit({ attributes = {}, setAttributes, clien
                     <TextControl
                         __next40pxDefaultSize
                         __nextHasNoMarginBottom
-                        label="Button spacing (px)"
+                        label="Button gap (px)"
                         type="number"
-                        value={buttonSpacing}
-                        onChange={(v) => setAttributes({ buttonSpacing: Number(v) || 0 })}
+                        value={buttonGap}
+                        onChange={(v) => setAttributes({ buttonGap: Number(v) || 0 })}
                     />
+                    <SelectControl
+                        label="Button justify"
+                        value={buttonJustify}
+                        options={[
+                            { label: 'Center', value: 'center' },
+                            { label: 'Start', value: 'flex-start' },
+                            { label: 'End', value: 'flex-end' },
+                            { label: 'Space Between', value: 'space-between' },
+                        ]}
+                        onChange={(v) => setAttributes({ buttonJustify: v })}
+                    />
+                    <TextControl label="Button layout (grid-template-columns)" value={buttonLayout} onChange={(v) => setAttributes({ buttonLayout: v })} />
+                    <div style={{ height: 8 }} />
+                    <div style={{ fontWeight: 600, marginTop: '6px', marginBottom: '6px' }}>Container</div>
+                    <TextControl label="Container gap (px)" type="number" value={containerGap} onChange={(v) => setAttributes({ containerGap: Number(v) || 0 })} />
+                    <TextControl label="Container layout (grid-template-columns)" value={containerLayout} onChange={(v) => setAttributes({ containerLayout: v })} />
+                    <SelectControl label="Container justify" value={containerJustify} options={[{ label: 'Start', value: 'flex-start' }, { label: 'Center', value: 'center' }, { label: 'End', value: 'flex-end' }]} onChange={(v) => setAttributes({ containerJustify: v })} />
+                    <div style={{ fontWeight: 600, marginTop: '10px', marginBottom: '6px' }}>Spacing</div>
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Padding top" type="number" value={paddingTop} onChange={(v) => setAttributes({ paddingTop: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Padding right" type="number" value={paddingRight} onChange={(v) => setAttributes({ paddingRight: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Padding bottom" type="number" value={paddingBottom} onChange={(v) => setAttributes({ paddingBottom: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Padding left" type="number" value={paddingLeft} onChange={(v) => setAttributes({ paddingLeft: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Margin top" type="number" value={marginTop} onChange={(v) => setAttributes({ marginTop: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Margin right" type="number" value={marginRight} onChange={(v) => setAttributes({ marginRight: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Margin bottom" type="number" value={marginBottom} onChange={(v) => setAttributes({ marginBottom: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Margin left" type="number" value={marginLeft} onChange={(v) => setAttributes({ marginLeft: Number(v) || 0 })} />
+                    <SelectControl __next40pxDefaultSize label="Background mode" value={backgroundMode || 'default'} options={[{ label: 'Default', value: 'default' }, { label: 'Custom', value: 'custom' }, { label: 'None', value: 'none' }]} onChange={(v) => setAttributes({ backgroundMode: v })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Background color" value={backgroundColor} onChange={(v) => setAttributes({ backgroundColor: v })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Border width" type="number" value={borderWidth} onChange={(v) => setAttributes({ borderWidth: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Border radius" type="number" value={borderRadius} onChange={(v) => setAttributes({ borderRadius: Number(v) || 0 })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Width" value={width} onChange={(v) => setAttributes({ width: v })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Height" value={height} onChange={(v) => setAttributes({ height: v })} />
+                    <TextControl __next40pxDefaultSize __nextHasNoMarginBottom label="Minimum height" value={minHeight} onChange={(v) => setAttributes({ minHeight: v })} />
                     <PanelColorSettings
                         title="Button colors"
                         initialOpen={false}
@@ -141,7 +215,7 @@ export default function TriggerGroupEdit({ attributes = {}, setAttributes, clien
                 </PanelBody>
             </InspectorControls>
 
-            <div {...useBlockProps({ className: 'nodelogic-trigger-group' })}>
+            <div {...useBlockProps({ className: 'nodelogic-trigger-group', style: wrapperStyle })}>
                 {showTitle && title && (
                     <h3 style={{ marginBottom: '10px', color: '#e2e8f0', fontSize: '15px', fontWeight: 700 }}>{title}</h3>
                 )}
@@ -149,12 +223,14 @@ export default function TriggerGroupEdit({ attributes = {}, setAttributes, clien
                     style={{
                         display: 'flex',
                         flexWrap: 'wrap',
-                        gap: `${buttonSpacing}px`,
-                        justifyContent: 'center',
+                        gap: `${buttonGap}px`,
+                        justifyContent: buttonJustify || 'center',
+                        alignItems: buttonAlign || 'center',
                         padding: '12px',
                         borderRadius: '16px',
                         background: 'rgba(15, 23, 42, 0.82)',
                         border: '1px solid rgba(148, 163, 184, 0.18)',
+                        gridTemplateColumns: buttonLayout || undefined,
                     }}
                 >
                     {items.map((item, index) => (

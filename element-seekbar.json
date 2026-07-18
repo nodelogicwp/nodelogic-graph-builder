@@ -14,7 +14,15 @@
     "trackBackgroundColor": { "type": "string", "default": "#ffffff" },
     "trackProgressColor": { "type": "string", "default": "#2563eb" },
     "thumbValueColor": { "type": "string", "default": "#111827" },
-    "thumbBackgroundColor": { "type": "string", "default": "#2563eb" }
+    "thumbBackgroundColor": { "type": "string", "default": "#2563eb" },
+    "paddingTop": { "type": "number", "default": 12 },
+    "paddingRight": { "type": "number", "default": 12 },
+    "paddingBottom": { "type": "number", "default": 12 },
+    "paddingLeft": { "type": "number", "default": 12 },
+    "marginTop": { "type": "number", "default": 0 },
+    "marginRight": { "type": "number", "default": 0 },
+    "marginBottom": { "type": "number", "default": 14 },
+    "marginLeft": { "type": "number", "default": 0 }
   },
   "editorScript": "file:./build/index.js",
   "render": "file:./element-seekbar-render.php"

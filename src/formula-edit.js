@@ -7,11 +7,6 @@ import { v4 as uuid } from 'uuid';
 export default function Edit({ attributes, setAttributes }) {
     const { editorId, formula = '', mainFormula = '', eventFormulas = {}, label = 'Result:', resultUnit = '', graphState = null } = attributes;
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const runtimeConfig = (typeof window !== 'undefined' && window.nodelogicGraphBuilderConfig && typeof window.nodelogicGraphBuilderConfig === 'object')
-        ? window.nodelogicGraphBuilderConfig
-        : {};
-    const templatesEnabled = Boolean(runtimeConfig.enableTemplates);
-    const customNodesEnabled = Boolean(runtimeConfig.enableCustomNodes);
 
     useEffect(() => {
         if (!editorId) {
@@ -81,9 +76,8 @@ export default function Edit({ attributes, setAttributes }) {
                         initialState={graphState}
                         forceInitialState
                         liveStateSync={false}
+                        showTemplateTools={false}
                         mainElementType="info"
-                        showTemplateTools={templatesEnabled}
-                        enableCustomNodes={customNodesEnabled}
                         onFormulaChange={handleFormulaChange}
                         onStateChange={handleGraphStateChange}
                     />

@@ -6,8 +6,8 @@
   "icon": "button",
   "description": "Choice button group with heading.",
   "attributes": {
-    "title": { "type": "string", "default": "Choose industry" },
-    "showTitle": { "type": "boolean", "default": true },
+    "title": { "type": "string", "default": "Choose option" },
+    "showTitle": { "type": "boolean", "default": false },
     "buttons": {
       "type": "array",
       "default": [
@@ -19,7 +19,31 @@
     "buttonBackground": { "type": "string", "default": "#1d4ed8" },
     "buttonHover": { "type": "string", "default": "#2563eb" },
     "buttonText": { "type": "string", "default": "#ffffff" },
-    "buttonSpacing": { "type": "number", "default": 8 }
+    "buttonGap": { "type": "number", "default": 8 },
+    "buttonLayout": { "type": "string", "default": "" },
+    "buttonJustify": { "type": "string", "default": "center" },
+    "buttonAlign": { "type": "string", "default": "center" },
+    "containerGap": { "type": "number", "default": 10 },
+    "containerLayout": { "type": "string", "default": "" },
+    "containerJustify": { "type": "string", "default": "start" },
+    "containerAlign": { "type": "string", "default": "start" },
+    "paddingTop": { "type": "number", "default": 12 },
+    "paddingRight": { "type": "number", "default": 12 },
+    "paddingBottom": { "type": "number", "default": 12 },
+    "paddingLeft": { "type": "number", "default": 12 },
+    "marginTop": { "type": "number", "default": 0 },
+    "marginRight": { "type": "number", "default": 0 },
+    "marginBottom": { "type": "number", "default": 14 },
+    "marginLeft": { "type": "number", "default": 0 },
+    "backgroundMode": { "type": "string", "default": "default" },
+    "backgroundColor": { "type": "string", "default": "" },
+    "borderWidth": { "type": "number", "default": 0 },
+    "borderStyle": { "type": "string", "default": "solid" },
+    "borderColor": { "type": "string", "default": "" },
+    "borderRadius": { "type": "number", "default": 0 },
+    "width": { "type": "string", "default": "" },
+    "height": { "type": "string", "default": "" },
+    "minHeight": { "type": "string", "default": "" }
   },
   "editorScript": "file:./build/index.js",
   "render": "file:./buttons-render.php"

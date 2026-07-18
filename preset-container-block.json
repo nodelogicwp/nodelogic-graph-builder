@@ -1,0 +1,57 @@
+{
+  "apiVersion": 3,
+  "name": "custom/nodelogic-preset-container",
+  "title": "Container",
+  "category": "advanced-blocks-calculator",
+  "icon": "layout",
+  "description": "Grid container used by NodeLogic starter presets.",
+  "attributes": {
+    "containerId": {
+      "type": "string"
+    },
+    "rows": {
+      "type": "number",
+      "default": 4
+    },
+    "columns": {
+      "type": "number",
+      "default": 1
+    },
+    "presetId": {
+      "type": "string",
+      "default": "custom"
+    },
+      "columnTemplate": { "type": "string", "default": "" },
+      "rowTemplate": { "type": "string", "default": "" },
+      "gapColumns": { "type": "number", "default": 16 },
+      "gapRows": { "type": "number", "default": 16 },
+      "justifyItems": { "type": "string", "default": "stretch" },
+      "alignItems": { "type": "string", "default": "stretch" },
+      "justifyContent": { "type": "string", "default": "start" },
+      "alignContent": { "type": "string", "default": "start" },
+      "heightMode": { "type": "string", "default": "auto" },
+      "heightPx": { "type": "number", "default": 0 },
+      "padding": { "type": "number", "default": 12 },
+      "paddingTop": { "type": "number", "default": 12 },
+      "paddingRight": { "type": "number", "default": 12 },
+      "paddingBottom": { "type": "number", "default": 12 },
+      "paddingLeft": { "type": "number", "default": 12 },
+      "margin": { "type": "number", "default": 0 },
+      "marginTop": { "type": "number", "default": 0 },
+      "marginRight": { "type": "number", "default": 0 },
+      "marginBottom": { "type": "number", "default": 14 },
+      "marginLeft": { "type": "number", "default": 0 },
+      "backgroundEnabled": { "type": "boolean", "default": false },
+      "backgroundMode": { "type": "string", "default": "default" },
+      "backgroundColor": { "type": "string", "default": "" },
+      "borderWidth": { "type": "number", "default": 0 },
+      "borderStyle": { "type": "string", "default": "solid" },
+      "borderColor": { "type": "string", "default": "" },
+      "borderRadius": { "type": "number", "default": 0 },
+      "width": { "type": "string", "default": "" },
+      "height": { "type": "string", "default": "" },
+      "minHeight": { "type": "string", "default": "" }
+  },
+  "editorScript": "file:./build/index.js",
+  "render": "file:./render.php"
+}

@@ -10,7 +10,16 @@
     "sliderId": { "type": "string" },
     "checkboxOnValue": { "type": "string", "default": "1" },
     "checkboxOffValue": { "type": "string", "default": "0" },
-    "value": { "type": "string", "default": "0" }
+    "value": { "type": "string", "default": "0" },
+    "checkboxLabel": { "type": "string", "default": "" },
+    "paddingTop": { "type": "number", "default": 12 },
+    "paddingRight": { "type": "number", "default": 12 },
+    "paddingBottom": { "type": "number", "default": 12 },
+    "paddingLeft": { "type": "number", "default": 12 },
+    "marginTop": { "type": "number", "default": 0 },
+    "marginRight": { "type": "number", "default": 0 },
+    "marginBottom": { "type": "number", "default": 14 },
+    "marginLeft": { "type": "number", "default": 0 }
   },
   "editorScript": "file:./build/index.js",
   "render": "file:./element-checkbox-render.php"

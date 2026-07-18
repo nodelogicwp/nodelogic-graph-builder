@@ -25,7 +25,7 @@ import {
 } from './edit';
 import ButtonsEdit from './buttons-edit';
 import LogicEdit   from './logic-edit';
-import { PresetContainerEdit } from './preset-container-edit';
+import { PresetContainerEdit, PresetContainerDynamicSave, PresetContainerSave, LegacyPresetContainerSave, LegacyPresetContainerSavePlain } from './preset-container-edit';
 import { ImageBlockEdit, ImageBlockSave, LegacyImageBlockSave, LegacyImageBlockSavePlain } from './image-edit';
 import { ArrayListEdit, ArrayListSave, LegacyArrayListSave, LegacyArrayListSavePlain } from './array-list-edit';
 import TriggerGroupEdit from './trigger-group-edit';
@@ -129,7 +129,6 @@ registerBlockType(logicMetadata.name, {
     save: () => null,
 });
 
-// ─── Preset Container ────────────────────────────────────────────────────────
 registerBlockType(presetContainerJson.name, {
     title: presetContainerJson.title,
     category: presetContainerJson.category,
@@ -137,7 +136,21 @@ registerBlockType(presetContainerJson.name, {
     description: presetContainerJson.description,
     attributes: presetContainerJson.attributes,
     edit: PresetContainerEdit,
-    save: () => null,
+    save: PresetContainerDynamicSave,
+    deprecated: [
+        {
+            attributes: presetContainerJson.attributes,
+            save: PresetContainerSave,
+        },
+        {
+            attributes: presetContainerJson.attributes,
+            save: LegacyPresetContainerSave,
+        },
+        {
+            attributes: presetContainerJson.attributes,
+            save: LegacyPresetContainerSavePlain,
+        },
+    ],
 });
 
 // ─── Image Block ─────────────────────────────────────────────────────────────

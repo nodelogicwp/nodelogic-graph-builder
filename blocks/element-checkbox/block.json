@@ -24,6 +24,10 @@
                        "value":  {
                                      "type":  "string",
                                      "default":  "0"
+                                 },
+                       "checkboxLabel": {
+                                     "type": "string",
+                                     "default": ""
                                  }
                    },
     "editorScript":  "file:../../build/index.js",

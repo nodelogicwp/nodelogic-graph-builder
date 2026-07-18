@@ -8,7 +8,15 @@
   "attributes": {
     "editorId": { "type": "string" },
     "sliderId": { "type": "string" },
-    "nodelogicLabel": { "type": "string", "default": "" }
+      "nodelogicLabel": { "type": "string", "default": "" },
+      "paddingTop": { "type": "number", "default": 12 },
+      "paddingRight": { "type": "number", "default": 12 },
+      "paddingBottom": { "type": "number", "default": 12 },
+      "paddingLeft": { "type": "number", "default": 12 },
+      "marginTop": { "type": "number", "default": 0 },
+      "marginRight": { "type": "number", "default": 0 },
+      "marginBottom": { "type": "number", "default": 14 },
+      "marginLeft": { "type": "number", "default": 0 }
   },
   "editorScript": "file:./build/index.js",
   "render": "file:./element-label-render.php"

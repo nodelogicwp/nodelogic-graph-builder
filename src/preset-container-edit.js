@@ -26,35 +26,45 @@ const clampGridValue = (value, fallback) => {
     return Math.max(1, Math.min(6, Math.round(next)));
 };
 
-const normalizeGridTemplate = (template = '', gapValue = 0) => {
+const normalizeGridTemplate = (template = '') => {
     const trimmed = String(template || '').trim();
-    if (!trimmed) {
-        return '';
-    }
 
-    const parts = trimmed.split(/\s+/).filter(Boolean);
-    if (parts.length <= 1) {
+    // If empty, or already using modern/complex units we shouldn't touch, return it as is.
+    if (!trimmed || trimmed.includes('fr') || trimmed.includes('repeat') || trimmed.includes('auto') || trimmed.includes('calc')) {
         return trimmed;
     }
 
-    const gap = Math.max(0, Number(gapValue) || 0);
-    const halfGap = gap / 2;
+    const parts = trimmed.split(/\s+/).filter(Boolean);
 
-    return parts.map((part) => {
-        const percentMatch = /^(\d+(?:\.\d+)?)%$/.exec(part);
-        if (percentMatch) {
-            return `minmax(0, calc(${percentMatch[1]}% - ${halfGap}px))`;
-        }
-        return `minmax(0, ${part})`;
-    }).join(' ');
+    // Check if every part of the string is a percentage value.
+    const allArePercentages = parts.every(part => /^(\d+(?:\.\d+)?)%$/.test(part));
+
+    if (!allArePercentages) {
+        // It's a mix of units (e.g., '100px 50%') or something else. Return it as is.
+        return trimmed;
+    }
+
+    // Case 1: All columns are identical (e.g., "25% 25% 25% 25%")
+    const allColumnsAreEqual = parts.every(part => part === parts[0]);
+    if (allColumnsAreEqual && parts.length > 1) {
+        return `repeat(${parts.length}, 1fr)`;
+    }
+
+    // Case 2: Columns are asymmetrical (e.g., "25% 25% 50%")
+    // Convert each percentage to an fr value to maintain the ratio.
+    const frValues = parts.map(part => {
+        return part.slice(0, -1) + 'fr';
+    });
+
+    return frValues.join(' ');
 };
 
 const buildGridStyle = (rows, columns, columnTemplate = '', rowTemplate = '', gapColumns = 16, gapRows = 16) => {
     const columnsCss = columnTemplate && String(columnTemplate).trim() !== ''
-        ? normalizeGridTemplate(String(columnTemplate).trim(), gapColumns)
+        ? normalizeGridTemplate(String(columnTemplate).trim())
         : `repeat(${columns}, minmax(0, 1fr))`;
     const rowsCss = rowTemplate && String(rowTemplate).trim() !== ''
-        ? normalizeGridTemplate(String(rowTemplate).trim(), gapRows)
+        ? normalizeGridTemplate(String(rowTemplate).trim())
         : `repeat(${rows}, minmax(0, auto))`;
 
     return {

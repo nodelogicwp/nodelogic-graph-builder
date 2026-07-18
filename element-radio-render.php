@@ -13,9 +13,9 @@ $nodelogic_graph_builder_use_val   = is_scalar($nodelogic_graph_builder_value) ?
 <div class="slider-container nodelogic-radio-group"<?php echo $has_id ? ' id="' . esc_attr($nodelogic_graph_builder_slider_id) . '" data-slider-id="' . esc_attr($nodelogic_graph_builder_slider_id) . '"' : ''; ?>>
     <?php foreach ($nodelogic_graph_builder_options as $nodelogic_graph_builder_opt) : ?>
         <?php $opt_val = (string) ($nodelogic_graph_builder_opt['value'] ?? ''); $opt_id = $has_id ? esc_attr($nodelogic_graph_builder_slider_id . '_' . preg_replace('/[^a-z0-9_-]+/i', '_', $opt_val)) : ''; ?>
-        <label class="nodelogic-choice-option"<?php echo $opt_id !== '' ? ' for="' . $opt_id . '"' : ''; ?> >
+        <label class="nodelogic-choice-option"<?php echo $opt_id !== '' ? ' for="' . esc_attr( $opt_id ) . '"' : ''; ?> >
             <input
-                <?php echo $opt_id !== '' ? 'id="' . $opt_id . '"' : ''; ?>
+                <?php echo $opt_id !== '' ? 'id="' . esc_attr( $opt_id ) . '"' : ''; ?>
                 type="radio"
                 <?php echo $has_id ? 'name="' . esc_attr($nodelogic_graph_builder_slider_id) . '"' : ''; ?>
                 value="<?php echo esc_attr($nodelogic_graph_builder_opt['value']); ?>"

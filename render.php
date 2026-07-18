@@ -9,6 +9,7 @@ if (!function_exists('nodelogic_unwrap_legacy_container_markup')) {
      */
     function nodelogic_unwrap_legacy_container_markup(string $content): string
     {
+        // ... (This function remains unchanged) ...
         $current = $content;
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
@@ -79,6 +80,54 @@ if (!function_exists('nodelogic_unwrap_legacy_container_markup')) {
     }
 }
 
+if (!function_exists('nodelogic_normalize_grid_template')) {
+    /**
+     * Converts percentage-based grid templates to fr units.
+     */
+    function nodelogic_normalize_grid_template(string $template): string
+    {
+        $trimmed = trim($template);
+
+        if (
+            $trimmed === '' ||
+            strpos($trimmed, 'fr') !== false ||
+            strpos($trimmed, 'repeat') !== false ||
+            strpos($trimmed, 'auto') !== false ||
+            strpos($trimmed, 'calc') !== false
+        ) {
+            return $trimmed;
+        }
+
+        $parts = preg_split('/\s+/', $trimmed, -1, PREG_SPLIT_NO_EMPTY);
+        if (empty($parts)) {
+            return $trimmed;
+        }
+
+        $all_are_percentages = true;
+        foreach ($parts as $part) {
+            if (preg_match('/^(\d+(?:\.\d+)?)%$/', $part) !== 1) {
+                $all_are_percentages = false;
+                break;
+            }
+        }
+
+        if (!$all_are_percentages) {
+            return $trimmed;
+        }
+
+        if (count(array_unique($parts)) === 1 && count($parts) > 1) {
+            return sprintf('repeat(%d, 1fr)', count($parts));
+        }
+
+        $fr_values = array_map(function ($part) {
+            return rtrim($part, '%') . 'fr';
+        }, $parts);
+
+        return implode(' ', $fr_values);
+    }
+}
+
+
 (static function (array $attributes, string $content): void {
     $rows = isset($attributes['rows']) ? (int) $attributes['rows'] : 4;
     $columns = isset($attributes['columns']) ? (int) $attributes['columns'] : 1;
@@ -116,8 +165,11 @@ if (!function_exists('nodelogic_unwrap_legacy_container_markup')) {
     $rows = max(1, min(6, $rows));
     $columns = max(1, min(6, $columns));
 
-    $columns_css = $column_template !== '' ? $column_template : sprintf('repeat(%d, minmax(0, 1fr))', $columns);
-    $rows_css = $row_template !== '' ? $row_template : sprintf('repeat(%d, minmax(0, auto))', $rows);
+    // --- THIS IS THE CHANGED PART ---
+    $columns_css = $column_template !== '' ? nodelogic_normalize_grid_template($column_template) : sprintf('repeat(%d, minmax(0, 1fr))', $columns);
+    $rows_css = $row_template !== '' ? nodelogic_normalize_grid_template($row_template) : sprintf('repeat(%d, minmax(0, auto))', $rows);
+    // --- END OF CHANGE ---
+
     $grid_style = sprintf(
         'display:grid;grid-template-columns:%s;grid-template-rows:%s;gap:%spx %spx;justify-items:%s;align-items:%s;justify-content:%s;align-content:%s%s',
         $columns_css,

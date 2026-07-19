@@ -1,0 +1,16 @@
+{
+    "apiVersion": 3,
+    "name": "custom/button-group",
+    "title": "Button Group",
+    "category": "advanced-blocks-calculator",
+    "icon": "editor-table",
+    "description": "Choice button group with a heading.",
+    "attributes": {
+        "heading": {
+            "type": "string",
+            "default": "Choose an option"
+        }
+    },
+    "editorScript": "file:../../build/index.js",
+    "render": "file:./render.php"
+}

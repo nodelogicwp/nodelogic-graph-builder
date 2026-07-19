@@ -1,0 +1,18 @@
+{
+    "apiVersion": 3,
+    "name": "custom/container",
+    "title": "Container",
+    "category": "advanced-blocks-calculator",
+    "icon": "layout",
+    "description": "A responsive grid container for other blocks.",
+    "supports": {
+        "html": false,
+        "align": true,
+        "spacing": {
+            "padding": true,
+            "margin": true
+        }
+    },
+    "editorScript": "file:../../build/index.js",
+    "render": "file:./render.php"
+}

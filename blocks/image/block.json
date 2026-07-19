@@ -1,0 +1,20 @@
+{
+    "apiVersion": 3,
+    "name": "custom/graph-image",
+    "title": "Graph Image",
+    "category": "advanced-blocks-calculator",
+    "icon": "format-image",
+    "description": "Image block that can be driven by the graph.",
+    "attributes": {
+        "imageUrl": {
+            "type": "string",
+            "default": ""
+        },
+        "altText": {
+            "type": "string",
+            "default": ""
+        }
+    },
+    "editorScript": "file:../../build/index.js",
+    "render": "file:./render.php"
+}

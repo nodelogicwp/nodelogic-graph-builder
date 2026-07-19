@@ -1,0 +1,19 @@
+{
+    "apiVersion": 3,
+    "name": "custom/trigger-group",
+    "title": "Trigger Group",
+    "category": "advanced-blocks-calculator",
+    "icon": "button",
+    "description": "Group of trigger buttons, each with a unique ID.",
+    "attributes": {
+        "triggers": {
+            "type": "array",
+            "default": [
+                { "id": "trigger_1", "label": "Trigger 1" },
+                { "id": "trigger_2", "label": "Trigger 2" }
+            ]
+        }
+    },
+    "editorScript": "file:../../build/index.js",
+    "render": "file:./render.php"
+}

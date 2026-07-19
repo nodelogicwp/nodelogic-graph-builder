@@ -1,0 +1,16 @@
+{
+    "apiVersion": 3,
+    "name": "custom/array-list",
+    "title": "Array List",
+    "category": "advanced-blocks-calculator",
+    "icon": "list-view",
+    "description": "Display arrays as a responsive grid list.",
+    "attributes": {
+        "items": {
+            "type": "array",
+            "default": []
+        }
+    },
+    "editorScript": "file:../../build/index.js",
+    "render": "file:./render.php"
+}

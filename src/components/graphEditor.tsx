@@ -32,6 +32,8 @@ interface TreeItem {
         | 'main'
         | 'element'
         | 'element-id'
+        | 'element-ref'
+        | 'element-property'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -39,6 +41,7 @@ interface TreeItem {
         | 'node'
         | 'case-range'
         | 'case-value'
+        | 'case-default'
         | 'switch'
         | 'condition'
         | 'regex'
@@ -98,7 +101,38 @@ interface TreeItem {
         | 'action-toggle-class'
         | 'event-element'
         | 'event-id'
-        | 'event-processor';
+        | 'event-processor'
+        // New action nodes
+        | 'action-set-text'
+        | 'action-set-html'
+        | 'action-set-value'
+        | 'action-set-attr'
+        | 'action-set-style'
+        | 'action-set-visibility'
+        | 'action-enable'
+        | 'action-disable'
+        | 'action-focus'
+        | 'action-scroll-to'
+        | 'action-notify'
+        | 'action-redirect'
+        | 'action-trigger-event'
+        // New event nodes
+        | 'event-hover'
+        | 'event-scroll'
+        | 'event-page-load'
+        | 'event-timer'
+        | 'event-custom'
+        // New array nodes
+        | 'array-map'
+        | 'array-filter'
+        | 'array-reduce'
+        | 'array-find'
+        | 'array-for-each'
+        | 'array-collect'
+        | 'array-contains'
+        | 'array-length'
+        | 'array-merge'
+        | 'array-unique';
     customNodeId?: string;
     children?: TreeItem[];
 }
@@ -110,6 +144,8 @@ interface CanvasElement {
         | 'main'
         | 'element'
         | 'element-id'
+        | 'element-ref'
+        | 'element-property'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -117,6 +153,7 @@ interface CanvasElement {
         | 'node'
         | 'case-range'
         | 'case-value'
+        | 'case-default'
         | 'switch'
         | 'condition'
         | 'regex'
@@ -198,7 +235,38 @@ interface CanvasElement {
         | 'event-element'
         | 'event-id'
         | 'event-processor'
-        | 'fallback';
+        | 'fallback'
+        // New action nodes
+        | 'action-set-text'
+        | 'action-set-html'
+        | 'action-set-value'
+        | 'action-set-attr'
+        | 'action-set-style'
+        | 'action-set-visibility'
+        | 'action-enable'
+        | 'action-disable'
+        | 'action-focus'
+        | 'action-scroll-to'
+        | 'action-notify'
+        | 'action-redirect'
+        | 'action-trigger-event'
+        // New event nodes
+        | 'event-hover'
+        | 'event-scroll'
+        | 'event-page-load'
+        | 'event-timer'
+        | 'event-custom'
+        // New array nodes
+        | 'array-map'
+        | 'array-filter'
+        | 'array-reduce'
+        | 'array-find'
+        | 'array-for-each'
+        | 'array-collect'
+        | 'array-contains'
+        | 'array-length'
+        | 'array-merge'
+        | 'array-unique';
     x: number;
     y: number;
     data?: {
@@ -208,6 +276,7 @@ interface CanvasElement {
         value?: number | string | boolean;
         valueText?: string;
         selectedElement?: string;
+        elementUseManualId?: boolean;
         customElementId?: string;
         customOutputType?: 'number' | 'string' | 'boolean' | 'color';
         outputs?: { name: string; type: 'number' | 'string' | 'boolean' | 'case' | 'color' }[];
@@ -269,6 +338,9 @@ interface CanvasElement {
         zipOutputLabels?: string[];
         // For Element ID node
         elementId?: string;
+        elementProperty?: string;
+        elementPropertyUseManual?: boolean;
+        elementPropertyType?: 'number' | 'string' | 'boolean';
         // For Memory nodes
         variableKey?: string;
         defaultValue?: number | string | boolean;
@@ -283,6 +355,7 @@ interface CanvasElement {
         actionEventType?: string;
         actionTargetId?: string;
         actionTargetManualId?: string;
+        actionUseManualId?: boolean;
         actionRequired?: boolean;
         actionMin?: number;
         actionMax?: number;
@@ -339,8 +412,32 @@ interface CanvasElement {
         }>;
         // Custom object splitter nodes
         sharedVariables?: CustomNodeUiSharedVariable[];
+        // New action nodes data
+        actionTargetSelector?: string;
+        actionTargetUseManual?: boolean;
+        actionAttrName?: string;
+        actionStyleProperty?: string;
+        actionVisibility?: 'show' | 'hide' | 'toggle';
+        actionNotifyMessage?: string;
+        actionNotifyDuration?: number;
+        actionRedirectTarget?: '_self' | '_blank';
+        actionEventName?: string;
+        // New event nodes data
+        eventTimerInterval?: number;
+        eventTimerMode?: 'interval' | 'timeout';
+        eventCustomName?: string;
+        eventHoverMode?: 'enter' | 'leave' | 'both';
+        // For-each / collect loop
+        forEachArraySchemaItem?: ArrayItemSchemaField[];
+        // array-reduce
+        arrayReduceOperation?: 'sum' | 'product' | 'min' | 'max' | 'concat' | 'count';
+        arrayReduceInitial?: string;
+        // array-contains / array-find
+        arraySearchField?: string;
+        // array-merge
+        arrayMergeMode?: 'concat' | 'union';
     };
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element';
     connections?: Connection[];
 }
 
@@ -351,7 +448,7 @@ interface Connection {
     toId: string;
     toInput: string;
     operation?: '+' | '-' | '*' | '/' | '**' | '%' | '===' | '!==' | '>' | '<' | '>=' | '<=';
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element';
     connectionType?: 'normal' | 'case'; // New type for case connections
 }
 
@@ -770,6 +867,7 @@ const PIN_TYPE_COLORS: Record<string, string> = {
     action: '#a855f7',
     array: '#10b981',
     event: '#dc2626',
+    element: '#38bdf8',
     'chart-data': '#f59e0b',
 };
 
@@ -916,7 +1014,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const runtimeConfig = runtimeConfigState || {};
     const templateToolsEnabled = Boolean(showTemplateTools && Boolean(runtimeConfig.enableTemplates));
-    const shouldRenderMainBlock = mainElementType === 'logic' || customNodeMode || templateMode;
+    // Logic graphs use explicit Output nodes. The legacy main block remains only
+    // for template and custom-node editors where it still represents their root.
+    const shouldRenderMainBlock = customNodeMode || templateMode;
     const configuredCustomNodes = React.useMemo(
         () => (Array.isArray((runtimeConfig as any).customNodes) ? (runtimeConfig as any).customNodes : []),
         [runtimeConfigState]
@@ -1113,17 +1213,67 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
         return filterTree(sidebarTreeData);
     }, [sidebarSearch, sidebarTreeData]);
-    const [elements, setElements] = useState<CanvasElement[]>([
-        {
-            id: 'main-block',
-            name: 'Html Element',
-            type: 'main',
-            x: 0,
-            y: 0,
-            data: { formula: '' },
-            connections: []
-        }
-    ]);
+    const createDefaultMainBlock = (): CanvasElement => ({
+        id: 'main-block',
+        name: 'Html Element',
+        type: 'main',
+        x: 0,
+        y: 0,
+        data: { formula: '' },
+        connections: []
+    });
+    const [elements, setElements] = useState<CanvasElement[]>(() => (
+        shouldRenderMainBlock ? [createDefaultMainBlock()] : []
+    ));
+
+    // ── Undo / Redo ────────────────────────────────────────────────────────────
+    type HistoryEntry = { elements: CanvasElement[]; connections: Connection[] };
+    const undoStackRef = useRef<HistoryEntry[]>([]);
+    const redoStackRef = useRef<HistoryEntry[]>([]);
+    const MAX_HISTORY = 50;
+
+    const pushHistory = (els: CanvasElement[], conns: Connection[]) => {
+        undoStackRef.current = [
+            ...undoStackRef.current.slice(-MAX_HISTORY + 1),
+            { elements: JSON.parse(JSON.stringify(els)), connections: JSON.parse(JSON.stringify(conns)) },
+        ];
+        redoStackRef.current = [];
+    };
+
+    const handleUndo = () => {
+        if (undoStackRef.current.length === 0) return;
+        const current: HistoryEntry = {
+            elements: JSON.parse(JSON.stringify(elementsRef.current)),
+            connections: JSON.parse(JSON.stringify(connectionsRef.current)),
+        };
+        redoStackRef.current = [...redoStackRef.current, current];
+        const prev = undoStackRef.current[undoStackRef.current.length - 1];
+        undoStackRef.current = undoStackRef.current.slice(0, -1);
+        const restored = updateElementValueTypes(prev.elements, prev.connections);
+        setElements(restored);
+        elementsRef.current = restored;
+        setConnections(prev.connections);
+        connectionsRef.current = prev.connections;
+        markGraphDirty();
+    };
+
+    const handleRedo = () => {
+        if (redoStackRef.current.length === 0) return;
+        const current: HistoryEntry = {
+            elements: JSON.parse(JSON.stringify(elementsRef.current)),
+            connections: JSON.parse(JSON.stringify(connectionsRef.current)),
+        };
+        undoStackRef.current = [...undoStackRef.current, current];
+        const next = redoStackRef.current[redoStackRef.current.length - 1];
+        redoStackRef.current = redoStackRef.current.slice(0, -1);
+        const restored = updateElementValueTypes(next.elements, next.connections);
+        setElements(restored);
+        elementsRef.current = restored;
+        setConnections(next.connections);
+        connectionsRef.current = next.connections;
+        markGraphDirty();
+    };
+    // ───────────────────────────────────────────────────────────────────────────
     const [selected, setSelected] = useState<string | null>(shouldRenderMainBlock ? 'main-block' : null);
     const [draggedItem, setDraggedItem] = useState<TreeItem | null>(null);
     const [isPanning, setIsPanning] = useState(false);
@@ -1204,6 +1354,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const apiListMapperScrollLockRef = useRef(false);
     const connectionInProgressRef = useRef<typeof connectionInProgress>(null);
     const elementsRef = useRef(elements);
+    const selectedRef = useRef(selected);
     const detectedElementsRef = useRef(detectedElements);
     const zoomRef = useRef(zoom);
     const offsetXRef = useRef(offsetX);
@@ -1259,7 +1410,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const isNodeLockedForCurrentPlan = (_item: TreeItem) => false;
 
-    const syncConnectionsAndTypes = (nextConnections: Connection[]) => {
+    const syncConnectionsAndTypes = (nextConnections: Connection[], pushUndo = true) => {
+        if (pushUndo) pushHistory(elementsRef.current, connectionsRef.current);
         setConnections(nextConnections);
         connectionsRef.current = nextConnections;
         setElements((prev) => updateElementValueTypes(prev, nextConnections));
@@ -1267,7 +1419,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const arePinTypesCompatible = (
         sourceType: CanvasElement['valueType'] | undefined,
-        targetAcceptedTypes: Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>
+        targetAcceptedTypes: Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>
     ): boolean => {
         if (!sourceType) {
             return false;
@@ -1315,6 +1467,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     elementsRef.current = elements;
+    selectedRef.current = selected;
     detectedElementsRef.current = detectedElements;
     zoomRef.current = zoom;
     offsetXRef.current = offsetX;
@@ -1545,7 +1698,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const getAcceptedTypesForPin = (
         element: CanvasElement,
         inputIndex: number
-    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'> => {
+    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'> => {
         if (element.type === 'event-processor' && inputIndex === 0) {
             return ['event'];
         }
@@ -1587,7 +1740,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 ['boolean'],
                 ['css', 'string'],
             ];
-            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>;
+            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
         }
 
         if (element.type === 'main') {
@@ -1656,8 +1809,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'chart-data') {
             return inputIndex === 0 ? ['string'] : ['number'];
         }
+        if (element.type === 'element-property') {
+            return ['element'];
+        }
 
-        const acceptedByIndex: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>>> = {
+        const acceptedByIndex: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>>> = {
             calculation: [['number']],
             element: [],
             condition: [
@@ -1675,6 +1831,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             ],
             'case-value': [
                 ['number', 'string', 'boolean'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+            ],
+            'case-default': [
                 ['number', 'string', 'boolean', 'color', 'zip', 'css'],
             ],
             switch: [
@@ -1744,11 +1903,42 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'event-element': [],
             'event-id': [],
             'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
+            // New action nodes — input0 = action chain, input1 = value
+            'action-set-text': [['action'], ['string']],
+            'action-set-html': [['action'], ['string']],
+            'action-set-value': [['action'], ['number', 'string', 'boolean']],
+            'action-set-attr': [['action'], ['string', 'number', 'boolean']],
+            'action-set-style': [['action'], ['string', 'css', 'css-unit']],
+            'action-set-visibility': [['action']],
+            'action-enable': [['action']],
+            'action-disable': [['action']],
+            'action-focus': [['action']],
+            'action-scroll-to': [['action']],
+            'action-notify': [['action']],
+            'action-redirect': [['action']],
+            'action-trigger-event': [['action']],
+            // New event nodes — no inputs
+            'event-hover': [],
+            'event-scroll': [],
+            'event-page-load': [],
+            'event-timer': [],
+            'event-custom': [],
+            // New array nodes
+            'array-map': [['array'], ['number', 'string', 'boolean', 'color', 'zip']],
+            'array-filter': [['array'], ['boolean']],
+            'array-reduce': [['array']],
+            'array-find': [['array'], ['number', 'string', 'boolean']],
+            'array-for-each': [['array']],
+            'array-collect': [['number', 'string', 'boolean', 'color', 'zip']],
+            'array-contains': [['array'], ['number', 'string', 'boolean']],
+            'array-length': [['array']],
+            'array-merge': [['array'], ['array']],
+            'array-unique': [['array']],
         };
 
         const accepted = acceptedByIndex[element.type] || [];
         const resolved = accepted[inputIndex] || accepted[accepted.length - 1] || ['number'];
-        return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action'>;
+        return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
     };
 
     const getInputCount = (element: CanvasElement): number => {
@@ -1757,6 +1947,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'constant-string') return 0;
         if (element.type === 'element') return 0;
         if (element.type === 'element-id') return 0;
+        if (element.type === 'element-ref') return 0;
+        if (element.type === 'element-property') return 1;
         if (element.type === 'memory-read-number') return 0;
         if (element.type === 'memory-read-string') return 0;
         if (element.type === 'memory-read-boolean') return 0;
@@ -1804,19 +1996,26 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'math') return 1;
         if (element.type === 'case-range') return 3;
         if (element.type === 'case-value') return 2;
+        if (element.type === 'case-default') return 1;
         if (element.type === 'switch') {
-            const caseConnections = connections.filter(c =>
-                c.toId === element.id
-                && c.toInput.startsWith('input')
-                && getInputIndex(c.toInput) > 0
-            ).length;
+            const defaultCaseConnection = connections.find((connection) => {
+                if (connection.toId !== element.id || getInputIndex(connection.toInput) <= 0) {
+                    return false;
+                }
+                return elements.find((candidate) => candidate.id === connection.fromId)?.type === 'case-default';
+            });
+            if (defaultCaseConnection) {
+                return getInputIndex(defaultCaseConnection.toInput) + 1;
+            }
             const connectedCaseIndexes = Array.from(new Set(connections
                 .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) > 0)
                 .map(c => getInputIndex(c.toInput))
                 .filter(i => !Number.isNaN(i))
             ));
             const highestConnectedIndex = connectedCaseIndexes.length > 0 ? Math.max(...connectedCaseIndexes) : 0;
-            return Math.max(2, highestConnectedIndex + 1);
+            // Keep one empty Case pin after the last connected case so users can
+            // continue branching without changing a setting first.
+            return Math.max(2, highestConnectedIndex + 2);
         }
         if (element.type === 'node') return 3;
         if (element.type === 'calculation') {
@@ -1882,6 +2081,37 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-length') return 1;
         if (element.type === 'action-regex') return 1;
         if (element.type === 'action-add-class' || element.type === 'action-remove-class' || element.type === 'action-toggle-class') return 1;
+        // New action nodes — all accept 1 action input + optional value inputs
+        if (element.type === 'action-set-text') return 2;      // action + text value
+        if (element.type === 'action-set-html') return 2;      // action + html value
+        if (element.type === 'action-set-value') return 2;     // action + value
+        if (element.type === 'action-set-attr') return 2;      // action + attr value
+        if (element.type === 'action-set-style') return 2;     // action + style value
+        if (element.type === 'action-set-visibility') return 1; // action only
+        if (element.type === 'action-enable') return 1;
+        if (element.type === 'action-disable') return 1;
+        if (element.type === 'action-focus') return 1;
+        if (element.type === 'action-scroll-to') return 1;
+        if (element.type === 'action-notify') return 1;
+        if (element.type === 'action-redirect') return 1;
+        if (element.type === 'action-trigger-event') return 1;
+        // New event nodes
+        if (element.type === 'event-hover') return 0;
+        if (element.type === 'event-scroll') return 0;
+        if (element.type === 'event-page-load') return 0;
+        if (element.type === 'event-timer') return 0;
+        if (element.type === 'event-custom') return 0;
+        // New array nodes
+        if (element.type === 'array-map') return 2;        // array + formula/value
+        if (element.type === 'array-filter') return 2;     // array + condition
+        if (element.type === 'array-reduce') return 1;     // array
+        if (element.type === 'array-find') return 2;       // array + condition value
+        if (element.type === 'array-for-each') return 1;   // array
+        if (element.type === 'array-collect') return 1;    // single item to collect
+        if (element.type === 'array-contains') return 2;   // array + search value
+        if (element.type === 'array-length') return 1;     // array
+        if (element.type === 'array-merge') return 2;      // array a + array b
+        if (element.type === 'array-unique') return 1;     // array
         if (element.type === 'image-from-link') return 1;
         if (element.type === 'image-from-element') return 1;
         if (element.type === 'api-request') return 1;
@@ -1896,6 +2126,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         switch (element.type) {
             case 'case-range':
             case 'case-value':
+            case 'case-default':
             case 'switch':
             case 'node':
             case 'operator':
@@ -1904,6 +2135,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'logic':
             case 'element':
             case 'element-id':
+            case 'element-ref':
+            case 'element-property':
             case 'memory-read-number':
             case 'memory-read-string':
             case 'memory-read-boolean':
@@ -1979,6 +2212,27 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-sort':
             case 'array-remove-index':
             case 'array-replace-index':
+            case 'array-map':
+            case 'array-filter':
+            case 'array-for-each':
+            case 'array-collect':
+            case 'array-merge':
+            case 'array-unique':
+                return 1;
+            case 'array-find':
+                return 2;       // found item + boolean (found/not found)
+            case 'array-contains':
+                return 1;       // boolean
+            case 'array-length':
+                return 1;       // number
+            case 'array-reduce':
+                return 1;       // reduced value
+            case 'event-hover':
+            case 'event-scroll':
+            case 'event-page-load':
+            case 'event-timer':
+            case 'event-custom':
+                return 1;       // event output
             case 'image-from-link':
             case 'image-from-element':
             case 'api-request':
@@ -1997,6 +2251,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-add-class':
             case 'action-remove-class':
             case 'action-toggle-class':
+            case 'action-set-text':
+            case 'action-set-html':
+            case 'action-set-value':
+            case 'action-set-attr':
+            case 'action-set-style':
+            case 'action-set-visibility':
+            case 'action-enable':
+            case 'action-disable':
+            case 'action-focus':
+            case 'action-scroll-to':
+            case 'action-notify':
+            case 'action-redirect':
+            case 'action-trigger-event':
                 return 0;
             case 'main':
                 return 0;
@@ -2021,6 +2288,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'custom-node' && element.data?.customNodeTypeCarrier) return 'zip';
         if (element.type === 'array') return 'array';
         if (element.type === 'array-push' || element.type === 'array-pop' || element.type === 'array-sort' || element.type === 'array-remove-index' || element.type === 'array-replace-index') return 'array';
+        if (element.type === 'array-map' || element.type === 'array-filter' || element.type === 'array-for-each' || element.type === 'array-collect' || element.type === 'array-merge' || element.type === 'array-unique') return 'array';
+        if (element.type === 'array-find') return index === 0 ? 'zip' : 'boolean';
+        if (element.type === 'array-contains') return 'boolean';
+        if (element.type === 'array-length') return 'number';
+        if (element.type === 'array-reduce') return element.valueType || 'number';
+        if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom') return 'event';
+        if (element.type === 'case-range' || element.type === 'case-value' || element.type === 'case-default') return 'case';
+        if (element.type === 'element-ref') return 'element';
+        if (element.type === 'element-property') return element.valueType || 'number';
         if (element.type === 'image-from-link' || element.type === 'image-from-element') return 'string';
         if (element.type === 'api-request') return 'zip';
         if (element.type === 'api-field') {
@@ -2041,33 +2317,76 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-regex'
             || element.type === 'action-add-class'
             || element.type === 'action-remove-class'
-            || element.type === 'action-toggle-class') return 'action';
+            || element.type === 'action-toggle-class'
+            || element.type === 'action-set-text'
+            || element.type === 'action-set-html'
+            || element.type === 'action-set-value'
+            || element.type === 'action-set-attr'
+            || element.type === 'action-set-style'
+            || element.type === 'action-set-visibility'
+            || element.type === 'action-enable'
+            || element.type === 'action-disable'
+            || element.type === 'action-focus'
+            || element.type === 'action-scroll-to'
+            || element.type === 'action-notify'
+            || element.type === 'action-redirect'
+            || element.type === 'action-trigger-event') return 'action';
         if (element.type === 'output') return 'action';
         return element.valueType || 'number';
     };
 
     const getNodeHeight = (element: CanvasElement): number => {
-        if (element.type === 'api-request') return 128;
-        if (element.type === 'api-field') return 168;
-        if (element.type === 'api-list-mapper') return 208;
-        if (element.type === 'action-event') return 178;
-        if (element.type === 'action-length') return 160;
-        if (element.type === 'action-block') return 110;
-        // event-element: checkbox(22) + dropdown/input(32) + event-type(32) + gaps = ~130
-        if (element.type === 'event-element') return 152;
-        // event-id: text input(32) + event-type(32) + gaps = ~110
-        if (element.type === 'event-id') return 120;
+        if (element.type === 'api-request') return 136;
+        if (element.type === 'api-field') return 180;
+        if (element.type === 'api-list-mapper') return 216;
+        // action-event: ID select(32) + event-type select(32) + separator + checkbox — z paddinigiem
+        if (element.type === 'action-event') return 168;
+        if (element.type === 'action-length') return 168;
+        if (element.type === 'action-block') return 118;
+        // event-element / event-id: dropdown/input(32) + event-type(32) + separator + checkbox(20)
+        if (element.type === 'event-element') return 168;
+        if (element.type === 'event-id') return 168;
+        // css-unit: value input(32) + unit select(32) + gaps
+        if (element.type === 'css-unit') return 120;
+        // element-ref: dropdown/input(32) + separator + checkbox(20)
+        if (element.type === 'element-ref') return 128;
+        // element: dropdown/input(32) + separator(8) + checkbox(22) + gaps
+        if (element.type === 'element') return 130;
+        // element-property: select/input(32) + type badge(16) + separator + checkbox(20)
+        if (element.type === 'element-property') return 144;
         if (element.type === 'action-required'
             || element.type === 'action-min'
             || element.type === 'action-max'
             || element.type === 'action-regex'
             || element.type === 'action-add-class'
             || element.type === 'action-remove-class'
-            || element.type === 'action-toggle-class') return 136;
+            || element.type === 'action-toggle-class') return 144;
+        // New action nodes with 2 inputs (action + value)
+        if (element.type === 'action-set-text'
+            || element.type === 'action-set-html'
+            || element.type === 'action-set-value'
+            || element.type === 'action-set-attr'
+            || element.type === 'action-set-style') return 166;
+        // New action nodes with 1 input + selector UI
+        if (element.type === 'action-set-visibility'
+            || element.type === 'action-enable'
+            || element.type === 'action-disable'
+            || element.type === 'action-focus'
+            || element.type === 'action-scroll-to'
+            || element.type === 'action-trigger-event') return 168;
+        if (element.type === 'action-notify') return 168;
+        if (element.type === 'action-redirect') return 144;
+        // New event nodes
+        if (element.type === 'event-hover'
+            || element.type === 'event-scroll') return 128;
+        if (element.type === 'event-page-load') return 90;
+        if (element.type === 'event-timer') return 144;
+        if (element.type === 'event-custom') return 112;
         const inputCount = getInputCount(element);
         const outputCount = getOutputCount(element);
         const maxRows = Math.max(inputCount, outputCount);
-        return 24 + 16 + (maxRows * 32) + 8;
+        // border(2*2) + paddingTop(16) + header(~8) + rows*(rowHeight+gap) + paddingBottom(16)
+        return 2 + 2 + 16 + 8 + (maxRows * 34) + ((maxRows - 1) * 8) + 16;
     };
 
     const getNodeWidth = (element: CanvasElement): number => {
@@ -2081,7 +2400,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-event') return 280;
         if (element.type === 'action-length') return 240;
         if (element.type === 'event-element') return 220;
-        if (element.type === 'event-id') return 200;
+        if (element.type === 'event-id') return 220;
+        if (element.type === 'element-ref') return 220;
+        if (element.type === 'element-property') return 220;
         if (element.type === 'action-block') return 220;
         if (element.type === 'action-required'
             || element.type === 'action-min'
@@ -2108,20 +2429,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const pinGap = 1 * currentZoom;
 
         // rowHeight: actual rendered height of the output row (event-element/event-id have no inputs)
-        // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
         // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
         // For event-element body (output side): output row is standard 34px
         // All other rows: CSS min-height 34px
         const isTallActionInput = type === 'input' && index === 0 && (
-            element.type === 'action-event' || element.type === 'action-length'
+            element.type === 'action-length'
         );
         const rowHeight = isTallActionInput
-            ? (element.type === 'action-event' ? ((32 * 3) + (4 * 2)) : ((32 * 2) + 4))
+            ? ((32 * 2) + 4)
             : 34;
 
-        // Y = border(2) + padding(12) + rowHeight/2 + index * (rowHeight + gap(8))
+        // Y = border(2) + padding(16) + rowHeight/2 + index * (rowHeight + gap(8))
         const rowGap = 8;
-        const topOffset = 2 + 12; // border-top + padding-top
+        const usesActionRowLayout = element.type === 'output' || element.type.startsWith('action-');
+        const topOffset = 2 + 16 + (usesActionRowLayout ? 10 : 0); // border, padding, and action layout margin
         const rowY = nodeY + ((topOffset + (rowHeight / 2) + (index * (rowHeight + rowGap))) * currentZoom);
 
         if (type === 'input') {
@@ -2154,21 +2475,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const nodeWidth = getNodeWidth(element) * currentZoom;
         const pinGap = 1 * currentZoom;
 
-        // rowHeight: actual rendered height of the output row (event-element/event-id have no inputs)
-        // For action-event input (index 0): 3 controls × 32px + 2 gaps × 4px = 104px
+        // rowHeight: actual rendered height of the output row
         // For action-length input (index 0): 2 controls × 32px + 1 gap × 4px = 68px
-        // For event-element body (output side): output row is standard 34px
         // All other rows: CSS min-height 34px
         const isTallActionInput = type === 'input' && index === 0 && (
-            element.type === 'action-event' || element.type === 'action-length'
+            element.type === 'action-length'
         );
         const rowHeight = isTallActionInput
-            ? (element.type === 'action-event' ? ((32 * 3) + (4 * 2)) : ((32 * 2) + 4))
+            ? ((32 * 2) + 4)
             : 34;
 
-        // Y = border(2) + padding(12) + rowHeight/2 + index * (rowHeight + gap(8))
+        // Y = border(2) + padding(16) + rowHeight/2 + index * (rowHeight + gap(8))
         const rowGap = 8;
-        const topOffset = 2 + 12; // border-top + padding-top
+        const usesActionRowLayout = element.type === 'output' || element.type.startsWith('action-');
+        const topOffset = 2 + 16 + (usesActionRowLayout ? 10 : 0); // border, padding, and action layout margin
         const rowY = nodeY + ((topOffset + (rowHeight / 2) + (index * (rowHeight + rowGap))) * currentZoom);
 
         if (type === 'input') {
@@ -2191,6 +2511,90 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const distance = Math.abs(fromPos.x - toPos.x);
         const controlPointDistance = Math.min(distance / 2, 100);
         return `M ${fromPos.x} ${fromPos.y} C ${fromPos.x + controlPointDistance} ${fromPos.y}, ${toPos.x - controlPointDistance} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+    };
+
+    // Returns known DOM properties for a detected element type — used by Element Property node
+    const getElementTypeProps = (
+        detEl: DetectedElement | null | undefined
+    ): Array<{ key: string; type: 'number' | 'string' | 'boolean' }> => {
+        if (!detEl) return [];
+
+        // Common HTML element properties by element type
+        const commonProps: Array<{ key: string; type: 'number' | 'string' | 'boolean' }> = [
+            { key: 'value', type: 'string' },
+            { key: 'id', type: 'string' },
+            { key: 'className', type: 'string' },
+            { key: 'textContent', type: 'string' },
+            { key: 'innerHTML', type: 'string' },
+            { key: 'disabled', type: 'boolean' },
+            { key: 'hidden', type: 'boolean' },
+            { key: 'checked', type: 'boolean' },
+        ];
+
+        const typeSpecificProps: Record<string, Array<{ key: string; type: 'number' | 'string' | 'boolean' }>> = {
+            'slider': [
+                { key: 'value', type: 'number' },
+                { key: 'min', type: 'number' },
+                { key: 'max', type: 'number' },
+                { key: 'step', type: 'number' },
+                { key: 'disabled', type: 'boolean' },
+            ],
+            'input-number': [
+                { key: 'value', type: 'number' },
+                { key: 'min', type: 'number' },
+                { key: 'max', type: 'number' },
+                { key: 'step', type: 'number' },
+                { key: 'disabled', type: 'boolean' },
+                { key: 'placeholder', type: 'string' },
+            ],
+            'input-string': [
+                { key: 'value', type: 'string' },
+                { key: 'placeholder', type: 'string' },
+                { key: 'disabled', type: 'boolean' },
+                { key: 'maxLength', type: 'number' },
+                { key: 'minLength', type: 'number' },
+                { key: 'textContent', type: 'string' },
+                { key: 'innerHTML', type: 'string' },
+            ],
+            'checkbox': [
+                { key: 'checked', type: 'boolean' },
+                { key: 'disabled', type: 'boolean' },
+                { key: 'value', type: 'string' },
+            ],
+            'radio': [
+                { key: 'value', type: 'string' },
+                { key: 'checked', type: 'boolean' },
+                { key: 'disabled', type: 'boolean' },
+            ],
+            'select': [
+                { key: 'value', type: 'string' },
+                { key: 'disabled', type: 'boolean' },
+                { key: 'selectedIndex', type: 'number' },
+            ],
+            'button-group': [
+                { key: 'value', type: 'string' },
+                { key: 'disabled', type: 'boolean' },
+            ],
+            'image': [
+                { key: 'src', type: 'string' },
+                { key: 'alt', type: 'string' },
+                { key: 'width', type: 'number' },
+                { key: 'height', type: 'number' },
+                { key: 'hidden', type: 'boolean' },
+            ],
+        };
+
+        const specific = typeSpecificProps[detEl.type] || commonProps;
+
+        // Also include any outputs from the detected element (in case of custom elements)
+        const outputProps: Array<{ key: string; type: 'number' | 'string' | 'boolean' }> = (detEl.outputs || [])
+            .filter(o => !specific.some(s => s.key === o.name))
+            .map(o => ({
+                key: o.name,
+                type: (o.type === 'number' || o.type === 'boolean') ? o.type : 'string' as 'string',
+            }));
+
+        return [...specific, ...outputProps];
     };
 
     const renderInputControl = (element: CanvasElement, index: number): React.ReactNode => {
@@ -2238,6 +2642,50 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index !== 0) return null;
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                        {element.data?.actionUseManualId ? (
+                            <input
+                                type="text"
+                                className="input-control"
+                                value={String(element.data?.actionTargetManualId || '')}
+                                placeholder="Element ID"
+                                onChange={(e) => {
+                                    const actionTargetManualId = e.target.value;
+                                    setElements((prev) =>
+                                        updateElementValueTypes(
+                                            prev.map((elem) =>
+                                                elem.id === element.id
+                                                    ? { ...elem, data: { ...elem.data, actionTargetManualId } }
+                                                    : elem
+                                            )
+                                        )
+                                    );
+                                }}
+                            />
+                        ) : (
+                            <select
+                                className="input-control"
+                                value={String(element.data?.actionTargetId || '')}
+                                onChange={(e) => {
+                                    const actionTargetId = e.target.value;
+                                    setElements((prev) =>
+                                        updateElementValueTypes(
+                                            prev.map((elem) =>
+                                                elem.id === element.id
+                                                    ? { ...elem, data: { ...elem.data, actionTargetId } }
+                                                    : elem
+                                            )
+                                        )
+                                    );
+                                }}
+                            >
+                                <option value="">-- Element ID --</option>
+                                {detectedElements.map((detectedEl) => (
+                                    <option key={detectedEl.id} value={detectedEl.id}>
+                                        {detectedEl.name} ({detectedEl.id})
+                                    </option>
+                                ))}
+                            </select>
+                        )}
                         <select
                             className="input-control"
                             value={String(element.data?.actionEventType || 'change')}
@@ -2262,47 +2710,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             <option value="keydown">keydown</option>
                             <option value="keyup">keyup</option>
                         </select>
-                        <select
-                            className="input-control"
-                            value={String(element.data?.actionTargetId || '')}
-                            onChange={(e) => {
-                                const actionTargetId = e.target.value;
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, actionTargetId } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                        >
-                            <option value="">-- Element ID --</option>
-                            {detectedElements.map((detectedEl) => (
-                                <option key={detectedEl.id} value={detectedEl.id}>
-                                    {detectedEl.name} ({detectedEl.id})
-                                </option>
-                            ))}
-                        </select>
-                        <input
-                            type="text"
-                            className="input-control"
-                            value={String(element.data?.actionTargetManualId || '')}
-                            placeholder="Manual element ID"
-                            onChange={(e) => {
-                                const actionTargetManualId = e.target.value;
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, actionTargetManualId } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                        />
+                        <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!element.data?.actionUseManualId}
+                                    onChange={(e) => {
+                                        const actionUseManualId = e.target.checked;
+                                        setElements((prev) =>
+                                            updateElementValueTypes(
+                                                prev.map((elem) =>
+                                                    elem.id === element.id
+                                                        ? { ...elem, data: { ...elem.data, actionUseManualId } }
+                                                        : elem
+                                                )
+                                            )
+                                        );
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{ cursor: 'pointer' }}
+                                />
+                                Manual ID
+                            </label>
+                        </div>
                     </div>
                 );
             case 'action-required':
@@ -2626,6 +3056,31 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     ) : <div className="input-placeholder" />;
                 }
                 return null;
+            }
+            case 'case-default': {
+                const hasOutConnection = connections.some((c) => c.toId === element.id && c.toInput === 'input0');
+                if (index !== 0) return null;
+                return !hasOutConnection ? (
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={element.data?.out || ''}
+                        onChange={(e) => {
+                            const out = e.target.value;
+                            setElements((prev) =>
+                                updateElementValueTypes(
+                                    prev.map((elem) =>
+                                        elem.id === element.id
+                                            ? { ...elem, data: { ...elem.data, out } }
+                                            : elem
+                                    )
+                                )
+                            );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Default value"
+                    />
+                ) : <div className="input-placeholder" />;
             }
             case 'regex':
                 if (index !== 0) return null;
@@ -3439,9 +3894,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 0) return 'Left';
                 if (index === 1) return 'Right';
                 return '';
-            case 'switch':
+            case 'switch': {
                 if (index === 0) return 'Value';
+                // Check if a case-default is connected to this exact pin index
+                const defaultConn = connections.find((c) => {
+                    if (c.toId !== element.id || getInputIndex(c.toInput) !== index) return false;
+                    return elements.find((el) => el.id === c.fromId)?.type === 'case-default';
+                });
+                if (defaultConn) return 'Default';
                 return `Case ${index}`;
+            }
             case 'case-range':
                 if (index === 0) return 'Min';
                 if (index === 1) return 'Max';
@@ -3450,6 +3912,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'case-value':
                 if (index === 0) return 'Value';
                 if (index === 1) return 'Out';
+                return '';
+            case 'case-default':
+                if (index === 0) return 'Out';
                 return '';
             case 'regex':
                 return 'Text';
@@ -3616,6 +4081,47 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'Action' : '';
             case 'chart-data':
                 return index === 0 ? 'Label' : 'Value';
+            case 'element-property':
+                return 'Element';
+            // New action nodes
+            case 'action-set-text':
+            case 'action-set-html':
+            case 'action-set-value':
+            case 'action-set-attr':
+            case 'action-set-style':
+            case 'action-set-visibility':
+            case 'action-enable':
+            case 'action-disable':
+            case 'action-focus':
+            case 'action-scroll-to':
+            case 'action-notify':
+            case 'action-redirect':
+            case 'action-trigger-event':
+                if (index === 0) return 'Action';
+                if (index === 1) return 'Value';
+                return '';
+            // New event nodes — no inputs
+            // New array nodes
+            case 'array-map':
+                return index === 0 ? 'Array' : 'Value';
+            case 'array-filter':
+                return index === 0 ? 'Array' : 'Condition';
+            case 'array-reduce':
+                return 'Array';
+            case 'array-find':
+                return index === 0 ? 'Array' : 'Value';
+            case 'array-for-each':
+                return 'Array';
+            case 'array-collect':
+                return 'Item';
+            case 'array-contains':
+                return index === 0 ? 'Array' : 'Value';
+            case 'array-length':
+                return 'Array';
+            case 'array-merge':
+                return index === 0 ? 'Array A' : 'Array B';
+            case 'array-unique':
+                return 'Array';
             default:
                 return `Input ${index + 1}`;
         }
@@ -3625,6 +4131,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         switch (element.type) {
             case 'case-range':
             case 'case-value':
+            case 'case-default':
             case 'switch':
             case 'node':
             case 'calculation':
@@ -3656,6 +4163,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'fallback':
             case 'clamp':
                 return 'Value';
+            case 'element-property':
+                return 'Value';
+            case 'element-ref':
+                return 'Element';
+            // New event nodes
+            case 'event-hover':
+            case 'event-scroll':
+            case 'event-page-load':
+            case 'event-timer':
+            case 'event-custom':
+                return 'Event';
+            // New array nodes
+            case 'array-map':
+            case 'array-filter':
+            case 'array-for-each':
+            case 'array-collect':
+            case 'array-merge':
+            case 'array-unique':
+                return 'Array';
+            case 'array-find':
+                return index === 0 ? 'Item' : 'Found';
+            case 'array-contains':
+                return 'Result';
+            case 'array-length':
+                return 'Length';
+            case 'array-reduce':
+                return 'Value';
             case 'regex':
                 return 'Match';
             case 'concat':
@@ -3677,6 +4211,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Text';
             case 'bool-count':
                 return 'Count';
+            case 'string-trim':
+            case 'string-upper':
+            case 'string-lower':
+                return 'Value';
+            case 'string-includes':
+                return 'Result';
             case 'color':
             case 'gradient':
                 return 'Color';
@@ -3954,6 +4494,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return null;
             }
         };
+        const connectedInputExpressionFor = (
+            targetElement: CanvasElement,
+            inputIndex: number,
+            fallback?: unknown
+        ): string => {
+            const connection = getConnectionForInput(targetElement.id, `input${inputIndex}`);
+            if (connection) {
+                const sourceElement = elementMap.get(connection.fromId);
+                if (sourceElement) {
+                    const sourceOutputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+                    return buildNodeExpression(
+                        sourceElement,
+                        Number.isFinite(sourceOutputIndex) && sourceOutputIndex >= 0 ? sourceOutputIndex : 0,
+                        depth + 1
+                    );
+                }
+            }
+            return fallback !== undefined ? serializeGraphFormulaLiteral(fallback) : '0';
+        };
         const buildNodeExpression = (element: CanvasElement, outputIndex = 0, currentDepth = 0): string => {
             if (!element || currentDepth > 24) {
                 return '0';
@@ -3980,11 +4539,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'color':
                     return serializeGraphFormulaLiteral(String(element.data?.colorValue || '#2563eb'));
                 case 'element': {
-                    const selectedElement = String(element.data?.selectedElement || '').trim();
+                    const useManual = !!element.data?.elementUseManualId;
+                    const selectedElement = useManual
+                        ? String(element.data?.customElementId || '').trim()
+                        : String(element.data?.selectedElement || '').trim();
                     return selectedElement ? `[${selectedElement}]` : '0';
                 }
                 case 'element-id':
                     return serializeGraphFormulaLiteral(String(element.data?.elementId || ''));
+                case 'element-ref': {
+                    // Returns a DOM element reference
+                    const useManual = !!element.data?.elementUseManualId;
+                    const elId = useManual
+                        ? String(element.data?.customElementId || '').trim()
+                        : String(element.data?.selectedElement || '').trim();
+                    return elId ? `__nodeGetElement(${serializeGraphFormulaLiteral(elId)})` : 'null';
+                }
+                case 'element-property': {
+                    // Extracts a property/attribute from a connected element reference
+                    const sourceExpr = connectedInputExpression(0, 'null');
+                    const prop = String(element.data?.elementProperty || '').trim();
+                    if (!prop) return '0';
+                    return `__nodeGetElementProp(${sourceExpr}, ${serializeGraphFormulaLiteral(prop)})`;
+                }
                 case 'event-element': {
                     // Resolve target ID: manual input or dropdown selection
                     const targetId = String(
@@ -3998,7 +4575,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         : 'null';
                 }
                 case 'event-id': {
-                    const targetId = String(element.data?.eventId || '').trim();
+                    const useManual = !!element.data?.eventUseManualId;
+                    const targetId = useManual
+                        ? String(element.data?.eventId || '').trim()
+                        : String(element.data?.eventElement || '').trim();
                     const evType = String(element.data?.eventType || 'click');
                     return targetId
                         ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
@@ -4056,6 +4636,69 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     }
 
                     return expression;
+                }
+                case 'condition': {
+                    const requestedOperation = String(element.data?.operation || '===').trim();
+                    const allowedOperations = new Set(['===', '!==', '>', '<', '>=', '<=']);
+                    const operation = allowedOperations.has(requestedOperation) ? requestedOperation : '===';
+                    return `(${connectedInputExpression(0)} ${operation} ${connectedInputExpression(1)})`;
+                }
+                case 'node': {
+                    const condition = connectedInputExpression(0, true);
+                    const whenTrue = getConnectedExpression(element.id, 'input1') || 'undefined';
+                    const whenFalse = getConnectedExpression(element.id, 'input2') || 'undefined';
+                    return `((${condition}) ? (${whenTrue}) : (${whenFalse}))`;
+                }
+                case 'case-value':
+                    return connectedInputExpression(1, element.data?.out ?? 0);
+                case 'case-range':
+                    return connectedInputExpression(2, element.data?.out ?? 0);
+                case 'switch': {
+                    const switchValue = connectedInputExpression(0, undefined);
+                    const caseConnections = allConnections
+                        .filter((connection) => (
+                            connection.toId === element.id
+                            && connection.toInput.startsWith('input')
+                            && getInputIndex(connection.toInput) > 0
+                        ))
+                        .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+
+                    const caseClauses: Array<{ condition: string; result: string }> = [];
+                    let defaultResult: string | null = null;
+
+                    caseConnections.forEach((connection) => {
+                        const caseElement = elementMap.get(connection.fromId);
+                        if (!caseElement) return;
+
+                        if (caseElement.type === 'case-default') {
+                            defaultResult = connectedInputExpressionFor(caseElement, 0, caseElement.data?.out ?? 0);
+                            return;
+                        }
+
+                        if (caseElement.type === 'case-value') {
+                            caseClauses.push({
+                                condition: `__nodeCaseEquals(${switchValue}, ${connectedInputExpressionFor(caseElement, 0, caseElement.data?.caseValue ?? 0)})`,
+                                result: connectedInputExpressionFor(caseElement, 1, caseElement.data?.out ?? 0),
+                            });
+                            return;
+                        }
+
+                        if (caseElement.type === 'case-range') {
+                            const min = connectedInputExpressionFor(caseElement, 0, caseElement.data?.min ?? 0);
+                            const max = connectedInputExpressionFor(caseElement, 1, caseElement.data?.max ?? 0);
+                            caseClauses.push({
+                                condition: `(Number(${switchValue}) >= Math.min(Number(${min}), Number(${max})) && Number(${switchValue}) <= Math.max(Number(${min}), Number(${max})))`,
+                                result: connectedInputExpressionFor(caseElement, 2, caseElement.data?.out ?? 0),
+                            });
+                        }
+                    });
+
+                    const ultimateFallback = defaultResult ?? '0';
+
+                    return caseClauses.reduceRight(
+                        (fallback, clause) => `((${clause.condition}) ? (${clause.result}) : (${fallback}))`,
+                        ultimateFallback
+                    );
                 }
                 case 'array': {
                     return '[]';
@@ -4254,7 +4897,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const getConnectedType = (
             toId: string,
             toInput: string
-        ): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | null => {
+        ): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | null => {
             const conn = nextConnections.find((connection) => connection.toId === toId && connection.toInput === toInput);
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
@@ -4262,7 +4905,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
 
         return nextElements.map((el) => {
-            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' = 'number';
+            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' = 'number';
             let nextData: CanvasElement['data'] | undefined;
 
             switch (el.type) {
@@ -4276,8 +4919,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'string';
                     break;
                 case 'element': {
-                    const selectedElement = detectedElementsRef.current.find((detected) => detected.id === el.data?.selectedElement);
-                    valueType = selectedElement?.outputs?.[0]?.type || 'number';
+                    if (el.data?.elementUseManualId) {
+                        // Manual ID: type is unknown at edit time, default to number
+                        valueType = 'number';
+                    } else {
+                        const selectedElement = detectedElementsRef.current.find((detected) => detected.id === el.data?.selectedElement);
+                        valueType = selectedElement?.outputs?.[0]?.type || 'number';
+                    }
                     break;
                 }
                 case 'calculation':
@@ -4354,6 +5002,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'element-id':
                     valueType = el.data?.customOutputType || 'string';
                     break;
+                case 'element-ref':
+                    valueType = 'element';
+                    break;
+                case 'element-property': {
+                    // Type inferred from the selected property or manual attribute
+                    const propType = el.data?.elementPropertyType;
+                    valueType = (propType === 'string' || propType === 'boolean') ? propType : 'number';
+                    break;
+                }
                 case 'memory-read-number':
                     valueType = 'number';
                     break;
@@ -4384,6 +5041,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
                 case 'case-range':
                 case 'case-value':
+                case 'case-default':
                     valueType = 'case';
                     break;
                 case 'switch': {
@@ -4391,8 +5049,26 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         .filter((connection) => connection.toId === el.id && getInputIndex(connection.toInput) > 0)
                         .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
                     const firstCase = switchCaseConnections[0];
-                    const firstCaseType = firstCase ? getConnectedType(el.id, firstCase.toInput) : null;
-                    valueType = (firstCaseType as any) || 'number';
+                    const firstCaseElement = firstCase ? elementMap.get(firstCase.fromId) : null;
+                    if (firstCaseElement?.type === 'case-range' || firstCaseElement?.type === 'case-value') {
+                        const resultInputIndex = firstCaseElement.type === 'case-range' ? 2 : 1;
+                        const connectedResultType = getConnectedType(firstCaseElement.id, `input${resultInputIndex}`);
+                        if (connectedResultType) {
+                            valueType = connectedResultType;
+                        } else {
+                            const literalResult = firstCaseElement.data?.out;
+                            if (typeof literalResult === 'boolean') {
+                                valueType = 'boolean';
+                            } else if (typeof literalResult === 'number') {
+                                valueType = 'number';
+                            } else {
+                                const textResult = String(literalResult ?? '').trim();
+                                valueType = textResult !== '' && Number.isFinite(Number(textResult)) ? 'number' : 'string';
+                            }
+                        }
+                    } else {
+                        valueType = 'number';
+                    }
                     break;
                 }
                 case 'node': {
@@ -4448,6 +5124,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'array-sort':
                 case 'array-remove-index':
                 case 'array-replace-index':
+                case 'array-map':
+                case 'array-filter':
+                case 'array-for-each':
+                case 'array-collect':
+                case 'array-merge':
+                case 'array-unique':
                     valueType = 'array';
                     if (el.type === 'array') {
                         const typeConn = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
@@ -4475,6 +5157,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'image-from-link':
                 case 'image-from-element':
                     valueType = 'string';
+                    break;
+                // New event nodes
+                case 'event-hover':
+                case 'event-scroll':
+                case 'event-page-load':
+                case 'event-timer':
+                case 'event-custom':
+                    valueType = 'event';
+                    break;
+                // New array nodes with non-array output
+                case 'array-find':
+                case 'array-reduce':
+                    valueType = el.valueType || 'number';
+                    break;
+                case 'array-contains':
+                    valueType = 'boolean';
+                    break;
+                case 'array-length':
+                    valueType = 'number';
                     break;
                 case 'api-request':
                     valueType = 'zip';
@@ -4853,6 +5554,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 Math.round(dropX - 90),
                 Math.round(dropY - 30)
             );
+            pushHistory(elementsRef.current, connectionsRef.current);
             setElements((prev) => updateElementValueTypes([...prev, nextElement], connectionsRef.current));
             setSelected(nextElement.id);
             markGraphDirty();
@@ -5017,7 +5719,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const nextFormula = typeof activeSnapshot.formula === 'string' ? activeSnapshot.formula : '';
             const nextCustomNodeUi = activeSnapshot.customNodeUi ? normalizeCustomNodeUiState(activeSnapshot.customNodeUi) : null;
             const normalizedElements = updateElementValueTypes(
-                nextElements.length > 0 ? nextElements : [defaultMainBlock],
+                nextElements.length > 0 ? nextElements : (shouldRenderMainBlock ? [defaultMainBlock] : []),
                 nextConnections
             );
             const nextSavedState = normalizedInitial || savedFromStorage || activeSnapshot;
@@ -5050,7 +5752,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return;
         }
 
-        setElements([defaultMainBlock]);
+        setElements(shouldRenderMainBlock ? [defaultMainBlock] : []);
         setConnections([]);
         setFormula('');
         setCustomNodeUi(null);
@@ -5254,6 +5956,35 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
     }, []);
 
+    // ── Keyboard shortcuts (Undo / Redo / Delete) ──────────────────────────
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Ignore when focus is inside an input / textarea / select
+            const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+            const ctrl = e.ctrlKey || e.metaKey;
+
+            if (ctrl && !e.shiftKey && e.key.toLowerCase() === 'z') {
+                e.preventDefault();
+                handleUndo();
+                return;
+            }
+            if (ctrl && (e.shiftKey && e.key.toLowerCase() === 'z') || (ctrl && e.key.toLowerCase() === 'y')) {
+                e.preventDefault();
+                handleRedo();
+                return;
+            }
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedRef.current && selectedRef.current !== 'main-block') {
+                e.preventDefault();
+                handleDelete(selectedRef.current);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+    // ───────────────────────────────────────────────────────────────────────
+
     const handleSave = () => {
         const snapshot = buildSavedState();
         setSavedState(snapshot);
@@ -5327,7 +6058,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     ],
                 };
             case 'action-event':
-                return { actionEventType: 'change', actionTargetId: '', actionTargetManualId: '' };
+                return { actionEventType: 'change', actionTargetId: '', actionTargetManualId: '', actionUseManualId: false };
             case 'action-block':
                 return {};
             case 'action-required':
@@ -5344,6 +6075,58 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-remove-class':
             case 'action-toggle-class':
                 return { actionClassName: '' };
+            case 'element-ref':
+                return { selectedElement: '', elementUseManualId: false, customElementId: '' };
+            case 'element-property':
+                return { elementProperty: '', elementPropertyUseManual: false, elementPropertyType: 'number' };
+            case 'element-id':
+                return { elementId: '', customOutputType: 'string' as const };
+            // New action nodes
+            case 'action-set-text':
+            case 'action-set-html':
+            case 'action-set-value':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '' };
+            case 'action-set-attr':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '', actionAttrName: '' };
+            case 'action-set-style':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '', actionStyleProperty: '' };
+            case 'action-set-visibility':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '', actionVisibility: 'toggle' as const };
+            case 'action-enable':
+            case 'action-disable':
+            case 'action-focus':
+            case 'action-scroll-to':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '' };
+            case 'action-notify':
+                return { actionNotifyMessage: '', actionNotifyDuration: 3000 };
+            case 'action-redirect':
+                return { actionTargetManualId: '', actionRedirectTarget: '_self' as const };
+            case 'action-trigger-event':
+                return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '', actionEventName: '' };
+            // New event nodes
+            case 'event-hover':
+                return { selectedElement: '', elementUseManualId: false, customElementId: '', eventHoverMode: 'enter' as const };
+            case 'event-scroll':
+                return { selectedElement: '', elementUseManualId: false, customElementId: '' };
+            case 'event-page-load':
+                return {};
+            case 'event-timer':
+                return { eventTimerInterval: 1000, eventTimerMode: 'interval' as const };
+            case 'event-custom':
+                return { eventCustomName: '' };
+            // New array nodes
+            case 'array-map':
+            case 'array-filter':
+            case 'array-for-each':
+            case 'array-collect':
+            case 'array-merge':
+            case 'array-unique':
+            case 'array-find':
+            case 'array-contains':
+            case 'array-length':
+                return { arrayItemType: 'number', arrayItemSchema: [] };
+            case 'array-reduce':
+                return { arrayItemType: 'number', arrayItemSchema: [], arrayReduceOperation: 'sum' as const, arrayReduceInitial: '0' };
             default:
                 return {};
         }
@@ -5353,6 +6136,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (elementId === 'main-block') {
             return;
         }
+        pushHistory(elementsRef.current, connectionsRef.current);
         setElements((prev) => {
             const next = prev.filter((element) => element.id !== elementId);
             if (selected === elementId) {
@@ -5407,6 +6191,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         setIsPanning(true);
         isPanningRef.current = true;
         setIsClick(true);
+        setSelected(null);
         lastPanPointRef.current = { x: event.clientX, y: event.clientY };
     };
 
@@ -5502,6 +6287,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const dx = (event.clientX - drag.startX) / zoomRef.current;
             const dy = (event.clientY - drag.startY) / zoomRef.current;
             if (dx !== 0 || dy !== 0) {
+                pushHistory(elementsRef.current, connectionsRef.current);
                 setElements((prev) => prev.map((element) => (
                     element.id === drag.elementId
                         ? { ...element, x: drag.elementX + dx, y: drag.elementY + dy }
@@ -5748,6 +6534,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                     Save Graph
                                 </button>
                             )}
+
+                            {/* Undo / Redo */}
+                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+                                <button
+                                    onClick={handleUndo}
+                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: '#334155' }}
+                                    title="Undo (Ctrl+Z)"
+                                >
+                                    ↩ Undo
+                                </button>
+                                <button
+                                    onClick={handleRedo}
+                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: '#334155' }}
+                                    title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+                                >
+                                    ↪ Redo
+                                </button>
+                            </div>
 
                             {hasDynamicInputGapErrors && !templateMode && !customNodeMode && (
                                 <div style={{ color: '#ef4444', fontSize: '11px', marginTop: '4px', lineHeight: '1.35' }}>
@@ -6064,54 +6868,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                         )}
 
                                         {selEl.type === 'element-id' && (
-                                            <>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Element ID</div>
-                                                    <input
-                                                        type="text"
-                                                        className="input-control"
-                                                        value={selEl.data?.elementId || ''}
-                                                        onChange={(e) => {
-                                                            const elementId = e.target.value;
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, elementId } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        placeholder="Element ID"
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Output Type</div>
-                                                    <select
-                                                        className="input-control"
-                                                        value={selEl.data?.customOutputType || 'string'}
-                                                        onChange={(e) => {
-                                                            const customOutputType = e.target.value as 'number' | 'string' | 'boolean';
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === selected
-                                                                            ? { ...elem, data: { ...elem.data, customOutputType } }
-                                                                            : elem
-                                                                    )
-                                                                )
-                                                            );
-                                                        }}
-                                                        style={{ width: '100%' }}
-                                                    >
-                                                        <option value="string">String</option>
-                                                        <option value="number">Number</option>
-                                                        <option value="boolean">Boolean</option>
-                                                    </select>
-                                                </div>
-                                            </>
+                                            <div style={{ color: '#aaa', fontSize: '11px', lineHeight: '1.4' }}>
+                                                Configure element ID and output type directly in the node body.
+                                            </div>
                                         )}
 
                                         {selEl.type === 'event-element' && (
@@ -6122,7 +6881,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                                         {selEl.type === 'event-id' && (
                                             <div style={{ color: '#aaa', fontSize: '11px', lineHeight: '1.4' }}>
-                                                Configure element ID and event type directly in the node body.
+                                                Configure element and event type directly in the node body.
                                             </div>
                                         )}
 
@@ -6428,11 +7187,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'calculation'
                             || el.type === 'number'
                             || el.type === 'element'
+                            || el.type === 'element-ref'
+                            || el.type === 'element-property'
                             || el.type === 'output'
                             || el.type === 'constant-boolean'
                             || el.type === 'constant-string'
                             || el.type === 'color'
                             || el.type === 'math'
+                            || el.type === 'event-element'
+                            || el.type === 'event-id'
+                            || el.type === 'action-event'
                             || el.type === 'string-split'
                             || el.type === 'string-replace'
                             || el.type === 'number-parse'
@@ -6853,24 +7617,89 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                               ) : el.type === 'api-request' || el.type === 'api-field' || el.type === 'api-list-mapper' ? (
                                                   renderApiNodeControls(el)
                                               ) : el.type === 'element-id' ? (
-                                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar ->
+                                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                      <input
+                                                          type="text"
+                                                          className="input-control"
+                                                          value={el.data?.elementId || ''}
+                                                          placeholder="Element ID"
+                                                          onChange={(e) => {
+                                                              const elementId = e.target.value;
+                                                              setElements(prev =>
+                                                                  updateElementValueTypes(
+                                                                      prev.map(elem =>
+                                                                          elem.id === el.id
+                                                                              ? { ...elem, data: { ...elem.data, elementId } }
+                                                                              : elem
+                                                                      )
+                                                                  )
+                                                              );
+                                                          }}
+                                                      />
+                                                      <select
+                                                          className="input-control"
+                                                          value={el.data?.customOutputType || 'string'}
+                                                          onChange={(e) => {
+                                                              const customOutputType = e.target.value as 'number' | 'string' | 'boolean';
+                                                              setElements(prev =>
+                                                                  updateElementValueTypes(
+                                                                      prev.map(elem =>
+                                                                          elem.id === el.id
+                                                                              ? { ...elem, data: { ...elem.data, customOutputType } }
+                                                                              : elem
+                                                                      )
+                                                                  )
+                                                              );
+                                                          }}
+                                                          onClick={(e) => e.stopPropagation()}
+                                                      >
+                                                          <option value="string">String</option>
+                                                          <option value="number">Number</option>
+                                                          <option value="boolean">Boolean</option>
+                                                      </select>
                                                   </div>
-                                            ) : el.type === 'memory-read-number' || el.type === 'memory-read-string' || el.type === 'memory-read-boolean' || el.type === 'memory-write-number' || el.type === 'memory-write-string' || el.type === 'memory-write-boolean' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
-                                                    Configure in sidebar ->
-                                                </div>
-                                            ) : el.type === 'event-element' ? (
+                                            ) : el.type === 'element-ref' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {/* checkbox: list vs manual */}
+                                                    {el.data?.elementUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.customElementId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const customElementId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, customElementId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.selectedElement || ''}
+                                                            onChange={(e) => {
+                                                                const selectedElement = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, selectedElement } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Element --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.id}</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
                                                     <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
                                                         <input
                                                             type="checkbox"
-                                                            checked={!!el.data?.eventUseManualId}
+                                                            checked={!!el.data?.elementUseManualId}
                                                             onChange={(e) => {
-                                                                const eventUseManualId = e.target.checked;
+                                                                const elementUseManualId = e.target.checked;
                                                                 setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId } } : elem
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, elementUseManualId } } : elem
                                                                 )));
                                                             }}
                                                             onClick={(e) => e.stopPropagation()}
@@ -6878,6 +7707,105 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         />
                                                         Manual ID
                                                     </label>
+                                                </div>
+                                            ) : el.type === 'element-property' ? (
+                                                (() => {
+                                                    // Build property options from the connected element-ref node
+                                                    const connectedElementRefId = connections.find(c =>
+                                                        c.toId === el.id && c.toInput === 'input0'
+                                                    )?.fromId;
+                                                    const connectedRef = connectedElementRefId
+                                                        ? elements.find(e => e.id === connectedElementRefId)
+                                                        : null;
+                                                    const refElementId = connectedRef?.data?.elementUseManualId
+                                                        ? String(connectedRef?.data?.customElementId || '')
+                                                        : String(connectedRef?.data?.selectedElement || '');
+                                                    const detectedEl = refElementId
+                                                        ? detectedElements.find(d => d.id === refElementId)
+                                                        : null;
+                                                    const knownProps: Array<{ key: string; type: 'number' | 'string' | 'boolean' }> = getElementTypeProps(detectedEl);
+                                                    const currentProp = el.data?.elementProperty || '';
+                                                    const useManual = !!el.data?.elementPropertyUseManual;
+                                                    // Detect type from known props
+                                                    const inferredType = knownProps.find(p => p.key === currentProp)?.type;
+                                                    return (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                            {useManual ? (
+                                                                <input
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    placeholder="e.g. value, max, data-x"
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: undefined } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            ) : knownProps.length > 0 ? (
+                                                                <select
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        const propType = knownProps.find(p => p.key === elementProperty)?.type;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: propType } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                >
+                                                                    <option value="">-- Property --</option>
+                                                                    {knownProps.map(p => (
+                                                                        <option key={p.key} value={p.key}>{p.key} ({p.type})</option>
+                                                                    ))}
+                                                                </select>
+                                                            ) : (
+                                                                <input
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    placeholder="Connect element first"
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            )}
+                                                            {!useManual && inferredType && (
+                                                                <div style={{ fontSize: '10px', color: '#64748b' }}>Type: {inferredType}</div>
+                                                            )}
+                                                            <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                                <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={useManual}
+                                                                        onChange={(e) => {
+                                                                            const elementPropertyUseManual = e.target.checked;
+                                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, elementPropertyUseManual } } : elem
+                                                                            )));
+                                                                        }}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        style={{ cursor: 'pointer' }}
+                                                                    />
+                                                                    Manual property
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })()
+                                            ) : el.type === 'memory-read-number' || el.type === 'memory-read-string' || el.type === 'memory-read-boolean' || el.type === 'memory-write-number' || el.type === 'memory-write-string' || el.type === 'memory-write-boolean' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
+                                                    Configure in sidebar
+                                                </div>
+                                            ) : el.type === 'event-element' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
                                                     {el.data?.eventUseManualId ? (
                                                         <input
                                                             type="text"
@@ -6910,7 +7838,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
-                                                    {/* Event Type */}
                                                     <select
                                                         className="input-control"
                                                         value={el.data?.eventType || 'click'}
@@ -6930,22 +7857,58 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.eventUseManualId}
+                                                                onChange={(e) => {
+                                                                    const eventUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
                                                 </div>
                                             ) : el.type === 'event-id' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    <input
-                                                        type="text"
-                                                        className="input-control"
-                                                        value={el.data?.eventId || ''}
-                                                        placeholder="Element ID"
-                                                        onChange={(e) => {
-                                                            const eventId = e.target.value;
-                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, eventId } } : elem
-                                                            )));
-                                                        }}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                    />
+                                                    {el.data?.eventUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.eventId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const eventId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.eventElement || ''}
+                                                            onChange={(e) => {
+                                                                const eventElement = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventElement } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Target --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
                                                     <select
                                                         className="input-control"
                                                         value={el.data?.eventType || 'click'}
@@ -6965,6 +7928,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.eventUseManualId}
+                                                                onChange={(e) => {
+                                                                    const eventUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
                                                 </div>
                                             ) : el.type === 'event-processor' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -6973,54 +7953,74 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     </div>
                                                 </div>
                                             ) : el.type === 'element' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                                    <select
-                                                        className="input-control"
-                                                        value={el.data?.selectedElement || ''}
-                                                        onChange={(e) => {
-                                                            const selectedElementId = e.target.value;
-                                                            const selectedElement = detectedElements.find(d => d.id === selectedElementId);
-                                                            setElements(prev =>
-                                                                updateElementValueTypes(
-                                                                    prev.map(elem =>
-                                                                        elem.id === el.id
-                                                                            ? { ...elem, data: { ...elem.data, selectedElement: selectedElementId, outputs: selectedElement?.outputs || [] } }
-                                                                            : elem
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {el.data?.elementUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.customElementId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const customElementId = e.target.value;
+                                                                setElements(prev =>
+                                                                    updateElementValueTypes(
+                                                                        prev.map(elem =>
+                                                                            elem.id === el.id
+                                                                                ? { ...elem, data: { ...elem.data, customElementId, outputs: [] } }
+                                                                                : elem
+                                                                        )
                                                                     )
-                                                                )
-                                                            );
-                                                        }}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                    >
-                                                        <option value="">-- Element --</option>
-                                                        {detectedElements.map(d => (
-                                                            <option key={d.id} value={d.id}>{d.id}</option>
-                                                        ))}
-                                                    </select>
+                                                                );
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.selectedElement || ''}
+                                                            onChange={(e) => {
+                                                                const selectedElementId = e.target.value;
+                                                                const selectedElement = detectedElements.find(d => d.id === selectedElementId);
+                                                                setElements(prev =>
+                                                                    updateElementValueTypes(
+                                                                        prev.map(elem =>
+                                                                            elem.id === el.id
+                                                                                ? { ...elem, data: { ...elem.data, selectedElement: selectedElementId, outputs: selectedElement?.outputs || [] } }
+                                                                                : elem
+                                                                        )
+                                                                    )
+                                                                );
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Element --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.id}</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.elementUseManualId}
+                                                                onChange={(e) => {
+                                                                    const elementUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, elementUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
                                                 </div>
                                             ) : el.type === 'output' ? (
                                                 <div className="node-output-controls" style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
                                                     {!customNodeMode && (
                                                         <>
-                                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
-                                                                <input
-                                                                    type="checkbox"
-                                                                    checked={el.data?.useIdInput || false}
-                                                                    onChange={(e) => {
-                                                                        const checked = e.target.checked;
-                                                                        setElements(prev =>
-                                                                            prev.map(elem =>
-                                                                                elem.id === el.id
-                                                                                    ? { ...elem, data: { ...elem.data, useIdInput: checked, selectedElement: checked ? '' : el.data?.selectedElement } }
-                                                                                    : elem
-                                                                            )
-                                                                        );
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    style={{ cursor: 'pointer' }}
-                                                                />
-                                                                Use ID Input
-                                                            </label>
                                                             {el.data?.useIdInput ? (
                                                                 <input
                                                                     type="text"
@@ -7066,6 +8066,26 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     ))}
                                                                 </select>
                                                             )}
+                                                            <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={el.data?.useIdInput || false}
+                                                                    onChange={(e) => {
+                                                                        const checked = e.target.checked;
+                                                                        setElements(prev =>
+                                                                            prev.map(elem =>
+                                                                                elem.id === el.id
+                                                                                    ? { ...elem, data: { ...elem.data, useIdInput: checked, selectedElement: checked ? '' : el.data?.selectedElement } }
+                                                                                    : elem
+                                                                            )
+                                                                        );
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    style={{ cursor: 'pointer' }}
+                                                                />
+                                                                Use ID Input
+                                                            </label>
                                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
                                                                 <input
                                                                     type="checkbox"
@@ -7085,6 +8105,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 />
                                                                 Execute on page load
                                                             </label>
+                                                            </div>
                                                         </>
                                                     )}
                                                     {customNodeMode && (
@@ -7172,7 +8193,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     />
                                                 </div>
                                             ) : el.type === 'css-unit' ? (
-                                                <div onClick={(e) => e.stopPropagation()}>
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
                                                     <input
                                                         type="number"
                                                         className="input-control"
@@ -7183,7 +8204,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         }}
                                                         onClick={(e) => e.stopPropagation()}
                                                         placeholder="Value"
-                                                        style={{ marginBottom: '4px' }}
                                                     />
                                                     <select className="input-control" value={el.data?.cssUnit ?? 'px'} onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, cssUnit: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
                                                         <option value="px">px</option>
@@ -7218,6 +8238,284 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     >
                                                         {el.data?.cssText ? 'Edit CSS [saved]' : 'Edit CSS...'}
                                                     </button>
+                                                </div>
+                                            ) : (el.type === 'event-element' || el.type === 'event-id') ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {el.data?.eventUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.eventId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const eventId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.eventElement || ''}
+                                                            onChange={(e) => {
+                                                                const eventElement = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, eventElement } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Target --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                    <select
+                                                        className="input-control"
+                                                        value={el.data?.eventType || 'click'}
+                                                        onChange={(e) => {
+                                                            const eventType = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, eventType } } : elem
+                                                            )));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        <option value="click">click</option>
+                                                        <option value="change">change</option>
+                                                        <option value="input">input</option>
+                                                        <option value="focus">focus</option>
+                                                        <option value="blur">blur</option>
+                                                        <option value="keyup">keyup</option>
+                                                        <option value="keydown">keydown</option>
+                                                    </select>
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.eventUseManualId}
+                                                                onChange={(e) => {
+                                                                    const eventUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            ) : el.type === 'element-ref' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {el.data?.elementUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={el.data?.customElementId || ''}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const customElementId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, customElementId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={el.data?.selectedElement || ''}
+                                                            onChange={(e) => {
+                                                                const selectedElement = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, selectedElement } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Element --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.id}</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.elementUseManualId}
+                                                                onChange={(e) => {
+                                                                    const elementUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, elementUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            ) : el.type === 'element-property' ? (
+                                                (() => {
+                                                    const connId = connections.find(c => c.toId === el.id && c.toInput === 'input0')?.fromId;
+                                                    const connRef = connId ? elements.find(e => e.id === connId) : null;
+                                                    const refElId = connRef?.data?.elementUseManualId
+                                                        ? String(connRef?.data?.customElementId || '')
+                                                        : String(connRef?.data?.selectedElement || '');
+                                                    const detEl = refElId ? detectedElements.find(d => d.id === refElId) : null;
+                                                    const knownProps: Array<{ key: string; type: 'number' | 'string' | 'boolean' }> = getElementTypeProps(detEl);
+                                                    const currentProp = el.data?.elementProperty || '';
+                                                    const useManual = !!el.data?.elementPropertyUseManual;
+                                                    const inferredType = knownProps.find(p => p.key === currentProp)?.type;
+                                                    return (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                            {useManual ? (
+                                                                <input
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    placeholder="e.g. value, max, data-x"
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: undefined } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            ) : knownProps.length > 0 ? (
+                                                                <select
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        const propType = knownProps.find(p => p.key === elementProperty)?.type;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: propType } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                >
+                                                                    <option value="">-- Property --</option>
+                                                                    {knownProps.map(p => (
+                                                                        <option key={p.key} value={p.key}>{p.key} ({p.type})</option>
+                                                                    ))}
+                                                                </select>
+                                                            ) : (
+                                                                <input
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={currentProp}
+                                                                    placeholder="Connect element first"
+                                                                    onChange={(e) => {
+                                                                        const elementProperty = e.target.value;
+                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty } } : elem
+                                                                        )));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            )}
+                                                            {!useManual && inferredType && (
+                                                                <div style={{ fontSize: '10px', color: '#64748b' }}>Type: {inferredType}</div>
+                                                            )}
+                                                            <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                                <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={useManual}
+                                                                        onChange={(e) => {
+                                                                            const elementPropertyUseManual = e.target.checked;
+                                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, elementPropertyUseManual } } : elem
+                                                                            )));
+                                                                        }}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        style={{ cursor: 'pointer' }}
+                                                                    />
+                                                                    Manual property
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })()
+                                            ) : el.type === 'action-event' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {el.data?.actionUseManualId ? (
+                                                        <input
+                                                            type="text"
+                                                            className="input-control"
+                                                            value={String(el.data?.actionTargetManualId || '')}
+                                                            placeholder="Element ID"
+                                                            onChange={(e) => {
+                                                                const actionTargetManualId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, actionTargetManualId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        />
+                                                    ) : (
+                                                        <select
+                                                            className="input-control"
+                                                            value={String(el.data?.actionTargetId || '')}
+                                                            onChange={(e) => {
+                                                                const actionTargetId = e.target.value;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                    elem.id === el.id ? { ...elem, data: { ...elem.data, actionTargetId } } : elem
+                                                                )));
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            <option value="">-- Element ID --</option>
+                                                            {detectedElements.map(d => (
+                                                                <option key={d.id} value={d.id}>{d.name} ({d.id})</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                    <select
+                                                        className="input-control"
+                                                        value={String(el.data?.actionEventType || 'change')}
+                                                        onChange={(e) => {
+                                                            const actionEventType = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, actionEventType } } : elem
+                                                            )));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        <option value="change">change</option>
+                                                        <option value="input">input</option>
+                                                        <option value="click">click</option>
+                                                        <option value="focus">focus</option>
+                                                        <option value="blur">blur</option>
+                                                        <option value="keydown">keydown</option>
+                                                        <option value="keyup">keyup</option>
+                                                    </select>
+                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!el.data?.actionUseManualId}
+                                                                onChange={(e) => {
+                                                                    const actionUseManualId = e.target.checked;
+                                                                    setElements(prev => updateElementValueTypes(prev.map(elem =>
+                                                                        elem.id === el.id ? { ...elem, data: { ...elem.data, actionUseManualId } } : elem
+                                                                    )));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                            Manual ID
+                                                        </label>
+                                                    </div>
                                                 </div>
                                             ) : null}
                                         </div>
@@ -7375,7 +8673,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                             handleDelete(el.id);
                                         }}
                                     >
-                                        ? Delete
+                                        Delete
                                     </button>
                                 )}
                             </div>
@@ -7436,4 +8734,3 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 };
 
 export default GraphEditor;
-

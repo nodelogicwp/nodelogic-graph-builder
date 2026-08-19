@@ -19,6 +19,8 @@ export const TREE_DATA = [
             { id: '109', name: 'Case Default', type: 'case-default' },
             { id: '7', name: 'Switch Node', type: 'switch' },
             { id: '8', name: 'If Node', type: 'node' },
+            { id: '215', name: 'If Branch Node', type: 'node-branch' },
+            { id: '216', name: 'Switch Branch Node', type: 'switch-branch' },
         ],
     },
     {
@@ -27,7 +29,6 @@ export const TREE_DATA = [
         type: 'folder',
         children: [
             { id: '10', name: 'Element Node', type: 'element' },
-            { id: '112', name: 'Element ID Node', type: 'element-id' },
             { id: '110', name: 'Element Reference', type: 'element-ref' },
             { id: '111', name: 'Element Property', type: 'element-property' },
             { id: '11', name: 'Number Constant', type: 'number' },
@@ -137,7 +138,6 @@ export const TREE_DATA = [
         type: 'folder',
         children: [
             { id: '62', name: 'Event Element Node', type: 'event-element' },
-            { id: '63', name: 'Event ID Node', type: 'event-id' },
             { id: '64', name: 'Event Processor', type: 'event-processor' },
             { id: '210', name: 'Hover Event', type: 'event-hover' },
             { id: '211', name: 'Scroll Event', type: 'event-scroll' },
@@ -152,7 +152,7 @@ export const TREE_DATA = [
         type: 'folder',
         children: [
             { id: '99', name: 'Action Event Node', type: 'action-event' },
-            { id: '100', name: 'Action Block Node', type: 'action-block' },
+            { id: '100', name: 'Action If Node', type: 'action-if' },
             { id: '101', name: 'Set Required', type: 'action-required' },
             { id: '102', name: 'Set Min', type: 'action-min' },
             { id: '103', name: 'Set Max', type: 'action-max' },

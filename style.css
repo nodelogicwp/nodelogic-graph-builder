@@ -920,8 +920,18 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     border-color: #ef4444;
 }
 
+.canvas-element.type-event-hover,
+.canvas-element.type-event-scroll,
+.canvas-element.type-event-page-load,
+.canvas-element.type-event-timer,
+.canvas-element.type-event-custom {
+    background-color: #7c2d12;
+    border-color: #ea580c;
+}
+
 .canvas-element.type-action-event,
 .canvas-element.type-action-block,
+.canvas-element.type-action-if,
 .canvas-element.type-action-required,
 .canvas-element.type-action-min,
 .canvas-element.type-action-max,
@@ -934,6 +944,23 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     border-color: #c084fc;
 }
 
+.canvas-element.type-action-set-text,
+.canvas-element.type-action-set-html,
+.canvas-element.type-action-set-value,
+.canvas-element.type-action-set-attr,
+.canvas-element.type-action-set-style,
+.canvas-element.type-action-set-visibility,
+.canvas-element.type-action-enable,
+.canvas-element.type-action-disable,
+.canvas-element.type-action-focus,
+.canvas-element.type-action-scroll-to,
+.canvas-element.type-action-notify,
+.canvas-element.type-action-redirect,
+.canvas-element.type-action-trigger-event {
+    background-color: #5b21b6;
+    border-color: #c084fc;
+}
+
 .canvas-element.type-array,
 .canvas-element.type-array-push,
 .canvas-element.type-array-pop,
@@ -942,6 +969,26 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
 .canvas-element.type-array-replace-index {
     background-color: #0f766e;
     border-color: #2dd4bf;
+}
+
+.canvas-element.type-array-map,
+.canvas-element.type-array-filter,
+.canvas-element.type-array-reduce,
+.canvas-element.type-array-find,
+.canvas-element.type-array-for-each,
+.canvas-element.type-array-collect,
+.canvas-element.type-array-contains,
+.canvas-element.type-array-length,
+.canvas-element.type-array-merge,
+.canvas-element.type-array-unique {
+    background-color: #0f766e;
+    border-color: #2dd4bf;
+}
+
+.canvas-element.type-node-branch,
+.canvas-element.type-switch-branch {
+    background-color: #2563eb;
+    border-color: #93c5fd;
 }
 
 .canvas-element.type-image-from-link,

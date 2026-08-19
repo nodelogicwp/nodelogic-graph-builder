@@ -3,7 +3,7 @@
  * Plugin Name: NodeLogic Graph Builder
  * Description: Visual no-code calculator and workflow builder for Gutenberg blocks with conditional logic, dynamic content, and reusable presets.
  * Plugin URI: https://nodelogicwp.com
- * Version: 1.4.3
+ * Version: 1.5.0
  * Author: Volodymyr Diadiunov
  * Author URI: https://nodelogicwp.com
  * License: GPL-2.0-or-later
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('NODELOGIC_VERSION')) {
-    define('NODELOGIC_VERSION', '1.4.3');
+    define('NODELOGIC_VERSION', '1.5.0');
 }
 
 if (!function_exists('nodelogic_graph_builder_block_comment')) {
@@ -385,3 +385,5 @@ add_action('wp_enqueue_scripts', function () {
     );
     
 });
+
+require_once __DIR__ . '/integrations.php';

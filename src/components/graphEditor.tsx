@@ -39,10 +39,12 @@ interface TreeItem {
         | 'constant-string'
         | 'calculation'
         | 'node'
+        | 'node-branch'
         | 'case-range'
         | 'case-value'
         | 'case-default'
         | 'switch'
+        | 'switch-branch'
         | 'condition'
         | 'regex'
         | 'concat'
@@ -91,6 +93,7 @@ interface TreeItem {
         | 'api-list-mapper'
         | 'action-event'
         | 'action-block'
+        | 'action-if'
         | 'action-required'
         | 'action-min'
         | 'action-max'
@@ -151,10 +154,12 @@ interface CanvasElement {
         | 'constant-string'
         | 'calculation'
         | 'node'
+        | 'node-branch'
         | 'case-range'
         | 'case-value'
         | 'case-default'
         | 'switch'
+        | 'switch-branch'
         | 'condition'
         | 'regex'
         | 'concat'
@@ -212,6 +217,7 @@ interface CanvasElement {
         | 'api-list-mapper'
         | 'action-event'
         | 'action-block'
+        | 'action-if'
         | 'action-required'
         | 'action-min'
         | 'action-max'
@@ -422,6 +428,7 @@ interface CanvasElement {
         actionNotifyDuration?: number;
         actionRedirectTarget?: '_self' | '_blank';
         actionEventName?: string;
+        actionIfCondition?: boolean;
         // New event nodes data
         eventTimerInterval?: number;
         eventTimerMode?: 'interval' | 'timeout';
@@ -911,6 +918,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const [savedState, setSavedState] = useState<SavedState | null>(null);
     const [autosaveState, setAutosaveState] = useState<SavedState | null>(null);
+    const autosaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [isStateLoaded, setIsStateLoaded] = useState(false);
     const [runtimeConfigState, setRuntimeConfigState] = useState<NonNullable<GraphEditorRuntimeWindow['nodelogicGraphBuilderConfig']>>({});
 
@@ -1500,6 +1508,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return map;
     }, [connections]);
 
+    const connectionsByTargetElement = React.useMemo(() => {
+        const map = new Map<string, Connection[]>();
+        connections.forEach((connection) => {
+            const current = map.get(connection.toId) || [];
+            current.push(connection);
+            map.set(connection.toId, current);
+        });
+        return map;
+    }, [connections]);
+
     const normalizeArraySchemaItem = (
         field: unknown,
         index: number,
@@ -1705,6 +1723,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (
             element.type === 'action-event'
             || element.type === 'action-block'
+            || element.type === 'action-if'
             || element.type === 'action-required'
             || element.type === 'action-min'
             || element.type === 'action-max'
@@ -1714,7 +1733,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-remove-class'
             || element.type === 'action-toggle-class'
         ) {
-            return ['action'];
+            if (inputIndex === 0) return ['action'];
+            if (element.type === 'action-required') return ['boolean'];
+            if (element.type === 'action-min' || element.type === 'action-max' || element.type === 'action-length') return ['number'];
+            return ['string'];
         }
 
         if (element.type === 'custom-node') {
@@ -1903,6 +1925,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'event-element': [],
             'event-id': [],
             'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
+            'action-required': [['action'], ['boolean']],
+            'action-min': [['action'], ['number']],
+            'action-max': [['action'], ['number']],
+            'action-length': [['action'], ['number'], ['number']],
+            'action-regex': [['action'], ['string']],
+            'action-add-class': [['action'], ['string']],
+            'action-remove-class': [['action'], ['string']],
+            'action-toggle-class': [['action'], ['string']],
             // New action nodes — input0 = action chain, input1 = value
             'action-set-text': [['action'], ['string']],
             'action-set-html': [['action'], ['string']],
@@ -1914,15 +1944,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'action-disable': [['action']],
             'action-focus': [['action']],
             'action-scroll-to': [['action']],
-            'action-notify': [['action']],
-            'action-redirect': [['action']],
-            'action-trigger-event': [['action']],
+            'action-notify': [['action'], ['string']],
+            'action-redirect': [['action'], ['string']],
+            'action-trigger-event': [['action'], ['string']],
+            'action-if': [['action'], ['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
             // New event nodes — no inputs
             'event-hover': [],
             'event-scroll': [],
             'event-page-load': [],
             'event-timer': [],
             'event-custom': [],
+            'node-branch': [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
+            'switch-branch': [['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['case']],
             // New array nodes
             'array-map': [['array'], ['number', 'string', 'boolean', 'color', 'zip']],
             'array-filter': [['array'], ['boolean']],
@@ -1942,6 +1975,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const getInputCount = (element: CanvasElement): number => {
+        const incomingConnections = connectionsByTargetElement.get(element.id) || [];
         if (element.type === 'number') return 0;
         if (element.type === 'constant-boolean') return 0;
         if (element.type === 'constant-string') return 0;
@@ -1975,8 +2009,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'string-to-number') return 1;
         if (element.type === 'number-to-string') return 1;
         if (element.type === 'bool-count') {
-            const connectedInputIndexes = Array.from(new Set(connections
-                .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
+            const connectedInputIndexes = Array.from(new Set(incomingConnections
+                .filter(c => c.toInput.startsWith('input'))
                 .map(c => getInputIndex(c.toInput))
                 .filter(i => !Number.isNaN(i))
             ));
@@ -1994,12 +2028,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
         if (element.type === 'unzip') return 1;
         if (element.type === 'math') return 1;
-        if (element.type === 'case-range') return 3;
-        if (element.type === 'case-value') return 2;
-        if (element.type === 'case-default') return 1;
+        if (element.type === 'case-range') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 2 : 3;
+        if (element.type === 'case-value') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 1 : 2;
+        if (element.type === 'case-default') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 0 : 1;
         if (element.type === 'switch') {
-            const defaultCaseConnection = connections.find((connection) => {
-                if (connection.toId !== element.id || getInputIndex(connection.toInput) <= 0) {
+            const defaultCaseConnection = incomingConnections.find((connection) => {
+                if (getInputIndex(connection.toInput) <= 0) {
                     return false;
                 }
                 return elements.find((candidate) => candidate.id === connection.fromId)?.type === 'case-default';
@@ -2007,8 +2041,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (defaultCaseConnection) {
                 return getInputIndex(defaultCaseConnection.toInput) + 1;
             }
-            const connectedCaseIndexes = Array.from(new Set(connections
-                .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) > 0)
+            const connectedCaseIndexes = Array.from(new Set(incomingConnections
+                .filter(c => c.toInput.startsWith('input') && getInputIndex(c.toInput) > 0)
                 .map(c => getInputIndex(c.toInput))
                 .filter(i => !Number.isNaN(i))
             ));
@@ -2017,7 +2051,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // continue branching without changing a setting first.
             return Math.max(2, highestConnectedIndex + 2);
         }
+        if (element.type === 'switch-branch') {
+            const connectedCaseIndexes = incomingConnections.filter(c => c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 1).map(c => getInputIndex(c.toInput));
+            const highestCaseIndex = connectedCaseIndexes.filter(index => index >= 2).reduce((max, index) => Math.max(max, index), 2);
+            return highestCaseIndex + 1;
+        }
         if (element.type === 'node') return 3;
+        if (element.type === 'node-branch') return 2;
         if (element.type === 'calculation') {
             const connectedInputIndexes = Array.from(new Set(connections
                 .filter(c => c.toId === element.id && c.toInput.startsWith('input'))
@@ -2068,7 +2108,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'css-display') return 0;
         if (element.type === 'css-color') return 1;
         if (element.type === 'css-text') return 0;
-        if (element.type === 'array') return 1;
+        if (element.type === 'array') return 0;
         if (element.type === 'array-push') return 2;
         if (element.type === 'array-pop') return 1;
         if (element.type === 'array-sort') return 1;
@@ -2076,11 +2116,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-replace-index') return 3;
         if (element.type === 'action-event') return 1;
         if (element.type === 'action-block') return 1;
-        if (element.type === 'action-required') return 1;
-        if (element.type === 'action-min' || element.type === 'action-max') return 1;
-        if (element.type === 'action-length') return 1;
-        if (element.type === 'action-regex') return 1;
-        if (element.type === 'action-add-class' || element.type === 'action-remove-class' || element.type === 'action-toggle-class') return 1;
+        if (element.type === 'action-if') return 3;
+        if (element.type === 'action-required') return 2;
+        if (element.type === 'action-min' || element.type === 'action-max') return 2;
+        if (element.type === 'action-length') return 3;
+        if (element.type === 'action-regex') return 2;
+        if (element.type === 'action-add-class' || element.type === 'action-remove-class' || element.type === 'action-toggle-class') return 2;
         // New action nodes — all accept 1 action input + optional value inputs
         if (element.type === 'action-set-text') return 2;      // action + text value
         if (element.type === 'action-set-html') return 2;      // action + html value
@@ -2092,9 +2133,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-disable') return 1;
         if (element.type === 'action-focus') return 1;
         if (element.type === 'action-scroll-to') return 1;
-        if (element.type === 'action-notify') return 1;
-        if (element.type === 'action-redirect') return 1;
-        if (element.type === 'action-trigger-event') return 1;
+        if (element.type === 'action-notify') return 2;
+        if (element.type === 'action-redirect') return 2;
+        if (element.type === 'action-trigger-event') return 2;
         // New event nodes
         if (element.type === 'event-hover') return 0;
         if (element.type === 'event-scroll') return 0;
@@ -2218,7 +2259,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-collect':
             case 'array-merge':
             case 'array-unique':
-                return 1;
+                return element.type === 'array-for-each' ? 2 : 1;
+            case 'node-branch':
+                return 2;
+            case 'switch-branch': {
+                const caseConnections = connections
+                    .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 2)
+                    .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+                return caseConnections.length;
+            }
             case 'array-find':
                 return 2;       // found item + boolean (found/not found)
             case 'array-contains':
@@ -2243,6 +2292,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-event':
             case 'action-block':
                 return 1;
+            case 'action-if':
+                return 2;
             case 'action-required':
             case 'action-min':
             case 'action-max':
@@ -2286,13 +2337,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return 'number';
         }
         if (element.type === 'custom-node' && element.data?.customNodeTypeCarrier) return 'zip';
+        if ((element.type === 'number' || element.type === 'constant-string' || element.type === 'constant-boolean') && element.data?.arrayTypeCarrier) return 'array';
         if (element.type === 'array') return 'array';
         if (element.type === 'array-push' || element.type === 'array-pop' || element.type === 'array-sort' || element.type === 'array-remove-index' || element.type === 'array-replace-index') return 'array';
-        if (element.type === 'array-map' || element.type === 'array-filter' || element.type === 'array-for-each' || element.type === 'array-collect' || element.type === 'array-merge' || element.type === 'array-unique') return 'array';
-        if (element.type === 'array-find') return index === 0 ? 'zip' : 'boolean';
+        if (element.type === 'array-for-each') {
+            const itemType = element.data?.arrayItemType;
+            if (index === 1) return 'number';
+            return itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip' ? itemType : 'number';
+        }
+        if (element.type === 'array-map' || element.type === 'array-filter' || element.type === 'array-collect' || element.type === 'array-merge' || element.type === 'array-unique') return 'array';
+        if (element.type === 'array-find') return index === 0 ? 'array' : 'number';
         if (element.type === 'array-contains') return 'boolean';
         if (element.type === 'array-length') return 'number';
         if (element.type === 'array-reduce') return element.valueType || 'number';
+        if (element.type === 'node-branch') {
+            return element.valueType || 'number';
+        }
+        if (element.type === 'switch-branch') {
+            return element.valueType || 'number';
+        }
         if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom') return 'event';
         if (element.type === 'case-range' || element.type === 'case-value' || element.type === 'case-default') return 'case';
         if (element.type === 'element-ref') return 'element';
@@ -2310,6 +2373,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'chart-data') return 'zip';
         if (element.type === 'action-event'
             || element.type === 'action-block'
+            || element.type === 'action-if'
             || element.type === 'action-required'
             || element.type === 'action-min'
             || element.type === 'action-max'
@@ -2330,7 +2394,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-scroll-to'
             || element.type === 'action-notify'
             || element.type === 'action-redirect'
-            || element.type === 'action-trigger-event') return 'action';
+            || element.type === 'action-trigger-event'
+            || element.type === 'action-if') return 'action';
         if (element.type === 'output') return 'action';
         return element.valueType || 'number';
     };
@@ -2343,6 +2408,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-event') return 168;
         if (element.type === 'action-length') return 168;
         if (element.type === 'action-block') return 118;
+        if (element.type === 'action-if') return 150;
         // event-element / event-id: dropdown/input(32) + event-type(32) + separator + checkbox(20)
         if (element.type === 'event-element') return 168;
         if (element.type === 'event-id') return 168;
@@ -2351,7 +2417,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         // element-ref: dropdown/input(32) + separator + checkbox(20)
         if (element.type === 'element-ref') return 128;
         // element: dropdown/input(32) + separator(8) + checkbox(22) + gaps
-        if (element.type === 'element') return 130;
+        if (element.type === 'element') return 174;
         // element-property: select/input(32) + type badge(16) + separator + checkbox(20)
         if (element.type === 'element-property') return 144;
         if (element.type === 'action-required'
@@ -2378,7 +2444,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-redirect') return 144;
         // New event nodes
         if (element.type === 'event-hover'
-            || element.type === 'event-scroll') return 128;
+            || element.type === 'event-scroll') return 164;
         if (element.type === 'event-page-load') return 90;
         if (element.type === 'event-timer') return 144;
         if (element.type === 'event-custom') return 112;
@@ -2598,6 +2664,32 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const renderInputControl = (element: CanvasElement, index: number): React.ReactNode => {
+        const valuePinConnected = connections.some((connection) => connection.toId === element.id && connection.toInput === `input${index}`);
+        const valuePinNode = element.type === 'action-required'
+            || element.type === 'action-min'
+            || element.type === 'action-max'
+            || element.type === 'action-length'
+            || element.type === 'action-regex'
+            || element.type === 'action-add-class'
+            || element.type === 'action-remove-class'
+            || element.type === 'action-toggle-class'
+            || element.type === 'action-set-text'
+            || element.type === 'action-set-html'
+            || element.type === 'action-set-value'
+            || element.type === 'action-set-attr'
+            || element.type === 'action-set-style'
+            || element.type === 'action-notify'
+            || element.type === 'action-redirect'
+            || element.type === 'action-trigger-event'
+            || element.type === 'action-if';
+            
+        if (element.type === 'action-if' && index === 1 && !valuePinConnected) {
+            return <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={element.data?.actionIfCondition === true} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionIfCondition: e.target.checked } } : elem)))} /> Condition</label>;
+        }
+        if (element.type === 'action-if' && index === 2 && !valuePinConnected) {
+            return <input className="input-control" value={String(element.data?.valueText ?? element.data?.value ?? '')} placeholder="Value" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()} />;
+        }
+        if (valuePinNode && index > 0 && valuePinConnected) return null;
         switch (element.type) {
             case 'output':
                 if (index === 0) {
@@ -2638,6 +2730,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     );
                 }
                 return null;
+            case 'action-set-text':
+            case 'action-set-html':
+            case 'action-set-value':
+            case 'action-set-attr':
+            case 'action-set-style':
+            case 'action-set-visibility':
+            case 'action-enable':
+            case 'action-disable':
+            case 'action-focus':
+            case 'action-scroll-to':
+            case 'action-notify':
+            case 'action-redirect':
+            case 'action-trigger-event': {
+                if (index === 0 && element.type === 'action-set-visibility') return <select className="input-control" value={String(element.data?.actionVisibility || 'toggle')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionVisibility: e.target.value as 'show' | 'hide' | 'toggle' } } : elem)))}><option value="show">Show</option><option value="hide">Hide</option><option value="toggle">Toggle</option></select>;
+                if (index === 0) return null;
+                if (element.type === 'action-set-visibility') return <select className="input-control" value={String(element.data?.actionVisibility || 'toggle')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionVisibility: e.target.value as 'show' | 'hide' | 'toggle' } } : elem)))}><option value="show">Show</option><option value="hide">Hide</option><option value="toggle">Toggle</option></select>;
+                if (element.type === 'action-notify') return <input className="input-control" value={String(element.data?.actionNotifyMessage || '')} placeholder="Notification" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionNotifyMessage: e.target.value } } : elem)))} />;
+                if (element.type === 'action-trigger-event') return <input className="input-control" value={String(element.data?.actionEventName || '')} placeholder="Event name" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionEventName: e.target.value } } : elem)))} />;
+                if (element.type === 'action-redirect') return <input className="input-control" value={String(element.data?.valueText || '')} placeholder="URL" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} />;
+                if (element.type === 'action-set-attr') return <input className="input-control" value={String(element.data?.actionAttrName || '')} placeholder="Attribute name" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionAttrName: e.target.value } } : elem)))} />;
+                if (element.type === 'action-set-style') return <input className="input-control" value={String(element.data?.actionStyleProperty || '')} placeholder="CSS property" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionStyleProperty: e.target.value } } : elem)))} />;
+                return <input className="input-control" value={String(element.data?.valueText ?? element.data?.value ?? '')} placeholder="Value" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} />;
+            }
             case 'action-event':
                 if (index !== 0) return null;
                 return (
@@ -2736,165 +2851,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     </div>
                 );
             case 'action-required':
-                if (index !== 0) return null;
-                return (
-                    <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
-                        <input
-                            type="checkbox"
-                            checked={element.data?.actionRequired !== false}
-                            onChange={(e) => {
-                                const actionRequired = e.target.checked;
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, actionRequired } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                        />
-                        Required
-                    </label>
-                );
+                if (index === 1) return <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={element.data?.actionRequired !== false} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionRequired: e.target.checked } } : elem)))} /> Required</label>;
+                return null;
             case 'action-min':
-                if (index !== 0) return null;
-                return (
-                    <input
-                        type="number"
-                        className="input-control"
-                        value={String(element.data?.actionMin ?? 0)}
-                        onChange={(e) => {
-                            const actionMin = parseFloat(e.target.value) || 0;
-                            setElements((prev) =>
-                                updateElementValueTypes(
-                                    prev.map((elem) =>
-                                        elem.id === element.id
-                                            ? { ...elem, data: { ...elem.data, actionMin } }
-                                            : elem
-                                    )
-                                )
-                            );
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Min"
-                    />
-                );
+                if (index === 1) return <input type="number" className="input-control" value={String(element.data?.actionMin ?? 0)} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionMin: Number(e.target.value) || 0 } } : elem)))} placeholder="Min" onClick={(e) => e.stopPropagation()} />;
+                return null;
             case 'action-max':
-                if (index !== 0) return null;
-                return (
-                    <input
-                        type="number"
-                        className="input-control"
-                        value={String(element.data?.actionMax ?? 100)}
-                        onChange={(e) => {
-                            const actionMax = parseFloat(e.target.value) || 0;
-                            setElements((prev) =>
-                                updateElementValueTypes(
-                                    prev.map((elem) =>
-                                        elem.id === element.id
-                                            ? { ...elem, data: { ...elem.data, actionMax } }
-                                            : elem
-                                    )
-                                )
-                            );
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Max"
-                    />
-                );
+                if (index === 1) return <input type="number" className="input-control" value={String(element.data?.actionMax ?? 100)} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionMax: Number(e.target.value) || 0 } } : elem)))} placeholder="Max" onClick={(e) => e.stopPropagation()} />;
+                return null;
             case 'action-length':
-                if (index !== 0) return null;
-                return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={String(element.data?.actionMinLength ?? 0)}
-                            placeholder="Min length"
-                            onChange={(e) => {
-                                const actionMinLength = parseFloat(e.target.value) || 0;
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, actionMinLength } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                        />
-                        <input
-                            type="number"
-                            className="input-control"
-                            value={String(element.data?.actionMaxLength ?? 0)}
-                            placeholder="Max length"
-                            onChange={(e) => {
-                                const actionMaxLength = parseFloat(e.target.value) || 0;
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? { ...elem, data: { ...elem.data, actionMaxLength } }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                        />
-                    </div>
-                );
+                if (index === 1 || index === 2) return <input type="number" className="input-control" value={String(index === 1 ? (element.data?.actionMinLength ?? 0) : (element.data?.actionMaxLength ?? 0))} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, [index === 1 ? 'actionMinLength' : 'actionMaxLength']: Number(e.target.value) || 0 } } : elem)))} placeholder={index === 1 ? 'Min length' : 'Max length'} onClick={(e) => e.stopPropagation()} />;
+                return null;
             case 'action-regex':
-                if (index !== 0) return null;
-                return (
-                    <input
-                        type="text"
-                        className="input-control"
-                        value={String(element.data?.actionRegexPattern || '')}
-                        placeholder="Pattern"
-                        onChange={(e) => {
-                            const actionRegexPattern = e.target.value;
-                            setElements((prev) =>
-                                updateElementValueTypes(
-                                    prev.map((elem) =>
-                                        elem.id === element.id
-                                            ? { ...elem, data: { ...elem.data, actionRegexPattern } }
-                                            : elem
-                                    )
-                                )
-                            );
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                    />
-                );
+                if (index === 1) return <input type="text" className="input-control" value={String(element.data?.actionRegexPattern || '')} placeholder="Pattern" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionRegexPattern: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()} />;
+                return null;
             case 'action-add-class':
             case 'action-remove-class':
             case 'action-toggle-class':
-                if (index !== 0) return null;
-                return (
-                    <input
-                        type="text"
-                        className="input-control"
-                        value={String(element.data?.actionClassName || '')}
-                        placeholder="CSS class"
-                        onChange={(e) => {
-                            const actionClassName = e.target.value;
-                            setElements((prev) =>
-                                updateElementValueTypes(
-                                    prev.map((elem) =>
-                                        elem.id === element.id
-                                            ? { ...elem, data: { ...elem.data, actionClassName } }
-                                            : elem
-                                    )
-                                )
-                            );
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                    />
-                );
+                if (index === 1) return <input type="text" className="input-control" value={String(element.data?.actionClassName || '')} placeholder="CSS class" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionClassName: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()} />;
+                return null;
             case 'action-block':
                 if (index !== 0) return null;
                 return (
@@ -4000,6 +3975,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 1) return 'True';
                 if (index === 2) return 'False';
                 return '';
+            case 'node-branch':
+                if (index === 0) return 'Condition';
+                return 'Value';
+            case 'switch-branch':
+                if (index === 0) return 'Value';
+                if (index === 1) return 'Compare';
+                return `Case ${index - 2}`;
             case 'css-unit':
                 return 'Number';
             case 'css-margin':
@@ -4078,7 +4060,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-add-class':
             case 'action-remove-class':
             case 'action-toggle-class':
-                return index === 0 ? 'Action' : '';
+                if (index === 0) return 'Action';
+                if (element.type === 'action-if') return index === 1 ? 'Condition' : 'Value';
+                if (element.type === 'action-length') return index === 1 ? 'Min' : 'Max';
+                return 'Value';
             case 'chart-data':
                 return index === 0 ? 'Label' : 'Value';
             case 'element-property':
@@ -4111,7 +4096,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-find':
                 return index === 0 ? 'Array' : 'Value';
             case 'array-for-each':
-                return 'Array';
+                return index === 0 ? 'Array' : 'Index';
             case 'array-collect':
                 return 'Item';
             case 'array-contains':
@@ -4137,6 +4122,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'calculation':
             case 'condition':
                 return 'Result';
+            case 'node-branch':
+                return index === 0 ? 'True' : 'False';
+            case 'switch-branch':
+                {
+                    const caseConnections = connections
+                        .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 2)
+                        .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+                    const source = caseConnections[index] ? elementsById.get(caseConnections[index].fromId) : null;
+                    return source?.type === 'case-default' ? 'Default' : `Case ${caseConnections[index] ? getInputIndex(caseConnections[index].toInput) - 2 : index}`;
+                }
             case 'element-id':
             case 'memory-read-number':
             case 'memory-read-string':
@@ -4177,13 +4172,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // New array nodes
             case 'array-map':
             case 'array-filter':
-            case 'array-for-each':
             case 'array-collect':
             case 'array-merge':
             case 'array-unique':
                 return 'Array';
+            case 'array-for-each':
+                return index === 0 ? 'Item' : 'Index';
             case 'array-find':
-                return index === 0 ? 'Item' : 'Found';
+                return index === 0 ? 'Indexes' : 'Count';
             case 'array-contains':
                 return 'Result';
             case 'array-length':
@@ -4263,6 +4259,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Array';
             case 'output':
                 return 'Action';
+            case 'action-if':
+                return index === 0 ? 'True' : 'False';
             case 'action-event':
             case 'action-block':
             case 'action-required':
@@ -4466,6 +4464,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             switch (element.type) {
                 case 'action-block':
                     return childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : null;
+                case 'action-if': {
+                    const falseChildExpressions = getOutgoingConnections(element.id, 'output1')
+                        .map((connection) => elementMap.get(connection.toId))
+                        .filter((child): child is CanvasElement => Boolean(child))
+                        .map((child) => buildActionPlanExpression(child, currentDepth + 1))
+                        .filter((entry): entry is string => Boolean(entry));
+                    return `({ type: "actionIf", condition: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionIfCondition ? 'true' : 'false')}, value: ${getConnectedExpression(element.id, 'input2') || serializeGraphFormulaLiteral(element.data?.valueText ?? element.data?.value ?? '')}, trueActions: [${childExpressions.join(', ')}], falseActions: [${falseChildExpressions.join(', ')}] })`;
+                }
                 case 'action-event': {
                     const sourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
                     if (!sourceId) {
@@ -4475,24 +4481,69 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `({ type: "event", sourceId: ${serializeGraphFormulaLiteral(sourceId)}, eventType: ${serializeGraphFormulaLiteral(eventType)}, actions: ${childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : '[]'} })`;
                 }
                 case 'action-required':
-                    return `({ type: "required", value: ${element.data?.actionRequired !== false ? 'true' : 'false'} })`;
+                    return `({ type: "required", value: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionRequired !== false ? 'true' : 'false')} })`;
                 case 'action-min':
-                    return `({ type: "min", value: ${serializeGraphFormulaLiteral(Number(element.data?.actionMin ?? 0))} })`;
+                    return `({ type: "min", value: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(Number(element.data?.actionMin ?? 0))} })`;
                 case 'action-max':
-                    return `({ type: "max", value: ${serializeGraphFormulaLiteral(Number(element.data?.actionMax ?? 100))} })`;
+                    return `({ type: "max", value: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(Number(element.data?.actionMax ?? 100))} })`;
                 case 'action-length':
-                    return `({ type: "length", min: ${serializeGraphFormulaLiteral(Number(element.data?.actionMinLength ?? 0))}, max: ${serializeGraphFormulaLiteral(Number(element.data?.actionMaxLength ?? 0))} })`;
+                    return `({ type: "length", min: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(Number(element.data?.actionMinLength ?? 0))}, max: ${getConnectedExpression(element.id, 'input2') || serializeGraphFormulaLiteral(Number(element.data?.actionMaxLength ?? 0))} })`;
                 case 'action-regex':
-                    return `({ type: "regex", pattern: ${serializeGraphFormulaLiteral(String(element.data?.actionRegexPattern || ''))} })`;
+                    return `({ type: "regex", pattern: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionRegexPattern || ''))} })`;
                 case 'action-add-class':
-                    return `({ type: "addClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                    return `({ type: "addClass", className: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
                 case 'action-remove-class':
-                    return `({ type: "removeClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                    return `({ type: "removeClass", className: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
                 case 'action-toggle-class':
-                    return `({ type: "toggleClass", className: ${serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                    return `({ type: "toggleClass", className: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionClassName || ''))} })`;
+                case 'action-set-text':
+                case 'action-set-html':
+                case 'action-set-value':
+                case 'action-set-attr':
+                case 'action-set-style':
+                case 'action-set-visibility':
+                case 'action-enable':
+                case 'action-disable':
+                case 'action-focus':
+                case 'action-scroll-to':
+                case 'action-notify':
+                case 'action-redirect':
+                case 'action-trigger-event': {
+                    const valueExpression = getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(element.data?.valueText ?? element.data?.value ?? '');
+                    switch (element.type) {
+                        case 'action-set-text': return `({ type: "setText", value: ${valueExpression} })`;
+                        case 'action-set-html': return `({ type: "setHtml", value: ${valueExpression} })`;
+                        case 'action-set-value': return `({ type: "setValue", value: ${valueExpression} })`;
+                        case 'action-set-attr': return `({ type: "setAttribute", name: ${serializeGraphFormulaLiteral(String(element.data?.actionAttrName || ''))}, value: ${valueExpression} })`;
+                        case 'action-set-style': return `({ type: "setStyle", property: ${serializeGraphFormulaLiteral(String(element.data?.actionStyleProperty || ''))}, value: ${valueExpression} })`;
+                        case 'action-set-visibility': return `({ type: "visibility", mode: ${serializeGraphFormulaLiteral(element.data?.actionVisibility || 'toggle')} })`;
+                        case 'action-enable': return `({ type: "enable" })`;
+                        case 'action-disable': return `({ type: "disable" })`;
+                        case 'action-focus': return `({ type: "focus" })`;
+                        case 'action-scroll-to': return `({ type: "scrollTo" })`;
+                        case 'action-notify': return `({ type: "notify", message: ${serializeGraphFormulaLiteral(String(element.data?.actionNotifyMessage || ''))}, duration: ${serializeGraphFormulaLiteral(Number(element.data?.actionNotifyDuration || 3000))} })`;
+                        case 'action-redirect': return `({ type: "redirect", target: ${serializeGraphFormulaLiteral(element.data?.actionRedirectTarget || '_self')}, url: ${valueExpression} })`;
+                        case 'action-trigger-event': return `({ type: "triggerEvent", name: ${serializeGraphFormulaLiteral(String(element.data?.actionEventName || ''))} })`;
+                        default: return null;
+                    }
+                }
                 default:
                     return null;
             }
+        };
+        let buildingLoopBody = false;
+        const findLoopStart = (elementId: string, visited = new Set<string>()): CanvasElement | null => {
+            if (visited.has(elementId)) return null;
+            visited.add(elementId);
+            const incoming = allConnections.filter((connection) => connection.toId === elementId);
+            for (const connection of incoming) {
+                const source = elementMap.get(connection.fromId);
+                if (!source) continue;
+                if (source.type === 'array-for-each') return source;
+                const loopStart = findLoopStart(source.id, visited);
+                if (loopStart) return loopStart;
+            }
+            return null;
         };
         const connectedInputExpressionFor = (
             targetElement: CanvasElement,
@@ -4530,12 +4581,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'number': {
                     const value = element.data?.valueText ?? element.data?.value ?? 0;
                     const parsed = Number(String(value).replace(',', '.'));
-                    return Number.isFinite(parsed) ? String(parsed) : '0';
+                    return element.data?.arrayTypeCarrier
+                        ? `[${Number.isFinite(parsed) ? String(parsed) : '0'}]`
+                        : Number.isFinite(parsed) ? String(parsed) : '0';
                 }
                 case 'constant-boolean':
-                    return Boolean(element.data?.value) ? 'true' : 'false';
+                    return element.data?.arrayTypeCarrier
+                        ? `[${Boolean(element.data?.value) ? 'true' : 'false'}]`
+                        : Boolean(element.data?.value) ? 'true' : 'false';
                 case 'constant-string':
-                    return serializeGraphFormulaLiteral(String(element.data?.value ?? ''));
+                    return element.data?.arrayTypeCarrier
+                        ? `[${serializeGraphFormulaLiteral(String(element.data?.value ?? ''))}]`
+                        : serializeGraphFormulaLiteral(String(element.data?.value ?? ''));
                 case 'color':
                     return serializeGraphFormulaLiteral(String(element.data?.colorValue || '#2563eb'));
                 case 'element': {
@@ -4543,7 +4600,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const selectedElement = useManual
                         ? String(element.data?.customElementId || '').trim()
                         : String(element.data?.selectedElement || '').trim();
-                    return selectedElement ? `[${selectedElement}]` : '0';
+                    const eventType = String(element.data?.eventType || '').trim();
+                    return selectedElement && eventType
+                        ? `__nodeEvent(${serializeGraphFormulaLiteral(selectedElement)}, ${serializeGraphFormulaLiteral(eventType)})`
+                        : selectedElement ? `[${selectedElement}]` : '0';
                 }
                 case 'element-id':
                     return serializeGraphFormulaLiteral(String(element.data?.elementId || ''));
@@ -4584,6 +4644,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
                         : 'null';
                 }
+                case 'event-hover': {
+                    const targetId = String(element.data?.eventUseManualId ? (element.data?.eventId || '') : (element.data?.eventElement || element.data?.selectedElement || '')).trim();
+                    return targetId ? `__nodeHoverEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(element.data?.eventHoverMode || 'enter')})` : 'null';
+                }
+                case 'event-scroll': {
+                    const targetId = String(element.data?.eventUseManualId ? (element.data?.eventId || '') : (element.data?.eventElement || element.data?.selectedElement || '')).trim();
+                    return targetId ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, "scroll")` : 'null';
+                }
+                case 'event-page-load': return '__nodePageLoadEvent()';
+                case 'event-timer': return `__nodeTimerEvent(${serializeGraphFormulaLiteral(Number(element.data?.eventTimerInterval || 1000))}, ${serializeGraphFormulaLiteral(element.data?.eventTimerMode || 'interval')})`;
+                case 'event-custom': return `__nodeCustomEvent(${serializeGraphFormulaLiteral(String(element.data?.eventCustomName || ''))})`;
                 case 'fallback':
                     return `__nodeFallback(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
                 case 'concat':
@@ -4643,11 +4714,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const operation = allowedOperations.has(requestedOperation) ? requestedOperation : '===';
                     return `(${connectedInputExpression(0)} ${operation} ${connectedInputExpression(1)})`;
                 }
+                case 'regex':
+                    return `__nodeRegex(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(String(element.data?.regexPattern || ''))})`;
                 case 'node': {
                     const condition = connectedInputExpression(0, true);
                     const whenTrue = getConnectedExpression(element.id, 'input1') || 'undefined';
                     const whenFalse = getConnectedExpression(element.id, 'input2') || 'undefined';
                     return `((${condition}) ? (${whenTrue}) : (${whenFalse}))`;
+                }
+                case 'node-branch': {
+                    const condition = connectedInputExpression(0, false);
+                    const value = connectedInputExpression(1, undefined);
+                    return `((${condition}) ? (${outputIndex === 0 ? value : 'undefined'}) : (${outputIndex === 1 ? value : 'undefined'}))`;
                 }
                 case 'case-value':
                     return connectedInputExpression(1, element.data?.out ?? 0);
@@ -4700,6 +4778,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         ultimateFallback
                     );
                 }
+                case 'switch-branch': {
+                    const branchValue = connectedInputExpression(0, undefined);
+                    const compareValue = connectedInputExpression(1, undefined);
+                    const cases = allConnections
+                        .filter(connection => connection.toId === element.id && getInputIndex(connection.toInput) > 0)
+                        .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+                    const selected = cases[outputIndex];
+                    if (!selected) return 'undefined';
+                    const caseElement = elementMap.get(selected.fromId);
+                    if (!caseElement) return 'undefined';
+                    const caseValue = caseElement.type === 'case-default'
+                        ? 'true'
+                        : caseElement.type === 'case-range'
+                        ? `(${compareValue} >= Math.min(${connectedInputExpressionFor(caseElement, 0, 0)}, ${connectedInputExpressionFor(caseElement, 1, 0)}) && ${compareValue} <= Math.max(${connectedInputExpressionFor(caseElement, 0, 0)}, ${connectedInputExpressionFor(caseElement, 1, 0)}))`
+                        : `__nodeCaseEquals(${compareValue}, ${connectedInputExpressionFor(caseElement, 0, caseElement.data?.caseValue ?? 0)})`;
+                    return `((${caseValue}) ? (${branchValue}) : undefined)`;
+                }
                 case 'array': {
                     return '[]';
                 }
@@ -4713,6 +4808,47 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `__nodeArrayRemove(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
                 case 'array-replace-index':
                     return `__nodeArrayReplace(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                case 'array-map': {
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    const mappedExpression = connectedInputExpression(1);
+                    buildingLoopBody = previousLoopMode;
+                    return `__nodeArrayMapGraph(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(mappedExpression)})`;
+                }
+                case 'array-filter': {
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    const predicateExpression = connectedInputExpression(1);
+                    buildingLoopBody = previousLoopMode;
+                    return `__nodeArrayFilterGraph(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(predicateExpression)})`;
+                }
+                case 'array-reduce': return `__nodeArrayReduce(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(element.data?.arrayReduceOperation || 'sum')}, ${serializeGraphFormulaLiteral(element.data?.arrayReduceInitial || '0')})`;
+                case 'array-find': return `__nodeUnzip(__nodeArrayFind(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(element.data?.arraySearchField || '')}), ${outputIndex})`;
+                case 'array-for-each':
+                    if (buildingLoopBody) return outputIndex === 1 ? '__nodeLoopIndex' : '__nodeLoopItem';
+                    return `__nodeArrayForEach(${connectedInputExpression(0)})`;
+                case 'array-collect': {
+                    const sourceConnection = getConnectionForInput(element.id, 'input0');
+                    const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                    const loopStart = sourceElement?.type === 'array-for-each'
+                        ? sourceElement
+                        : sourceElement
+                            ? findLoopStart(sourceElement.id)
+                            : null;
+                    if (!loopStart || !sourceElement) return `__nodeArrayCollect(${connectedInputExpression(0)})`;
+
+                    const arrayExpression = connectedInputExpressionFor(loopStart, 0, []);
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    const sourceOutputIndex = Number.parseInt(String(sourceConnection?.fromOutput || '').replace(/^output/i, ''), 10);
+                    const bodyExpression = buildNodeExpression(sourceElement, Number.isFinite(sourceOutputIndex) ? sourceOutputIndex : 0, currentDepth + 1);
+                    buildingLoopBody = previousLoopMode;
+                    return `__nodeArrayMapGraph(${arrayExpression}, ${serializeGraphFormulaLiteral(bodyExpression)})`;
+                }
+                case 'array-contains': return `__nodeArrayContains(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'array-length': return `__nodeArrayLength(${connectedInputExpression(0)})`;
+                case 'array-merge': return `__nodeArrayMerge(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(element.data?.arrayMergeMode || 'concat')})`;
+                case 'array-unique': return `__nodeArrayUnique(${connectedInputExpression(0)})`;
                 case 'image-from-link':
                     return `__nodeImageFromLink(${connectedInputExpression(0)})`;
                 case 'image-from-element':
@@ -4745,6 +4881,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `({ label: ${connectedInputExpression(0, element.data?.chartDataLabel ?? '')}, value: ${connectedInputExpression(1, element.data?.chartDataValue ?? 0)} })`;
                 case 'action-event':
                 case 'action-block':
+                case 'action-if':
                 case 'action-required':
                 case 'action-min':
                 case 'action-max':
@@ -4926,6 +5063,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         const selectedElement = detectedElementsRef.current.find((detected) => detected.id === el.data?.selectedElement);
                         valueType = selectedElement?.outputs?.[0]?.type || 'number';
                     }
+                    break;
+                }
+                case 'node-branch': {
+                    valueType = getConnectedType(el.id, 'input1') || getConnectedType(el.id, 'input2') || el.valueType || 'number';
+                    break;
+                }
+                case 'switch-branch': {
+                    valueType = getConnectedType(el.id, 'input0') || el.valueType || 'number';
                     break;
                 }
                 case 'calculation':
@@ -5126,7 +5271,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'array-replace-index':
                 case 'array-map':
                 case 'array-filter':
-                case 'array-for-each':
                 case 'array-collect':
                 case 'array-merge':
                 case 'array-unique':
@@ -5154,6 +5298,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         }
                     }
                     break;
+                case 'array-for-each': {
+                    const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
+                    const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                    const itemType = sourceElement?.data?.arrayItemType || el.data?.arrayItemType;
+                    valueType = itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip' ? itemType : 'number';
+                    break;
+                }
                 case 'image-from-link':
                 case 'image-from-element':
                     valueType = 'string';
@@ -5230,6 +5381,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 case 'action-event':
                 case 'action-block':
+                case 'action-if':
                 case 'action-required':
                 case 'action-min':
                 case 'action-max':
@@ -5276,7 +5428,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return {
                 ...el,
                 valueType,
-                ...(nextData ? { data: { ...el.data, ...nextData } } : {})
+                data: {
+                    ...el.data,
+                    ...(nextData || {}),
+                    arrayTypeCarrier: undefined,
+                }
             };
         });
     };
@@ -5770,13 +5926,31 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     useEffect(() => {
         if (!isStateLoaded || templateMode || customNodeMode || !unsavedChanges) {
+            if (autosaveTimeoutRef.current) {
+                clearTimeout(autosaveTimeoutRef.current);
+                autosaveTimeoutRef.current = null;
+            }
             return;
         }
 
-        const snapshot = buildSavedState();
-        setAutosaveState(snapshot);
-        persistAutosaveSnapshot(snapshot);
-    }, [connections, customNodeMode, elements, formula, isStateLoaded, persistAutosaveSnapshot, templateMode, customNodeUi, unsavedChanges]);
+        // Debounce autosave to at most once per 5 seconds to reduce performance impact
+        if (autosaveTimeoutRef.current) {
+            clearTimeout(autosaveTimeoutRef.current);
+        }
+        
+        autosaveTimeoutRef.current = setTimeout(() => {
+            const snapshot = buildSavedState();
+            setAutosaveState(snapshot);
+            persistAutosaveSnapshot(snapshot);
+            autosaveTimeoutRef.current = null;
+        }, 5000);
+        
+        return () => {
+            if (autosaveTimeoutRef.current) {
+                clearTimeout(autosaveTimeoutRef.current);
+            }
+        };
+    }, [connections, customNodeMode, elements, isStateLoaded, persistAutosaveSnapshot, templateMode, customNodeUi, unsavedChanges]);
 
     useLayoutEffect(() => {
         const rafId = window.requestAnimationFrame(() => {
@@ -5794,7 +5968,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return;
                 }
 
-                const nodeEl = document.querySelector(`.canvas-element[data-element-id="${node.id}"]`) as HTMLElement | null;
+                const nodeEl = canvasRef.current?.querySelector(`.canvas-element[data-element-id="${node.id}"]`) as HTMLElement | null;
                 if (!nodeEl) {
                     return;
                 }
@@ -6103,6 +6277,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { actionTargetManualId: '', actionRedirectTarget: '_self' as const };
             case 'action-trigger-event':
                 return { actionTargetId: '', actionTargetUseManual: false, actionTargetManualId: '', actionEventName: '' };
+            case 'action-if':
+                return { actionIfCondition: false, valueText: '' };
             // New event nodes
             case 'event-hover':
                 return { selectedElement: '', elementUseManualId: false, customElementId: '', eventHoverMode: 'enter' as const };
@@ -6305,7 +6481,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
         if (connectionInProgressRef.current) {
             const connectionState = connectionInProgressRef.current;
-            const pointerTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+            const pointerTarget = canvasRef.current?.ownerDocument.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
             const targetPinEl = pointerTarget?.closest('.pin') as HTMLElement | null;
             const targetElementId = targetPinEl?.dataset?.elementId || '';
             const targetPinId = targetPinEl?.dataset?.pinId || '';
@@ -6539,14 +6715,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
                                 <button
                                     onClick={handleUndo}
-                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: '#334155' }}
+                                    disabled={undoStackRef.current.length === 0}
+                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: undoStackRef.current.length === 0 ? '#1e293b' : '#334155', color: undoStackRef.current.length === 0 ? '#64748b' : '#f8fafc', cursor: undoStackRef.current.length === 0 ? 'not-allowed' : 'pointer', opacity: undoStackRef.current.length === 0 ? 0.7 : 1 }}
                                     title="Undo (Ctrl+Z)"
                                 >
                                     ↩ Undo
                                 </button>
                                 <button
                                     onClick={handleRedo}
-                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: '#334155' }}
+                                    disabled={redoStackRef.current.length === 0}
+                                    style={{ ...buttonStyle, marginTop: 0, flex: 1, backgroundColor: redoStackRef.current.length === 0 ? '#1e293b' : '#334155', color: redoStackRef.current.length === 0 ? '#64748b' : '#f8fafc', cursor: redoStackRef.current.length === 0 ? 'not-allowed' : 'pointer', opacity: redoStackRef.current.length === 0 ? 0.7 : 1 }}
                                     title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
                                 >
                                     ↪ Redo
@@ -6719,7 +6897,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 ? [...selEl.data.zipOutputLabels]
                                                 : [];
                                             return (
-                                                <div>
+                                                        <div>
                                                     <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Output Labels</div>
                                                     {outputConns.map((conn, i) => {
                                                         const idx = parseInt(conn.toInput.replace('input', ''), 10);
@@ -6750,30 +6928,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             );
                                         })()}
-
-                                        {isArrayCarrierConstant && (
-                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={!!selEl.data?.arrayTypeCarrier}
-                                                    onChange={(e) => {
-                                                        const arrayTypeCarrier = e.target.checked;
-                                                        setElements(prev =>
-                                                            updateElementValueTypes(
-                                                                prev.map(elem =>
-                                                                    elem.id === selected
-                                                                        ? { ...elem, data: { ...elem.data, arrayTypeCarrier } }
-                                                                        : elem
-                                                                ),
-                                                                connectionsRef.current
-                                                            )
-                                                        );
-                                                    }}
-                                                    style={{ cursor: 'pointer' }}
-                                                />
-                                                Array type carrier
-                                            </label>
-                                        )}
 
                                         {selEl.type === 'chart-data' && (
                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }}>
@@ -7196,6 +7350,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'math'
                             || el.type === 'event-element'
                             || el.type === 'event-id'
+                            || el.type === 'event-hover'
+                            || el.type === 'event-scroll'
+                            || el.type === 'event-page-load'
+                            || el.type === 'event-timer'
+                            || el.type === 'event-custom'
                             || el.type === 'action-event'
                             || el.type === 'string-split'
                             || el.type === 'string-replace'
@@ -7359,7 +7518,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                         )}
                                         
                                         <div className="inputs-column-special">
-                                            {el.type === 'condition' ? (
+                                            {el.type === 'array' ? (
+                                                <select
+                                                    className="input-control"
+                                                    value={String(el.data?.arrayItemType || 'number')}
+                                                    onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, arrayItemType: e.target.value as ArrayItemType } } : elem)))}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                >
+                                                    <option value="number">Number</option>
+                                                    <option value="string">String</option>
+                                                    <option value="boolean">Boolean</option>
+                                                    <option value="color">Color</option>
+                                                    <option value="zip">Object</option>
+                                                </select>
+                                            ) : el.type === 'condition' ? (
                                                 <div className="input-row-special">
                                                     <select
                                                         className="input-control"
@@ -7515,6 +7687,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         return <div style={{ minHeight: '32px' }} />;
                                                     }
                                                     return (
+                                                        <div>
                                                         <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
                                                             <input
                                                                 type="checkbox"
@@ -7535,6 +7708,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             />
                                                             True / False
                                                         </label>
+                                                        </div>
                                                     );
                                                 })()
                                             ) : el.type === 'constant-string' ? (
@@ -7692,6 +7866,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
+                                                    <div style={{ marginTop: '6px', paddingTop: '6px', paddingBottom: '4px', borderTop: '1px solid rgba(255,255,255,0.28)' }}>
                                                     <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
                                                         <input
                                                             type="checkbox"
@@ -7707,6 +7882,41 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         />
                                                         Manual ID
                                                     </label>
+                                                    </div>
+                                                </div>
+                                            ) : el.type === 'event-hover' || el.type === 'event-scroll' || el.type === 'event-page-load' || el.type === 'event-timer' || el.type === 'event-custom' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    {(el.type === 'event-hover' || el.type === 'event-scroll') && (
+                                                        <>
+                                                            {el.data?.eventUseManualId ? (
+                                                                <input className="input-control" value={String(el.data?.eventId || '')} placeholder="Target ID" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventId: e.target.value } } : elem)))} />
+                                                            ) : (
+                                                                <select className="input-control" value={String(el.data?.selectedElement || '')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, selectedElement: e.target.value } } : elem)))}>
+                                                                    <option value="">-- Target element --</option>
+                                                                    {detectedElements.map(d => <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>)}
+                                                                </select>
+                                                            )}
+                                                            {el.type === 'event-hover' && (
+                                                                <select className="input-control" value={String(el.data?.eventHoverMode || 'enter')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventHoverMode: e.target.value as 'enter' | 'leave' | 'both' } } : elem)))}>
+                                                                    <option value="enter">Mouse enter</option><option value="leave">Mouse leave</option><option value="both">Both</option>
+                                                                </select>
+                                                            )}
+                                                            <div style={{ marginTop: '6px', paddingTop: '6px', paddingBottom: '4px', borderTop: '1px solid rgba(255,255,255,0.28)' }}>
+                                                                <label className="reverse-toggle">
+                                                                    <input type="checkbox" checked={!!el.data?.eventUseManualId} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId: e.target.checked } } : elem)))} />
+                                                                    Manual target ID
+                                                                </label>
+                                                            </div>
+                                                        </>
+                                                    )}
+                                                    {el.type === 'event-timer' && (
+                                                        <>
+                                                            <input className="input-control" type="number" min="50" value={String(el.data?.eventTimerInterval || 1000)} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventTimerInterval: Number(e.target.value) || 1000 } } : elem)))} placeholder="Interval (ms)" />
+                                                            <select className="input-control" value={String(el.data?.eventTimerMode || 'interval')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventTimerMode: e.target.value as 'interval' | 'timeout' } } : elem)))}><option value="interval">Interval</option><option value="timeout">Timeout</option></select>
+                                                        </>
+                                                    )}
+                                                    {el.type === 'event-custom' && <input className="input-control" type="text" value={String(el.data?.eventCustomName || '')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventCustomName: e.target.value } } : elem)))} placeholder="Custom event name" />}
+                                                    {el.type === 'event-page-load' && <div className="input-control" style={{ padding: '8px' }}>Runs on page load</div>}
                                                 </div>
                                             ) : el.type === 'element-property' ? (
                                                 (() => {
@@ -7857,7 +8067,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
-                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                    <div style={{ marginTop: '8px', paddingTop: '8px', paddingBottom: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', minHeight: '26px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
                                                                 type="checkbox"
@@ -7928,7 +8138,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
-                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                    <div style={{ marginTop: '8px', paddingTop: '8px', paddingBottom: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', minHeight: '26px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
                                                                 type="checkbox"
@@ -7999,7 +8209,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
-                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                    <select className="input-control" value={String(el.data?.eventType || 'click')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventType: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()}>
+                                                            <option value="click">Click</option><option value="change">Change</option><option value="input">Input</option><option value="focus">Focus</option><option value="blur">Blur</option><option value="mouseenter">Hover enter</option><option value="scroll">Scroll</option>
+                                                    </select>
+                                                    <div style={{ marginTop: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', paddingTop: '6px', paddingBottom: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
                                                                 type="checkbox"

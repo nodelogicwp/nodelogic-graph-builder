@@ -33,6 +33,7 @@
 
   let recalculationQueued = false;
   let isFirstExecution = true;
+  const formulaEvaluationCache = new Map();
   const API_REQUEST_CACHE_TTL = 5000;
   const apiRequestCache = new Map();
 
@@ -193,6 +194,20 @@
       "__nodeArraySort",
       "__nodeArrayRemove",
       "__nodeArrayReplace",
+      "__nodeArrayMap",
+      "__nodeArrayFilter",
+      "__nodeArrayReduce",
+      "__nodeArrayFind",
+      "__nodeArrayForEach",
+      "__nodeArrayCollect",
+      "__nodeArrayContains",
+      "__nodeArrayLength",
+      "__nodeArrayMerge",
+      "__nodeArrayUnique",
+      "__nodeArrayMapGraph",
+      "__nodeArrayFilterGraph",
+      "__nodeLoopItem",
+      "__nodeLoopIndex",
       "__nodeApiRequest",
       "__nodeApiListMapper",
       "__nodeImageFromLink",
@@ -205,6 +220,10 @@
       "__nodeMemoryGet",
       "__nodeMemorySet",
       "__nodeEvent",
+      "__nodeHoverEvent",
+      "__nodePageLoadEvent",
+      "__nodeTimerEvent",
+      "__nodeCustomEvent",
       "__nodeEventProcessor",
       "__nodeFallback",
       "value",
@@ -618,6 +637,98 @@
     if (index < 0 || index >= list.length) return list;
     list[index] = nextValue;
     return list;
+  }
+
+  function __nodeArrayMap(arrayValue, mappedValue) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    return list.map((item) => mappedValue === undefined ? item : mappedValue);
+  }
+
+  function __nodeArrayFilter(arrayValue, condition) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    return condition === undefined ? list.slice() : (condition ? list.slice() : []);
+  }
+
+  function __nodeArrayReduce(arrayValue, operation, initialValue) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const op = toSafeString(operation).trim() || "sum";
+    let result = initialValue;
+    if (op === "count") return list.length;
+    if (op === "concat") return list.reduce((acc, item) => `${acc}${item ?? ""}`, initialValue ?? "");
+    if (op === "product" && (result === undefined || result === null || result === "")) result = 1;
+    if ((op === "sum" || op === "min" || op === "max") && (result === undefined || result === null || result === "")) result = op === "min" ? Infinity : op === "max" ? -Infinity : 0;
+    return list.reduce((acc, item) => {
+      const value = Number(item);
+      if (op === "product") return Number(acc) * (Number.isFinite(value) ? value : 0);
+      if (op === "min") return Math.min(Number(acc), value);
+      if (op === "max") return Math.max(Number(acc), value);
+      return Number(acc) + (Number.isFinite(value) ? value : 0);
+    }, result);
+  }
+
+  function __nodeArrayFind(arrayValue, searchValue, fieldPath) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const indexes = list.reduce((matches, item, index) => {
+      const candidate = fieldPath ? __nodeGetPath(item, fieldPath, undefined) : item;
+      if (__nodeCaseEquals(candidate, searchValue)) matches.push(index);
+      return matches;
+    }, []);
+    return [indexes, indexes.length];
+  }
+
+  function __nodeArrayForEach(arrayValue) {
+    return Array.isArray(arrayValue) ? arrayValue.slice() : [];
+  }
+
+  function __nodeArrayCollect(itemValue) {
+    return [itemValue];
+  }
+
+  function __nodeArrayContains(arrayValue, searchValue) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    return list.some((item) => __nodeCaseEquals(item, searchValue));
+  }
+
+  function __nodeArrayLength(arrayValue) {
+    return Array.isArray(arrayValue) ? arrayValue.length : 0;
+  }
+
+  function __nodeArrayMerge(firstValue, secondValue, mode) {
+    const first = Array.isArray(firstValue) ? firstValue : [];
+    const second = Array.isArray(secondValue) ? secondValue : [];
+    const merged = first.concat(second);
+    return toSafeString(mode).trim() === "union" ? __nodeArrayUnique(merged) : merged;
+  }
+
+  function __nodeArrayUnique(arrayValue) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const seen = new Set();
+    return list.filter((item) => {
+      const key = typeof item === "object" ? JSON.stringify(item) : `${typeof item}:${String(item)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function __nodeArrayMapGraph(arrayValue, bodyExpression) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const expression = toSafeString(bodyExpression).trim();
+    if (!expression) return list.slice();
+    return list.map((item, index) => {
+      const result = safeEvaluateExpression(expression, { __nodeLoopItem: item, __nodeLoopIndex: index });
+      return result.valid ? result.value : undefined;
+    });
+  }
+
+  function __nodeArrayFilterGraph(arrayValue, predicateExpression) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const expression = toSafeString(predicateExpression).trim();
+    if (!expression) return list.slice();
+    return list.filter((item, index) => {
+      const result = safeEvaluateExpression(expression, { __nodeLoopItem: item, __nodeLoopIndex: index });
+      return result.valid && Boolean(result.value);
+    });
   }
 
   function tryParseJsonValue(value) {
@@ -1097,6 +1208,55 @@
     return window.eventStore[key];
   }
 
+  function __nodeHoverEvent(elementId, mode) {
+    if (mode === "both") {
+      const enter = __nodeEvent(elementId, "mouseenter");
+      const leave = __nodeEvent(elementId, "mouseleave");
+      if (!enter || !leave) return null;
+      return { eventKey: `${enter.eventKey}_both`, triggeredCount: enter.triggeredCount + leave.triggeredCount };
+    }
+    return __nodeEvent(elementId, mode === "leave" ? "mouseleave" : "mouseenter");
+  }
+
+  function __nodePageLoadEvent() {
+    const key = "__page_load__";
+    if (!window.eventStore[key]) {
+      window.eventStore[key] = { eventKey: key, triggeredCount: 1, lastTriggeredAt: Date.now() };
+    }
+    return window.eventStore[key];
+  }
+
+  function __nodeTimerEvent(interval, mode) {
+    const safeInterval = Math.max(50, Number(interval) || 1000);
+    const key = `__timer_${safeInterval}_${toSafeString(mode).trim() || "interval"}`;
+    if (!window.eventStore[key]) {
+      window.eventStore[key] = { eventKey: key, triggeredCount: 0 };
+      const trigger = () => {
+        window.eventStore[key].triggeredCount++;
+        window.eventStore[key].lastTriggeredAt = Date.now();
+        scheduleRecalculation();
+      };
+      if (toSafeString(mode).trim() === "timeout") window.setTimeout(trigger, safeInterval);
+      else window.setInterval(trigger, safeInterval);
+    }
+    return window.eventStore[key];
+  }
+
+  function __nodeCustomEvent(name) {
+    const eventName = toSafeString(name).trim();
+    if (!eventName) return null;
+    const key = `__custom_${eventName}`;
+    if (!window.eventStore[key]) {
+      window.eventStore[key] = { eventKey: key, triggeredCount: 0 };
+      window.addEventListener(eventName, () => {
+        window.eventStore[key].triggeredCount++;
+        window.eventStore[key].lastTriggeredAt = Date.now();
+        scheduleRecalculation();
+      });
+    }
+    return window.eventStore[key];
+  }
+
   // Track which events have been consumed in current evaluation cycle
   window.eventProcessorConsumed = window.eventProcessorConsumed || {};
   // Track if we're currently in an active event flow
@@ -1184,12 +1344,14 @@
     const actionType = toSafeString(actionNode.type || actionNode.kind || "").trim();
     if (!actionType || actionType === "event" || actionType === "block") return;
 
-    const inputTarget = resolveActionTargetElement(inputEl);
+    const actionTarget = target;
+    const actionRoot = actionTarget || target;
+    const inputTarget = resolveActionTargetElement(actionRoot || inputEl);
     const applyBoth = (fn) => {
       try {
-        fn(target);
+        fn(actionRoot);
       } catch {}
-      if (inputTarget && inputTarget !== target) {
+      if (inputTarget && inputTarget !== actionRoot) {
         try {
           fn(inputTarget);
         } catch {}
@@ -1291,6 +1453,78 @@
       };
 
       applyBoth(applyClass);
+      return;
+    }
+
+    if (actionType === "setText" || actionType === "setHtml" || actionType === "setValue") {
+      const value = actionNode.value === undefined ? "" : actionNode.value;
+      applyBoth((node) => {
+        if (actionType === "setHtml") node.innerHTML = toSafeString(value);
+        else if (actionType === "setText") node.textContent = toSafeString(value);
+        else setControlValue(node, Array.isArray(value) ? JSON.stringify(value) : toSafeString(value));
+      });
+      return;
+    }
+
+    if (actionType === "setAttribute") {
+      const name = toSafeString(actionNode.name).trim();
+      if (name) applyBoth((node) => node.setAttribute(name, toSafeString(actionNode.value ?? "")));
+      return;
+    }
+
+    if (actionType === "setStyle") {
+      const property = toSafeString(actionNode.property).trim();
+      if (property) applyBoth((node) => { node.style[property] = toSafeString(actionNode.value ?? ""); });
+      return;
+    }
+
+    if (actionType === "visibility") {
+      applyBoth((node) => {
+        const mode = actionNode.mode || "toggle";
+        node.hidden = mode === "toggle" ? !node.hidden : mode === "hide";
+        if (mode === "show") node.hidden = false;
+      });
+      return;
+    }
+
+    if (actionType === "enable" || actionType === "disable") {
+      applyBoth((node) => {
+        node.disabled = actionType === "disable";
+        node.toggleAttribute("disabled", actionType === "disable");
+      });
+      return;
+    }
+
+    if (actionType === "focus") {
+      inputTarget?.focus?.();
+      return;
+    }
+
+    if (actionType === "scrollTo") {
+      (actionTarget || target)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      return;
+    }
+
+    if (actionType === "notify") {
+      const message = toSafeString(actionNode.message).trim();
+      if (!message) return;
+      const notice = document.createElement("div");
+      notice.textContent = message;
+      notice.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:99999;padding:10px 14px;background:#111827;color:#fff;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.25);";
+      document.body.appendChild(notice);
+      window.setTimeout(() => notice.remove(), Math.max(500, Number(actionNode.duration) || 3000));
+      return;
+    }
+
+    if (actionType === "redirect") {
+      const url = toSafeString(actionNode.url).trim();
+      if (url) window.open(url, actionNode.target === "_blank" ? "_blank" : "_self");
+      return;
+    }
+
+    if (actionType === "triggerEvent") {
+      const eventName = toSafeString(actionNode.name).trim();
+      if (eventName) (actionTarget || target)?.dispatchEvent?.(new CustomEvent(eventName, { bubbles: true }));
     }
   }
 
@@ -1332,6 +1566,12 @@
               sourceEl.removeEventListener(eventType, listener);
             } catch {}
           });
+          return;
+        }
+
+        if (actionType === "actionIf") {
+          const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
+          executeActionTree(target, inputEl, Array.isArray(branch) ? branch : [], targetId, bindingState);
           return;
         }
 
@@ -2549,7 +2789,7 @@
     return ast;
   }
 
-  function createFormulaEvalContext() {
+  function createFormulaEvalContext(extraContext = {}) {
     return {
       Math,
       Number,
@@ -2572,6 +2812,20 @@
       __nodeArraySort,
       __nodeArrayRemove,
       __nodeArrayReplace,
+      __nodeArrayMap,
+      __nodeArrayFilter,
+      __nodeArrayReduce,
+      __nodeArrayFind,
+      __nodeArrayForEach,
+      __nodeArrayCollect,
+      __nodeArrayContains,
+      __nodeArrayLength,
+      __nodeArrayMerge,
+      __nodeArrayUnique,
+      __nodeArrayMapGraph,
+      __nodeArrayFilterGraph,
+      __nodeLoopItem: extraContext.__nodeLoopItem,
+      __nodeLoopIndex: extraContext.__nodeLoopIndex,
       __nodeApiRequest,
       __nodeApiListMapper,
       __nodeImageFromLink,
@@ -2585,6 +2839,10 @@
       __nodeMemoryGet,
       __nodeMemorySet,
       __nodeEvent,
+      __nodeHoverEvent,
+      __nodePageLoadEvent,
+      __nodeTimerEvent,
+      __nodeCustomEvent,
       __nodeEventProcessor,
       __nodeFallback
     };
@@ -2807,7 +3065,7 @@
     }
   }
 
-  function safeEvaluateExpression(expr) {
+  function safeEvaluateExpression(expr, extraContext = {}) {
     try {
       if (!isPreparedExpressionSafe(expr)) {
         return { valid: false, value: undefined };
@@ -2818,7 +3076,7 @@
         return { valid: false, value: undefined };
       }
 
-      const value = evalFormulaNode(ast, createFormulaEvalContext(), 0);
+      const value = evalFormulaNode(ast, createFormulaEvalContext(extraContext), 0);
       return { valid: true, value };
     } catch (e) {
       return { valid: false, value: undefined };
@@ -4221,8 +4479,31 @@
         // Ignore parse errors
       }
 
-      // Evaluate the formula
-      const evaluation = evaluateFormulaExpression(formula, values);
+      // Reuse unchanged static/dynamic inputs while still applying the cached output payload.
+      let valuesSignature = "";
+      try {
+        valuesSignature = JSON.stringify(values, (key, value) => {
+          if (key === "element") return undefined;
+          if (value && typeof value === "object" && value.eventKey) {
+            return { eventKey: value.eventKey, triggeredCount: value.triggeredCount || 0 };
+          }
+          if (value && typeof value === "object" && value.nodeType) return undefined;
+          return value;
+        });
+      } catch {
+        valuesSignature = "";
+      }
+      const evaluationKey = `${formula}\u0000${valuesSignature}`;
+      let evaluation = formulaEvaluationCache.get(evaluationKey);
+      if (!evaluation) {
+        evaluation = evaluateFormulaExpression(formula, values);
+        if (evaluation.valid) {
+          if (formulaEvaluationCache.size > 100) {
+            formulaEvaluationCache.delete(formulaEvaluationCache.keys().next().value);
+          }
+          formulaEvaluationCache.set(evaluationKey, evaluation);
+        }
+      }
       if (!evaluation.valid || !evaluation.value || typeof evaluation.value !== "object") return;
 
       const map = evaluation.value;

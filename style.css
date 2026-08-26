@@ -991,6 +991,16 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     border-color: #93c5fd;
 }
 
+.nodelogic-elementor-logic-placeholder {
+    min-height: 56px;
+    padding: 16px;
+    border: 1px dashed #64748b;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 13px;
+    text-align: center;
+}
+
 .canvas-element.type-image-from-link,
 .canvas-element.type-image-from-element {
     background-color: #1d4ed8;

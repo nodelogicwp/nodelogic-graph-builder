@@ -2,9 +2,9 @@
 Contributors: nodelogicwp
 Tags: calculator, gutenberg, no-code, conditional logic, workflow builder
 Requires at least: 6.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.4.3
+Stable tag: 1.5.2
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -69,6 +69,12 @@ The source is included in the `src/` directory. Build artifacts are in `build/`.
 All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimized for desktop editing.
 
 == Changelog ==
+
+= 1.5.3 =
+* Added Elementor preset widget and shared preset shortcode support for compatible builders.
+* Added WordPress 7.1 iframe editor compatibility improvements.
+* Added array operations, event nodes, action nodes, branching nodes, and viewport rendering optimizations.
+* Fixed WordPress.org escaping and plugin metadata compatibility checks.
 
 = 1.4.3 =
 * Added Actions system — new Action nodes in the graph editor (Action Event, Action Block, Set Required, Set Min, Set Max, Set Length, Set Regex, Add Class, Remove Class, Toggle Class)

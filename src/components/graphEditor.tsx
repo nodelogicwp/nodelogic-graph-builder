@@ -1308,6 +1308,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [dragElementDelta, setDragElementDelta] = useState<{elementId: string; deltaX: number; deltaY: number} | null>(null);
     const [zoomDelta, setZoomDelta] = useState(1);
     const [offsetDelta, setOffsetDelta] = useState({ x: 0, y: 0 });
+    const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
 
     const [formula, setFormula] = useState<string>("");
     const [customNodeUi, setCustomNodeUi] = useState<CustomNodeUiState | null>(null);
@@ -1383,6 +1384,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const dragElementDeltaRef = useRef<{elementId: string; deltaX: number; deltaY: number} | null>(null);
     const zoomDeltaRef = useRef(1);
     const offsetDeltaRef = useRef({ x: 0, y: 0 });
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const updateViewport = () => {
+            setCanvasViewport({ width: canvas.clientWidth, height: canvas.clientHeight });
+        };
+
+        updateViewport();
+        if (typeof ResizeObserver !== 'undefined') {
+            const observer = new ResizeObserver(updateViewport);
+            observer.observe(canvas);
+            return () => observer.disconnect();
+        }
+        window.addEventListener('resize', updateViewport);
+        return () => window.removeEventListener('resize', updateViewport);
+    }, []);
 
     const handleTreeToggleFolder = (itemId: string) => {
         setExpandedFolders((prev) => {
@@ -1947,7 +1966,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'action-notify': [['action'], ['string']],
             'action-redirect': [['action'], ['string']],
             'action-trigger-event': [['action'], ['string']],
-            'action-if': [['action'], ['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
+            'action-if': [['action'], ['boolean']],
             // New event nodes — no inputs
             'event-hover': [],
             'event-scroll': [],
@@ -2030,7 +2049,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'math') return 1;
         if (element.type === 'case-range') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 2 : 3;
         if (element.type === 'case-value') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 1 : 2;
-        if (element.type === 'case-default') return connections.some(c => c.fromId === element.id && elements.find(candidate => candidate.id === c.toId)?.type === 'switch-branch') ? 0 : 1;
+        if (element.type === 'case-default') return 1;
         if (element.type === 'switch') {
             const defaultCaseConnection = incomingConnections.find((connection) => {
                 if (getInputIndex(connection.toInput) <= 0) {
@@ -2052,9 +2071,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return Math.max(2, highestConnectedIndex + 2);
         }
         if (element.type === 'switch-branch') {
-            const connectedCaseIndexes = incomingConnections.filter(c => c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 1).map(c => getInputIndex(c.toInput));
-            const highestCaseIndex = connectedCaseIndexes.filter(index => index >= 2).reduce((max, index) => Math.max(max, index), 2);
-            return highestCaseIndex + 1;
+            const caseConnections = incomingConnections.filter(c => c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 2);
+            const defaultConnection = caseConnections.find(c => elements.find(candidate => candidate.id === c.fromId)?.type === 'case-default');
+            if (defaultConnection) return Math.max(3, getInputIndex(defaultConnection.toInput) + 1);
+            const highestCaseIndex = caseConnections.reduce((max, connection) => Math.max(max, getInputIndex(connection.toInput)), 2);
+            return Math.max(3, highestCaseIndex + 2);
         }
         if (element.type === 'node') return 3;
         if (element.type === 'node-branch') return 2;
@@ -2116,7 +2137,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-replace-index') return 3;
         if (element.type === 'action-event') return 1;
         if (element.type === 'action-block') return 1;
-        if (element.type === 'action-if') return 3;
+        if (element.type === 'action-if') return 2;
         if (element.type === 'action-required') return 2;
         if (element.type === 'action-min' || element.type === 'action-max') return 2;
         if (element.type === 'action-length') return 3;
@@ -2404,6 +2425,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'api-request') return 136;
         if (element.type === 'api-field') return 180;
         if (element.type === 'api-list-mapper') return 216;
+        if (element.type === 'array-sort') return element.data?.sortMode?.startsWith('custom') ? 120 : 86;
         // action-event: ID select(32) + event-type select(32) + separator + checkbox — z paddinigiem
         if (element.type === 'action-event') return 168;
         if (element.type === 'action-length') return 168;
@@ -2434,14 +2456,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-set-attr'
             || element.type === 'action-set-style') return 166;
         // New action nodes with 1 input + selector UI
-        if (element.type === 'action-set-visibility'
-            || element.type === 'action-enable'
+        if (element.type === 'action-set-visibility') return 118;
+        if (element.type === 'action-enable'
             || element.type === 'action-disable'
             || element.type === 'action-focus'
-            || element.type === 'action-scroll-to'
-            || element.type === 'action-trigger-event') return 168;
-        if (element.type === 'action-notify') return 168;
-        if (element.type === 'action-redirect') return 144;
+            || element.type === 'action-scroll-to') return 104;
+        if (element.type === 'action-trigger-event') return 136;
+        if (element.type === 'action-notify') return 136;
+        if (element.type === 'action-redirect') return 136;
         // New event nodes
         if (element.type === 'event-hover'
             || element.type === 'event-scroll') return 164;
@@ -2480,6 +2502,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'image-from-link' || element.type === 'image-from-element') return 220;
         return 200;
     };
+
+    const visibleElements = React.useMemo(() => {
+        if (canvasViewport.width <= 0 || canvasViewport.height <= 0 || zoom <= 0) {
+            return elements;
+        }
+
+        const margin = 360;
+        const worldLeft = (-offsetX / zoom) - margin;
+        const worldTop = (-offsetY / zoom) - margin;
+        const worldRight = ((canvasViewport.width - offsetX) / zoom) + margin;
+        const worldBottom = ((canvasViewport.height - offsetY) / zoom) + margin;
+
+        return elements.filter((element) => {
+            if (element.id === selected) return true;
+            const width = getNodeWidth(element);
+            const height = getNodeHeight(element);
+            return element.x + width >= worldLeft
+                && element.x <= worldRight
+                && element.y + height >= worldTop
+                && element.y <= worldBottom;
+        });
+    }, [canvasViewport.height, canvasViewport.width, elements, offsetX, offsetY, selected, zoom]);
+
+    const visibleElementIds = React.useMemo(
+        () => new Set(visibleElements.map((element) => element.id)),
+        [visibleElements]
+    );
 
     const calculatePinPosition = (
         element: CanvasElement,
@@ -2685,9 +2734,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             
         if (element.type === 'action-if' && index === 1 && !valuePinConnected) {
             return <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={element.data?.actionIfCondition === true} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionIfCondition: e.target.checked } } : elem)))} /> Condition</label>;
-        }
-        if (element.type === 'action-if' && index === 2 && !valuePinConnected) {
-            return <input className="input-control" value={String(element.data?.valueText ?? element.data?.value ?? '')} placeholder="Value" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()} />;
         }
         if (valuePinNode && index > 0 && valuePinConnected) return null;
         switch (element.type) {
@@ -4061,7 +4107,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-remove-class':
             case 'action-toggle-class':
                 if (index === 0) return 'Action';
-                if (element.type === 'action-if') return index === 1 ? 'Condition' : 'Value';
+                if (element.type === 'action-if') return 'Condition';
                 if (element.type === 'action-length') return index === 1 ? 'Min' : 'Max';
                 return 'Value';
             case 'chart-data':
@@ -4130,7 +4176,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         .filter(c => c.toId === element.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 2)
                         .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
                     const source = caseConnections[index] ? elementsById.get(caseConnections[index].fromId) : null;
-                    return source?.type === 'case-default' ? 'Default' : `Case ${caseConnections[index] ? getInputIndex(caseConnections[index].toInput) - 2 : index}`;
+                    return source?.type === 'case-default' ? 'Default' : `Case ${index}`;
                 }
             case 'element-id':
             case 'memory-read-number':
@@ -4307,6 +4353,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (element.type === 'switch') {
                     return { startIndex: 1, label: 'Case' };
                 }
+                if (element.type === 'switch-branch') {
+                    return { startIndex: 2, label: 'Case' };
+                }
                 if (element.type === 'main' && customNodeMode) {
                     return { startIndex: 0, label: 'Input' };
                 }
@@ -4470,7 +4519,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         .filter((child): child is CanvasElement => Boolean(child))
                         .map((child) => buildActionPlanExpression(child, currentDepth + 1))
                         .filter((entry): entry is string => Boolean(entry));
-                    return `({ type: "actionIf", condition: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionIfCondition ? 'true' : 'false')}, value: ${getConnectedExpression(element.id, 'input2') || serializeGraphFormulaLiteral(element.data?.valueText ?? element.data?.value ?? '')}, trueActions: [${childExpressions.join(', ')}], falseActions: [${falseChildExpressions.join(', ')}] })`;
+                    return `({ type: "actionIf", condition: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionIfCondition ? 'true' : 'false')}, trueActions: [${childExpressions.join(', ')}], falseActions: [${falseChildExpressions.join(', ')}] })`;
                 }
                 case 'action-event': {
                     const sourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
@@ -5302,7 +5351,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
                     const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
                     const itemType = sourceElement?.data?.arrayItemType || el.data?.arrayItemType;
-                    valueType = itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip' ? itemType : 'number';
+                    const normalizedItemType = itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip'
+                        ? itemType
+                        : 'number';
+                    valueType = normalizedItemType;
+                    nextData = {
+                        ...el.data,
+                        arrayItemType: normalizedItemType,
+                        arrayItemSchema: getArrayItemSchemaFromElement(sourceElement),
+                    };
                     break;
                 }
                 case 'image-from-link':
@@ -7229,6 +7286,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     {/* Render connections */}
                     <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                         {connections.map(conn => {
+                            if (!visibleElementIds.has(conn.fromId) || !visibleElementIds.has(conn.toId)) return null;
                             const fromElement = elementsById.get(conn.fromId);
                             const toElement = elementsById.get(conn.toId);
                             
@@ -7317,7 +7375,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         </div>
                     )}
                     
-                    {elements.map((el) => {
+                    {visibleElements.map((el) => {
                         if (el.id === 'main-block' && !shouldRenderMainBlock) {
                             return null;
                         }
@@ -7373,7 +7431,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'array'
                             || el.type === 'array-push'
                             || el.type === 'array-pop'
-                            || el.type === 'array-sort'
                             || el.type === 'array-remove-index'
                             || el.type === 'array-replace-index'
                             || el.type === 'image-from-link'

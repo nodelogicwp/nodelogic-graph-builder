@@ -73,6 +73,7 @@ export const TREE_DATA = [
             { id: '44', name: 'Uppercase', type: 'string-upper' },
             { id: '45', name: 'Lowercase', type: 'string-lower' },
             { id: '46', name: 'Includes', type: 'string-includes' },
+            { id: '15', name: 'Regex', type: 'regex' },
         ],
     },
     {

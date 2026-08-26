@@ -1,0 +1,94 @@
+.nodelogic-editor-button {
+    background: #3b82f6;
+    color: white;
+    padding: 8px 14px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.nodelogic-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999999;
+    background: rgba(0, 0, 0, 0.5);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nodelogic-modal {
+    width: 100vw;
+    height: 100vh;
+
+    max-width: calc(100vw - 12px);
+    max-height: calc(100vh - 16px);
+
+    background: #fff;
+
+    display: flex;
+    flex-direction: column;
+
+    color: #222;
+}
+
+.nodelogic-modal-header {
+    height: 50px;
+    min-height: 50px;
+
+    flex: 0 0 50px;
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    padding: 0 16px;
+
+    background: #fff;
+    color: #222;
+
+    border-bottom: 1px solid #ddd;
+}
+
+.nodelogic-modal-header h2 {
+    margin: 0;
+
+    color: #222;
+
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.nodelogic-modal-close {
+    width: 36px;
+    height: 36px;
+
+    padding: 0;
+
+    border: 0;
+    border-radius: 4px;
+
+    background: transparent;
+    color: #222;
+
+    font-size: 28px;
+    line-height: 36px;
+
+    cursor: pointer;
+}
+
+.nodelogic-modal-close:hover {
+    background: #eee;
+}
+
+.nodelogic-modal-content {
+    flex: 1;
+
+    min-height: 0;
+
+    overflow: hidden;
+
+    position: relative;
+}

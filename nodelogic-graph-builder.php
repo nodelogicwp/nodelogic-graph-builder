@@ -3,7 +3,7 @@
  * Plugin Name: NodeLogic Graph Builder
  * Description: Visual no-code calculator and workflow builder for Gutenberg blocks with conditional logic, dynamic content, and reusable presets.
  * Plugin URI: https://nodelogicwp.com
- * Version: 1.5.0
+ * Version: 1.5.3
  * Author: Volodymyr Diadiunov
  * Author URI: https://nodelogicwp.com
  * License: GPL-2.0-or-later
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('NODELOGIC_VERSION')) {
-    define('NODELOGIC_VERSION', '1.5.0');
+    define('NODELOGIC_VERSION', '1.5.3');
 }
 
 if (!function_exists('nodelogic_graph_builder_block_comment')) {
@@ -367,10 +367,15 @@ add_action('enqueue_block_assets', function () {
     
 });
 
-// Frontend-only runtime logic engine.
+// FRONTEND — działa tylko na stronie, NIE w Elementorze
 add_action('wp_enqueue_scripts', function () {
+
+    if ( \Elementor\Plugin::$instance->editor->is_edit_mode() ) {
+        return; // nie ładujemy runtime w edytorze
+    }
+
     wp_enqueue_script(
-        'slider-block-frontend',
+        'nodelogic-frontend',
         plugins_url('frontend.js', __FILE__),
         [],
         filemtime(__DIR__ . '/frontend.js'),
@@ -378,12 +383,59 @@ add_action('wp_enqueue_scripts', function () {
     );
 
     wp_enqueue_style(
-        'slider-block-frontend-style',
+        'nodelogic-frontend-style',
         plugins_url('style.css', __FILE__),
         [],
         filemtime(__DIR__ . '/style.css')
     );
-    
 });
 
+// 1. Ładujesz integracje
 require_once __DIR__ . '/integrations.php';
+
+// 2. DOPIERO TERAZ enqueue panelu
+add_action('elementor/editor/before_enqueue_scripts', function () {
+    wp_enqueue_script(
+        'nodelogic-elementor-react',
+        plugins_url('/dist/build/elementor.js', __FILE__),
+        [ 'jquery',
+        'elementor-common',
+        'elementor-editor' ],
+        filemtime(__DIR__ . '/dist/build/elementor.js'),
+        true
+    );
+
+    wp_enqueue_script(
+        'nodelogic-elementor-logic',
+        plugins_url('/assets/elementor/elementor-logic.js', __FILE__),
+        [ 'jquery',
+        'elementor-common',
+        'elementor-editor' ],
+        filemtime(__DIR__ . '/assets/elementor/elementor-logic.js'),
+        true
+    );
+
+    wp_enqueue_style(
+        'nodelogic-elementor-style',
+        plugins_url('/assets/elementor/elementor-style.css', __FILE__),
+        [],
+        filemtime(__DIR__ . '/assets/elementor/elementor-style.css')
+    );
+
+    wp_enqueue_style(
+        'nodelogic-graph-editor-style',
+        plugins_url('/style.css', __FILE__),
+        [],
+        filemtime(__DIR__ . '/style.css')
+    );
+});
+
+// 3. CSS podglądu (iframe)
+add_action('elementor/frontend/after_enqueue_styles', function () {
+    wp_enqueue_style(
+        'nodelogic-elementor-style-preview',
+        plugins_url('/assets/elementor/elementor-style-preview.css', __FILE__),
+        [],
+        filemtime(__DIR__ . '/assets/elementor/elementor-style-preview.css')
+    );
+});

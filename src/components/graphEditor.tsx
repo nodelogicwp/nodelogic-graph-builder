@@ -10,18 +10,61 @@ import {
     type CustomNodeUiSharedVariable,
     type CustomNodeUiState,
 } from './graphEditor/persistence';
+import {
+    migrateElementPropertyNodeData,
+    isInternalResolutionAttr,
+    elementPropertyOrderedKeys,
+    elementPropertyOutputCount,
+    genericElementProperties,
+    type ElementPropertyMode,
+    type ElementPropertySelectedEntry,
+    type DetectedElementProperty,
+} from './graphEditor/elementPropertyModel';
+import {
+    detectElementProperties,
+    detectElementChildren,
+    getPreviewChildAt,
+    observePreviewDomChanges,
+    resolvePreviewElement,
+    type DetectedChild,
+} from './graphEditor/previewResolver';
+import {
+    migrateGetChildrenNodeData,
+    readGetChildrenMode,
+    readGetChildrenReturnAs,
+    readGetChildrenSingleIndex,
+    readGetChildrenSelectedIndices,
+    getChildrenOutputsArray,
+    getChildrenPinChildIndex,
+    getChildrenOutputCount,
+    type GetChildrenMode,
+    type GetChildrenReturnAs,
+} from './graphEditor/getChildrenModel';
 
 interface PinStyle extends React.CSSProperties {
     '--pin-gradient'?: string;
 }
 
-type ArrayItemType = 'number' | 'string' | 'boolean' | 'color' | 'zip';
+type ArrayItemType = 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'element';
+
+// Canonical clamp for an array's element type. Accepts every supported element
+// type (incl. 'element' for arrays of DOM element references); anything else /
+// missing falls back to 'number'. Used everywhere an array's item type is read
+// so a typed array (e.g. Array<element> from Get Children) is never silently
+// downgraded to Array<number>.
+const normalizeArrayItemType = (value: unknown): ArrayItemType =>
+    value === 'string' || value === 'boolean' || value === 'color' || value === 'zip' || value === 'element'
+        ? value
+        : 'number';
 type ArrayItemSchemaField = {
     id: string;
     label: string;
     type: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case';
     sourceNodeId?: string;
     sourcePin?: string;
+    // Custom-node input schema pins carry a default value; read at runtime,
+    // was missing from the type.
+    defaultValue?: string;
 };
 
 interface TreeItem {
@@ -30,10 +73,12 @@ interface TreeItem {
     type:
         | 'folder'
         | 'main'
+        | 'output'
         | 'element'
         | 'element-id'
         | 'element-ref'
         | 'element-property'
+        | 'get-children'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -149,6 +194,7 @@ interface CanvasElement {
         | 'element-id'
         | 'element-ref'
         | 'element-property'
+        | 'get-children'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -327,7 +373,6 @@ interface CanvasElement {
         customSharedVariables?: CustomNodeUiSharedVariable[];
         unzipIndex?: number;
         outputMode?: 'zipped' | 'unzipped';
-        eventType?: string;
         // For switch node - dynamic conditions
         conditions?: string[];
         // For calculation - operations between inputs
@@ -340,6 +385,12 @@ interface CanvasElement {
         hidden?: boolean;
         // For output node in customNodeMode: editable labels per input slot
         outputLabels?: string[];
+        // For output node: marks that the leading "Element" target input pin has
+        // been added. Absent on pre-existing graphs -> a one-time connection
+        // reindex (input0..N -> input1..N+1) migrates them.
+        outputTargetElementPin?: boolean;
+        useIdInput?: boolean;
+        executeOnLoad?: boolean;
         // For main-block (Zip Output) in customNodeMode: editable output labels
         zipOutputLabels?: string[];
         // For Element ID node
@@ -347,6 +398,19 @@ interface CanvasElement {
         elementProperty?: string;
         elementPropertyUseManual?: boolean;
         elementPropertyType?: 'number' | 'string' | 'boolean';
+        // Stage 2A: three-mode Element Property model. `single` reproduces the
+        // legacy behaviour and keeps using `elementProperty` / `elementPropertyType`.
+        // Legacy fields above are retained for read compatibility / migration.
+        elementPropertyMode?: ElementPropertyMode;
+        // Authoritative ordered selection for `custom` mode; `origin: 'custom'`
+        // marks manually added keys. Not used by `single` / `all`.
+        elementPropertySelected?: ElementPropertySelectedEntry[];
+        // Get Children modes (see getChildrenModel). Legacy nodes have none and
+        // are migrated to all/children (the original "one array of all children").
+        getChildrenMode?: GetChildrenMode;
+        getChildrenReturnAs?: GetChildrenReturnAs;
+        getChildrenSingleIndex?: number;
+        getChildrenSelected?: number[];
         // For Memory nodes
         variableKey?: string;
         defaultValue?: number | string | boolean;
@@ -381,7 +445,10 @@ interface CanvasElement {
         replaceFind?: string;
         replaceWith?: string;
         // For number-parse: radix (10, 16, 2, 8)
-        parseRadix?: number;        // For output node: extended CSS properties
+        parseRadix?: number;
+        // For number-to-base: zero-pad width
+        minLength?: number;
+        // For output node: extended CSS properties
         outputCssProperty?: string;
         // For css-unit node: unit selector
         cssUnit?: string;
@@ -393,7 +460,13 @@ interface CanvasElement {
         // Array nodes
         arrayItemType?: ArrayItemType;
         arrayTypeCarrier?: boolean;
+        // Chart Data node
+        chartDataLabel?: string;
+        chartDataValue?: number | string;
+        chartDataValueText?: string;
         chartDataTypeCarrier?: boolean;
+        // Event Element node: only propagate on the bound event, not on every recalc
+        passOnlyOnEvent?: boolean;
         arrayItemSchema?: ArrayItemSchemaField[];
         sortMode?: 'number-asc' | 'number-desc' | 'string-asc' | 'string-desc' | 'custom-asc' | 'custom-desc';
         arraySortField?: string;
@@ -479,6 +552,9 @@ interface SavedState {
     elements: CanvasElement[];
     connections: Connection[];
     formula: string;
+    // Per-event formulas for the calculator/formula block; always {} for a
+    // logic-mode graph but persisted for round-trip fidelity.
+    eventFormulas?: Record<string, string>;
     customNodeUi?: CustomNodeUiState | null;
     updatedAt?: number;
 }
@@ -1322,6 +1398,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [pendingDraftRecovery, setPendingDraftRecovery] = useState<SavedState | null>(null);
     const [showDraftRecoveryNotice, setShowDraftRecoveryNotice] = useState(false);
     const [calcFlowByNode, setCalcFlowByNode] = useState<Record<string, CalcFlowSegment[]>>({});
+    // Element Property: live-detected properties per element-property node id.
+    // Serializable only (no DOM refs). Populated by an effect from previewResolver.
+    const [elementPropertyDetections, setElementPropertyDetections] = useState<Record<string, DetectedElementProperty[]>>({});
+    // Bumped when the editor preview DOM mutates, to re-run detection.
+    const [previewDomVersion, setPreviewDomVersion] = useState(0);
+    // UI-only (never persisted): which custom property lists are expanded.
+    const [customPropertyListExpanded, setCustomPropertyListExpanded] = useState<Set<string>>(new Set());
+    // UI-only: in-progress "add custom property" text per node id.
+    const [customPropertyDraft, setCustomPropertyDraft] = useState<Record<string, string>>({});
+    // Get Children: live-detected direct children per get-children node id.
+    const [elementChildrenDetections, setElementChildrenDetections] = useState<Record<string, DetectedChild[]>>({});
 
     const canvasRef = useRef<HTMLDivElement>(null);
     const elementDragRef = useRef<{
@@ -1343,6 +1430,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const pendingCanvasMouseRef = useRef<{ x: number; y: number } | null>(null);
     const detectedElementsSignatureRef = useRef('');
     const calculationOperatorCountRef = useRef<Record<string, number>>({});
+    const elementPropertyDetectionsRef = useRef<Record<string, DetectedElementProperty[]>>({});
+    const elementPropertyDetectionSignatureRef = useRef('');
+    const customPropertyListExpandedRef = useRef<Set<string>>(customPropertyListExpanded);
+    const elementChildrenDetectionsRef = useRef<Record<string, DetectedChild[]>>({});
+    const elementChildrenDetectionSignatureRef = useRef('');
 
     const buttonStyle = {
         width: '100%',
@@ -1496,6 +1588,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     elementsRef.current = elements;
     selectedRef.current = selected;
     detectedElementsRef.current = detectedElements;
+    elementPropertyDetectionsRef.current = elementPropertyDetections;
+    customPropertyListExpandedRef.current = customPropertyListExpanded;
+    elementChildrenDetectionsRef.current = elementChildrenDetections;
     zoomRef.current = zoom;
     offsetXRef.current = offsetX;
     offsetYRef.current = offsetY;
@@ -1774,6 +1869,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
 
         if (element.type === 'output') {
+            // Pin 0 is the new "Element" target input (except in custom-node mode,
+            // where Output pins are label slots). Value pins follow, shifted by 1.
+            if (!customNodeMode && inputIndex === 0) {
+                return ['element'];
+            }
+            const valueIndex = customNodeMode ? inputIndex : inputIndex - 1;
             const outputAccepted: Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'array' | 'action'>> = [
                 ['number', 'string', 'boolean', 'color', 'zip', 'array'],
                 ['color', 'string'],
@@ -1781,7 +1882,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 ['boolean'],
                 ['css', 'string'],
             ];
-            return (outputAccepted[inputIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
+            return (outputAccepted[valueIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
         }
 
         if (element.type === 'main') {
@@ -1810,13 +1911,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array') {
             if (customNodeLibraryEnabled) {
                 return inputIndex === 0
-                    ? ['number', 'string', 'boolean', 'color', 'zip']
+                    ? ['number', 'string', 'boolean', 'color', 'zip', 'element']
                     : ['zip'];
             }
-            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
+            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array', 'element'];
         }
         if (element.type === 'array-push') {
-            return inputIndex === 0 ? ['array'] : ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
+            return inputIndex === 0 ? ['array'] : ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array', 'element'];
         }
         if (element.type === 'array-pop' || element.type === 'array-sort') {
             return ['array'];
@@ -1827,7 +1928,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-replace-index') {
             if (inputIndex === 0) return ['array'];
             if (inputIndex === 1) return ['number'];
-            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array'];
+            return ['number', 'string', 'boolean', 'color', 'zip', 'case', 'array', 'element'];
         }
         if (element.type === 'image-from-link') {
             return ['string'];
@@ -1851,6 +1952,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return inputIndex === 0 ? ['string'] : ['number'];
         }
         if (element.type === 'element-property') {
+            return ['element'];
+        }
+        if (element.type === 'get-children') {
             return ['element'];
         }
 
@@ -1975,14 +2079,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'event-custom': [],
             'node-branch': [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
             'switch-branch': [['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['case']],
-            // New array nodes
-            'array-map': [['array'], ['number', 'string', 'boolean', 'color', 'zip']],
+            // New array nodes. `element` is a first-class array item type
+            // (Array<element> from Get Children), so every pin that carries an
+            // array *item* accepts it alongside the primitive item types.
+            'array-map': [['array'], ['number', 'string', 'boolean', 'color', 'zip', 'element']],
             'array-filter': [['array'], ['boolean']],
             'array-reduce': [['array']],
-            'array-find': [['array'], ['number', 'string', 'boolean']],
+            'array-find': [['array'], ['number', 'string', 'boolean', 'element']],
             'array-for-each': [['array']],
-            'array-collect': [['number', 'string', 'boolean', 'color', 'zip']],
-            'array-contains': [['array'], ['number', 'string', 'boolean']],
+            'array-collect': [['number', 'string', 'boolean', 'color', 'zip', 'element']],
+            'array-contains': [['array'], ['number', 'string', 'boolean', 'element']],
             'array-length': [['array']],
             'array-merge': [['array'], ['array']],
             'array-unique': [['array']],
@@ -2002,6 +2108,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'element-id') return 0;
         if (element.type === 'element-ref') return 0;
         if (element.type === 'element-property') return 1;
+        if (element.type === 'get-children') return 1;
         if (element.type === 'memory-read-number') return 0;
         if (element.type === 'memory-read-string') return 0;
         if (element.type === 'memory-read-boolean') return 0;
@@ -2105,7 +2212,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return isMainInputType ? 4 : 3;
         }
         if (element.type === 'constant' || element.type === 'variable') return 0;
-        if (element.type === 'output') return outputPropertyNames.length;
+        if (element.type === 'output') return outputPropertyNames.length + (customNodeMode ? 0 : 1);
         if (element.type === 'clamp') return 3;
         if (element.type === 'min-val' || element.type === 'max-val') return 2;
         if (element.type === 'string-split') return 1;
@@ -2184,7 +2291,150 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return 1;
     };
 
+    // ── Element Property helpers (Single / All / Custom) ───────────────────────
+    const getElementPropertyMode = (element: CanvasElement): ElementPropertyMode => {
+        const mode = element.data?.elementPropertyMode;
+        return mode === 'all' || mode === 'custom' ? mode : 'single';
+    };
+
+    // Live-detected properties for a node, minus NodeLogic's internal resolution
+    // attributes (kept out of the automatic "All" list).
+    const getAutoDetectedProperties = (nodeId: string): DetectedElementProperty[] =>
+        (elementPropertyDetectionsRef.current[nodeId] || []).filter(
+            (property) => !isInternalResolutionAttr(property.key)
+        );
+
+    const getAutoDetectedPropertyKeys = (nodeId: string): string[] =>
+        getAutoDetectedProperties(nodeId).map((property) => property.key);
+
+    // Ordered list of property keys, one per output pin (see
+    // elementPropertyOrderedKeys in elementPropertyModel for the mode rules).
+    const resolveElementPropertyOrderedKeys = (element: CanvasElement): string[] =>
+        elementPropertyOrderedKeys(element.data, getAutoDetectedPropertyKeys(element.id));
+
+    const getElementPropertyKeyType = (
+        element: CanvasElement,
+        key: string
+    ): 'number' | 'string' | 'boolean' => {
+        if (!key) return 'string';
+        const detected = (elementPropertyDetectionsRef.current[element.id] || []).find(
+            (property) => property.key === key
+        );
+        if (detected) return detected.type;
+        if (getElementPropertyMode(element) === 'single') {
+            const legacyType = element.data?.elementPropertyType;
+            return legacyType === 'string' || legacyType === 'boolean' || legacyType === 'number'
+                ? legacyType
+                : 'number';
+        }
+        return 'string';
+    };
+
+    // ── Get Children helpers (Single / All / Custom + Child / Children) ────────
+    const getGetChildrenDetectedChildren = (nodeId: string): DetectedChild[] =>
+        elementChildrenDetectionsRef.current[nodeId] || [];
+
+    const getGetChildrenDetectedCount = (nodeId: string): number =>
+        getGetChildrenDetectedChildren(nodeId).length;
+
+    // Nodes whose output pin count is dynamic (mode / selection / live detection).
+    const DYNAMIC_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
+        'element-property',
+        'get-children',
+    ] as CanvasElement['type'][]);
+
+    // Nodes whose output pin *type* (array vs element) can flip on a config
+    // change and must invalidate now-incompatible connections. element-property
+    // keeps count-only pruning (its scalar type is lenient by design).
+    const TYPE_FLIP_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
+        'get-children',
+    ] as CanvasElement['type'][]);
+
+    // Drop connections that originate from a dynamic-output node when, after a
+    // mode / selection / detection change, the source pin no longer exists (all
+    // dynamic nodes) OR — for type-flip nodes — its type is no longer compatible
+    // with the target input (e.g. Get Children switched from Children/array to
+    // Single/element while wired to For Each). Valid connections and every
+    // non-dynamic node are preserved.
+    const pruneStaleDynamicOutputConnections = (
+        nextElements: CanvasElement[],
+        nextConnections: Connection[]
+    ): Connection[] => {
+        const dynamicById = new Map<string, CanvasElement>();
+        nextElements.forEach((element) => {
+            if (DYNAMIC_OUTPUT_NODE_TYPES.has(element.type)) {
+                dynamicById.set(element.id, element);
+            }
+        });
+        if (dynamicById.size === 0) return nextConnections;
+        const byId = new Map(nextElements.map((element) => [element.id, element]));
+        return nextConnections.filter((connection) => {
+            const sourceElement = dynamicById.get(connection.fromId);
+            if (!sourceElement) return true;
+            const outputIndex = Number.parseInt(
+                String(connection.fromOutput || '').replace(/^output/i, ''),
+                10
+            );
+            if (!Number.isFinite(outputIndex) || outputIndex < 0) return true;
+            if (outputIndex >= getOutputCount(sourceElement)) return false;
+            if (!TYPE_FLIP_OUTPUT_NODE_TYPES.has(sourceElement.type)) return true;
+            const targetElement = byId.get(connection.toId);
+            if (!targetElement) return true;
+            const targetInputIndex = getInputIndex(connection.toInput);
+            if (!Number.isFinite(targetInputIndex) || targetInputIndex < 0) return true;
+            return arePinTypesCompatible(
+                getOutputPinType(sourceElement, outputIndex),
+                getAcceptedTypesForPin(targetElement, targetInputIndex)
+            );
+        });
+    };
+
+    // Highest output-pin index a node still has a live outgoing connection on,
+    // + 1 (0 when it has none).
+    const connectedOutputPinFloor = (elementId: string): number => {
+        let floor = 0;
+        (connectionsRef.current || []).forEach((connection) => {
+            if (connection.fromId !== elementId) return;
+            const match = /output(\d+)/i.exec(String(connection.fromOutput || ''));
+            if (match) floor = Math.max(floor, Number(match[1]) + 1);
+        });
+        return floor;
+    };
+
+    // A dynamic-output node's pin count is normally exact (Single = 1; Custom =
+    // the persisted selection length). Only the "All" modes derive it from live
+    // preview-DOM detection, which is 0 on a headless save (no Elementor preview
+    // iframe) and would otherwise make pruneStaleDynamicOutputConnections delete
+    // every wire out of the node. For those — and ONLY those — clamp the count
+    // up to the wiring that already exists, so a connected pin survives a
+    // transient loss of detection. Config-driven shrinks (Single/Custom) are
+    // left exact so their now-orphaned wires still prune.
+    const isDetectionDrivenOutputCount = (element: CanvasElement): boolean => {
+        if (element.type === 'element-property') {
+            return getElementPropertyMode(element) === 'all';
+        }
+        if (element.type === 'get-children') {
+            return (
+                readGetChildrenMode(element.data) === 'all' &&
+                readGetChildrenReturnAs(element.data) === 'child'
+            );
+        }
+        return false;
+    };
+
     const getOutputCount = (element: CanvasElement): number => {
+        if (element.type === 'element-property') {
+            const base = elementPropertyOutputCount(element.data, getAutoDetectedPropertyKeys(element.id));
+            return isDetectionDrivenOutputCount(element)
+                ? Math.max(base, connectedOutputPinFloor(element.id))
+                : base;
+        }
+        if (element.type === 'get-children') {
+            const base = getChildrenOutputCount(element.data, getGetChildrenDetectedCount(element.id));
+            return isDetectionDrivenOutputCount(element)
+                ? Math.max(base, connectedOutputPinFloor(element.id))
+                : base;
+        }
         switch (element.type) {
             case 'case-range':
             case 'case-value':
@@ -2198,7 +2448,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'element':
             case 'element-id':
             case 'element-ref':
-            case 'element-property':
             case 'memory-read-number':
             case 'memory-read-string':
             case 'memory-read-boolean':
@@ -2358,18 +2607,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return 'number';
         }
         if (element.type === 'custom-node' && element.data?.customNodeTypeCarrier) return 'zip';
-        if ((element.type === 'number' || element.type === 'constant-string' || element.type === 'constant-boolean') && element.data?.arrayTypeCarrier) return 'array';
         if (element.type === 'array') return 'array';
         if (element.type === 'array-push' || element.type === 'array-pop' || element.type === 'array-sort' || element.type === 'array-remove-index' || element.type === 'array-replace-index') return 'array';
         if (element.type === 'array-for-each') {
-            const itemType = element.data?.arrayItemType;
             if (index === 1) return 'number';
-            return itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip' ? itemType : 'number';
+            // Loop item type = the array's element type (e.g. 'element' for
+            // Array<element> from Get Children). No longer clamped to 'number'.
+            return normalizeArrayItemType(element.data?.arrayItemType);
         }
         if (element.type === 'array-map' || element.type === 'array-filter' || element.type === 'array-collect' || element.type === 'array-merge' || element.type === 'array-unique') return 'array';
         if (element.type === 'array-find') return index === 0 ? 'array' : 'number';
         if (element.type === 'array-contains') return 'boolean';
         if (element.type === 'array-length') return 'number';
+        if (element.type === 'get-children') {
+            // Single, or Child return-as -> individual element pin(s).
+            // Children return-as -> one array pin.
+            return getChildrenOutputsArray(element.data) ? 'array' : 'element';
+        }
         if (element.type === 'array-reduce') return element.valueType || 'number';
         if (element.type === 'node-branch') {
             return element.valueType || 'number';
@@ -2380,7 +2634,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom') return 'event';
         if (element.type === 'case-range' || element.type === 'case-value' || element.type === 'case-default') return 'case';
         if (element.type === 'element-ref') return 'element';
-        if (element.type === 'element-property') return element.valueType || 'number';
+        if (element.type === 'element-property') {
+            const mode = getElementPropertyMode(element);
+            if (mode === 'single') {
+                return element.data?.elementPropertyType || element.valueType || 'number';
+            }
+            const key = resolveElementPropertyOrderedKeys(element)[index];
+            return getElementPropertyKeyType(element, key || '');
+        }
         if (element.type === 'image-from-link' || element.type === 'image-from-element') return 'string';
         if (element.type === 'api-request') return 'zip';
         if (element.type === 'api-field') {
@@ -2440,8 +2701,53 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'element-ref') return 128;
         // element: dropdown/input(32) + separator(8) + checkbox(22) + gaps
         if (element.type === 'element') return 174;
-        // element-property: select/input(32) + type badge(16) + separator + checkbox(20)
-        if (element.type === 'element-property') return 144;
+        // element-property: Single keeps the original fixed height; All / Custom
+        // grow with the number of output pins and the config UI.
+        if (element.type === 'element-property') {
+            if (getElementPropertyMode(element) === 'single') return 144;
+            const outCount = getOutputCount(element);
+            const outputsHeight = outCount > 0 ? outCount * 34 + (outCount - 1) * 8 : 22;
+            let configHeight = 12 + 32 + 8; // padding + mode select + gap
+            if (getElementPropertyMode(element) === 'all') {
+                configHeight += outCount > 0 ? Math.min(outCount, 5) * 16 + 22 : 34;
+            } else {
+                configHeight += 26; // "Properties" toggle row
+                if (customPropertyListExpandedRef.current.has(element.id)) {
+                    const selectedCount = (element.data?.elementPropertySelected || []).length;
+                    const detectedCount = getAutoDetectedPropertyKeys(element.id).length;
+                    const rows = Math.max(1, Math.min(8, Math.max(selectedCount, detectedCount)));
+                    configHeight += rows * 24 + 8;
+                }
+                configHeight += 34; // add-custom input
+            }
+            return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16;
+        }
+        if (element.type === 'get-children') {
+            const outCount = getOutputCount(element);
+            const outputsHeight = outCount > 0 ? outCount * 34 + (outCount - 1) * 8 : 22;
+            const mode = readGetChildrenMode(element.data);
+            let configHeight = 12 + 32 + 8; // padding + mode select + gap
+            if (mode === 'single') {
+                configHeight += 34; // child <select> / index input
+            } else {
+                configHeight += 18; // "N children detected" line
+                if (mode === 'custom') {
+                    configHeight += 26; // "Children ▸" toggle
+                    if (customPropertyListExpandedRef.current.has(element.id)) {
+                        const rows = Math.max(
+                            1,
+                            Math.min(8, Math.max(
+                                readGetChildrenSelectedIndices(element.data).length,
+                                getGetChildrenDetectedCount(element.id)
+                            ))
+                        );
+                        configHeight += rows * 24 + 8;
+                    }
+                }
+                configHeight += 22; // "Return as: Child / Children" row
+            }
+            return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16;
+        }
         if (element.type === 'action-required'
             || element.type === 'action-min'
             || element.type === 'action-max'
@@ -2490,7 +2796,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'event-element') return 220;
         if (element.type === 'event-id') return 220;
         if (element.type === 'element-ref') return 220;
-        if (element.type === 'element-property') return 220;
+        if (element.type === 'element-property') {
+            return getElementPropertyMode(element) === 'single' ? 220 : 250;
+        }
+        if (element.type === 'get-children') {
+            return readGetChildrenMode(element.data) === 'single' ? 220 : 240;
+        }
         if (element.type === 'action-block') return 220;
         if (element.type === 'action-required'
             || element.type === 'action-min'
@@ -2738,43 +3049,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (valuePinNode && index > 0 && valuePinConnected) return null;
         switch (element.type) {
             case 'output':
-                if (index === 0) {
-                    return (
-                        <select
-                            className="input-control output-target-control"
-                            value={element.data?.selectedElement || ''}
-                            onChange={(e) => {
-                                const selectedElementId = e.target.value;
-                                const selectedElement = detectedElements.find((el) => el.id === selectedElementId);
-                                setElements((prev) =>
-                                    updateElementValueTypes(
-                                        prev.map((elem) =>
-                                            elem.id === element.id
-                                                ? {
-                                                    ...elem,
-                                                    data: {
-                                                        ...elem.data,
-                                                        selectedElement: selectedElementId,
-                                                        outputs: selectedElement?.outputs || [],
-                                                    },
-                                                    name: selectedElementId || 'Output',
-                                                }
-                                                : elem
-                                        )
-                                    )
-                                );
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <option value="">-- Target Element --</option>
-                            {detectedElements.map((detectedEl) => (
-                                <option key={detectedEl.id} value={detectedEl.id}>
-                                    {detectedEl.name} ({detectedEl.type})
-                                </option>
-                            ))}
-                        </select>
-                    );
-                }
+                // The Output node uses the special layout; its target controls
+                // live in the config column (Element pin / ID select / Use ID
+                // Input). Nothing to render per input row here.
                 return null;
             case 'action-set-text':
             case 'action-set-html':
@@ -3346,6 +3623,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         <option value="boolean">Boolean</option>
                         <option value="color">Color</option>
                         <option value="zip">Zip</option>
+                        <option value="element">Element</option>
                     </select>
                 );
             }
@@ -4010,12 +4288,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 2) return 'Color';
                 if (index === 3) return 'Disabled';
                 return '';
-            case 'output':
-                if (index === 0) return 'Value';
+            case 'output': {
+                if (!customNodeMode && index === 0) return 'Element';
+                const valueIndex = customNodeMode ? index : index - 1;
                 if (customNodeMode && element.data?.outputLabels) {
-                    return element.data.outputLabels[index] || outputInputLabels[index] || '';
+                    return element.data.outputLabels[valueIndex] || outputInputLabels[valueIndex] || '';
                 }
-                return outputInputLabels[index] || '';
+                return outputInputLabels[valueIndex] || '';
+            }
             case 'node':
                 if (index === 0) return 'Condition';
                 if (index === 1) return 'True';
@@ -4089,6 +4369,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'image-from-link':
                 return 'URL';
             case 'image-from-element':
+                return 'Element';
+            case 'get-children':
                 return 'Element';
             case 'api-request':
                 return 'URL';
@@ -4204,8 +4486,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'fallback':
             case 'clamp':
                 return 'Value';
-            case 'element-property':
-                return 'Value';
+            case 'element-property': {
+                const keys = resolveElementPropertyOrderedKeys(element);
+                if (getElementPropertyMode(element) === 'single') {
+                    return keys[0] || 'Value';
+                }
+                return keys[index] || `Output ${index + 1}`;
+            }
             case 'element-ref':
                 return 'Element';
             // New event nodes
@@ -4230,6 +4517,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Result';
             case 'array-length':
                 return 'Length';
+            case 'get-children': {
+                const mode = readGetChildrenMode(element.data);
+                if (mode === 'single') return 'Child';
+                if (readGetChildrenReturnAs(element.data) === 'children') return 'Children';
+                // Child return-as: one pin per selected/all child, labelled by its
+                // live descriptor when known.
+                const childIndex = getChildrenPinChildIndex(element.data, index);
+                if (childIndex === null) return `Child ${index}`;
+                const detected = getGetChildrenDetectedChildren(element.id).find(
+                    (child) => child.index === childIndex
+                );
+                return detected ? detected.label : `Child ${childIndex}`;
+            }
             case 'array-reduce':
                 return 'Value';
             case 'regex':
@@ -4628,20 +4928,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             switch (element.type) {
                 case 'number': {
+                    // `arrayTypeCarrier` is a removed feature; updateElementValueTypes
+                    // strips it on load, so a plain scalar is the current contract.
                     const value = element.data?.valueText ?? element.data?.value ?? 0;
                     const parsed = Number(String(value).replace(',', '.'));
-                    return element.data?.arrayTypeCarrier
-                        ? `[${Number.isFinite(parsed) ? String(parsed) : '0'}]`
-                        : Number.isFinite(parsed) ? String(parsed) : '0';
+                    return Number.isFinite(parsed) ? String(parsed) : '0';
                 }
                 case 'constant-boolean':
-                    return element.data?.arrayTypeCarrier
-                        ? `[${Boolean(element.data?.value) ? 'true' : 'false'}]`
-                        : Boolean(element.data?.value) ? 'true' : 'false';
+                    return Boolean(element.data?.value) ? 'true' : 'false';
                 case 'constant-string':
-                    return element.data?.arrayTypeCarrier
-                        ? `[${serializeGraphFormulaLiteral(String(element.data?.value ?? ''))}]`
-                        : serializeGraphFormulaLiteral(String(element.data?.value ?? ''));
+                    return serializeGraphFormulaLiteral(String(element.data?.value ?? ''));
                 case 'color':
                     return serializeGraphFormulaLiteral(String(element.data?.colorValue || '#2563eb'));
                 case 'element': {
@@ -4665,11 +4961,47 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return elId ? `__nodeGetElement(${serializeGraphFormulaLiteral(elId)})` : 'null';
                 }
                 case 'element-property': {
-                    // Extracts a property/attribute from a connected element reference
+                    // Extract a property/attribute from the connected element reference.
+                    // outputIndex selects which key when the node has several pins
+                    // (All / Custom); Single keeps its original single-value behaviour.
                     const sourceExpr = connectedInputExpression(0, 'null');
-                    const prop = String(element.data?.elementProperty || '').trim();
-                    if (!prop) return '0';
-                    return `__nodeGetElementProp(${sourceExpr}, ${serializeGraphFormulaLiteral(prop)})`;
+                    const propKeys = resolveElementPropertyOrderedKeys(element);
+                    const propKey = getElementPropertyMode(element) === 'single'
+                        ? (propKeys[0] || '')
+                        : (propKeys[outputIndex] || '');
+                    if (!propKey) return '0';
+                    return `__nodeGetElementProp(${sourceExpr}, ${serializeGraphFormulaLiteral(propKey)})`;
+                }
+                case 'get-children': {
+                    // Direct child elements of the connected element reference.
+                    //   single ............. one child at a fixed index -> element
+                    //   all + children ..... every child -> one array (legacy default)
+                    //   custom + children .. selected children -> one array subset
+                    //   all/custom + child . one child per output pin -> element pins
+                    const ref = connectedInputExpression(0, 'null');
+                    const mode = readGetChildrenMode(element.data);
+                    if (mode === 'single') {
+                        return `__nodeGetChildAt(${ref}, ${readGetChildrenSingleIndex(element.data)})`;
+                    }
+                    if (readGetChildrenReturnAs(element.data) === 'children') {
+                        if (mode === 'all') {
+                            return `__nodeGetChildren(${ref})`;
+                        }
+                        const indices = readGetChildrenSelectedIndices(element.data);
+                        // Pass the index list as a JSON string, not a bare array
+                        // literal: a single-element numeric literal like `[3]`
+                        // collides with the `[id]` dynamic-variable syntax and
+                        // would be substituted away. __nodeGetChildrenSubset
+                        // parses a JSON string of numbers.
+                        return `__nodeGetChildrenSubset(${ref}, ${JSON.stringify(`[${indices.join(',')}]`)})`;
+                    }
+                    // Child return-as: the pin maps to a concrete child index
+                    // that does NOT depend on live preview detection, so a wired
+                    // pin still resolves on the frontend (all -> pin k = child k;
+                    // custom -> the k-th selected index).
+                    const childIndex = getChildrenPinChildIndex(element.data, outputIndex);
+                    if (childIndex === null) return 'null';
+                    return `__nodeGetChildAt(${ref}, ${childIndex})`;
                 }
                 case 'event-element': {
                     // Resolve target ID: manual input or dropdown selection
@@ -4733,7 +5065,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'calculation': {
                     const defaultOperation = String(element.data?.operation || '+');
                     const operations = element.data?.inputOperations || {};
-                    const inputCount = Math.max(1, getInputCount(element));
+                    // getInputCount() keeps one extra empty slot for the "add
+                    // input" affordance. Including it in the formula appends a
+                    // spurious `OP 0` operand — harmless for +/- but it zeroes a
+                    // `*`, and breaks `/` `%` `**`. Count only slots that are
+                    // wired or carry an explicit manual value.
+                    const wiredIdx = allConnections
+                        .filter((c) => c.toId === element.id && /^input\d+$/i.test(String(c.toInput || '')))
+                        .map((c) => getInputIndex(c.toInput));
+                    const manualIdx = Array.isArray(element.data?.inputValues)
+                        ? element.data.inputValues
+                            .map((v, i) => (v !== undefined && v !== null && String(v).trim() !== '' ? i : -1))
+                            .filter((i) => i >= 0)
+                        : [];
+                    const maxIdx = Math.max(-1, ...wiredIdx, ...manualIdx);
+                    const inputCount = Math.max(1, maxIdx + 1);
                     const values = Array.from({ length: inputCount }, (_, index) => (
                         connectedInputExpression(index, element.data?.inputValues?.[index] ?? 0)
                     ));
@@ -4765,6 +5111,82 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 case 'regex':
                     return `__nodeRegex(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(String(element.data?.regexPattern || ''))})`;
+                // Boolean-logic / math / string nodes that previously fell through
+                // to `default` (a silent input0 pass-through). These use only
+                // operators / members the evaluator already whitelists — no new
+                // runtime helper, allow-list, or eval-context entry.
+                case 'not':
+                    return `(!(${connectedInputExpression(0, false)}))`;
+                case 'and':
+                    return `((${connectedInputExpression(0, false)}) && (${connectedInputExpression(1, false)}))`;
+                case 'or':
+                    return `((${connectedInputExpression(0, false)}) || (${connectedInputExpression(1, false)}))`;
+                case 'clamp':
+                    return `Math.min(Math.max(Number(${connectedInputExpression(0, 0)}), Number(${connectedInputExpression(1, 0)})), Number(${connectedInputExpression(2, 0)}))`;
+                case 'min-val':
+                    return `Math.min(Number(${connectedInputExpression(0, 0)}), Number(${connectedInputExpression(1, 0)}))`;
+                case 'max-val':
+                    return `Math.max(Number(${connectedInputExpression(0, 0)}), Number(${connectedInputExpression(1, 0)}))`;
+                case 'string-includes':
+                    return `String(${connectedInputExpression(0, '')}).includes(String(${connectedInputExpression(1, '')}))`;
+                case 'string-count-chars':
+                    return `String(${connectedInputExpression(0, '')}).length`;
+                // CSS / gradient / event-processor: the runtime helpers
+                // (__nodeCssJoin, __nodeGradient, __nodeEventProcessor) and the
+                // node config UIs already exist; the formula-gen cases were lost
+                // in a generator rewrite. Restored here — no new runtime code.
+                case 'css-unit':
+                    return `(__nodeToString(${connectedInputExpression(0, 0)}) + ${serializeGraphFormulaLiteral(String(element.data?.cssUnit || 'px'))})`;
+                case 'css-display':
+                    return serializeGraphFormulaLiteral(String(element.data?.cssDisplay || 'block'));
+                case 'css-text':
+                    return serializeGraphFormulaLiteral(String(element.data?.cssText || ''));
+                case 'css-color':
+                case 'css-width':
+                case 'css-height':
+                case 'css-font-size':
+                    // Relay the value; the concrete CSS property is applied by
+                    // the Output node's dedicated pin.
+                    return `__nodeToString(${connectedInputExpression(0, '')})`;
+                case 'css-margin':
+                case 'css-padding': {
+                    // Top / Right / Bottom / Left -> space-separated shorthand
+                    // value, built from the wired sides only.
+                    const wired = [0, 1, 2, 3].filter((i) => getConnectionForInput(element.id, `input${i}`));
+                    if (wired.length === 0) return serializeGraphFormulaLiteral('');
+                    const args: string[] = [];
+                    wired.forEach((i, idx) => {
+                        if (idx > 0) args.push('" "');
+                        args.push(connectedInputExpression(i, ''));
+                    });
+                    return `__nodeConcat(${args.join(', ')})`;
+                }
+                case 'css-join': {
+                    const inputCount = Math.max(2, getInputCount(element));
+                    const parts = Array.from({ length: inputCount }, (_, i) => connectedInputExpression(i, ''));
+                    return `__nodeCssJoin(${parts.join(', ')})`;
+                }
+                case 'gradient': {
+                    const colorCount = getGradientColorCount(element);
+                    const colorExprs = Array.from({ length: colorCount }, (_, i) => {
+                        const conn = getConnectionForInput(element.id, `input${i}`);
+                        const src = conn ? elementMap.get(conn.fromId) : null;
+                        return src
+                            ? buildNodeExpression(src, Number.parseInt(String(conn!.fromOutput || '').replace(/^output/i, ''), 10) || 0, currentDepth + 1)
+                            : serializeGraphFormulaLiteral(getGradientColorByIndex(element, i));
+                    });
+                    const angleConn = getConnectionForInput(element.id, `input${colorCount}`);
+                    const angleSrc = angleConn ? elementMap.get(angleConn.fromId) : null;
+                    const angleExpr = angleSrc
+                        ? buildNodeExpression(angleSrc, Number.parseInt(String(angleConn!.fromOutput || '').replace(/^output/i, ''), 10) || 0, currentDepth + 1)
+                        : String(Number(element.data?.gradientAngle ?? 90) || 90);
+                    return `__nodeGradient(${angleExpr}, ${colorExprs.join(', ')})`;
+                }
+                case 'event-processor': {
+                    const eventExpr = getConnectedExpression(element.id, 'input0') || 'undefined';
+                    const payloadExpr = getConnectedExpression(element.id, 'input1') || 'undefined';
+                    return `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${element.data?.passOnlyOnEvent === true ? 'true' : 'false'})`;
+                }
                 case 'node': {
                     const condition = connectedInputExpression(0, true);
                     const whenTrue = getConnectedExpression(element.id, 'input1') || 'undefined';
@@ -5026,15 +5448,59 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }
         };
 
-        const outputElements = allElements.filter((element) => element.type === 'output' && String(element.data?.selectedElement || '').trim());
+        // Value pins are shifted by 1 because of the leading "Element" target pin.
+        const outputValueOffset = customNodeMode ? 0 : 1;
+        const buildElementInstanceExpr = (element: CanvasElement): string | null => {
+            if (customNodeMode) return null;
+            const connection = getConnectionForInput(element.id, 'input0');
+            if (!connection) return null;
+            const sourceElement = elementMap.get(connection.fromId);
+            if (!sourceElement) return null;
+            const outputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+            return buildNodeExpression(
+                sourceElement,
+                Number.isFinite(outputIndex) && outputIndex >= 0 ? outputIndex : 0,
+                depth + 1
+            );
+        };
+
+        const outputElements = allElements.filter((element) =>
+            element.type === 'output'
+            && (
+                String(element.data?.selectedElement || '').trim()
+                || (!customNodeMode && Boolean(getConnectionForInput(element.id, 'input0')))
+            )
+        );
+        // The Output node's Element pin (or any value pin / action source) can be
+        // driven by a `For Each` loop. When it is, the whole payload is a
+        // per-item body evaluated once per array element: the entry value is
+        // `__nodeArrayMapGraph(<array>, "<body>")`, an array of per-item payload
+        // objects that applyLogicBlocks expands. Detected generically from any
+        // input to the Output node — not special-cased to Get Children.
+        const findOutputLoopStart = (outNode: CanvasElement): CanvasElement | null => {
+            if (customNodeMode) return null;
+            // Iterate the whole Output payload only when its *Element target* is
+            // per-iteration — i.e. the Element pin (input0) is fed by a For Each.
+            // A value pin that folds a loop into an array (Collect / Map /
+            // Filter) is self-contained and must NOT trigger this.
+            const elConn = allConnections.find((c) => c.toId === outNode.id && c.toInput === 'input0');
+            const src = elConn ? elementMap.get(elConn.fromId) : null;
+            if (!src) return null;
+            return src.type === 'array-for-each' ? src : findLoopStart(src.id);
+        };
+
         const payloadEntries = outputElements
             .map((element) => {
+                const loopStart = findOutputLoopStart(element);
+                const prevLoopMode = buildingLoopBody;
+                if (loopStart) buildingLoopBody = true;
+
+                const elementInstanceExpr = buildElementInstanceExpr(element);
                 const targetId = String(element.data?.selectedElement || '').trim();
-                if (!targetId) return null;
 
                 const valuePairs = outputPropertyNames
                     .map((propName, index) => {
-                        const connection = getConnectionForInput(element.id, `input${index}`);
+                        const connection = getConnectionForInput(element.id, `input${index + outputValueOffset}`);
                         if (!connection) return null;
                         const sourceElement = elementMap.get(connection.fromId);
                         if (!sourceElement) return null;
@@ -5054,6 +5520,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     .map((child) => buildActionPlanExpression(child, depth + 1))
                     .filter((entry): entry is string => Boolean(entry));
 
+                buildingLoopBody = prevLoopMode;
+
+                // A connected Element pin is the authoritative target; the ID is
+                // only used when nothing is wired to the Element pin.
+                if (!elementInstanceExpr && !targetId) return null;
                 if (valuePairs.length === 0 && actionPairs.length === 0) {
                     return null;
                 }
@@ -5062,8 +5533,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (actionPairs.length > 0) {
                     payloadParts.push(`actions: [${actionPairs.join(', ')}]`);
                 }
+                if (elementInstanceExpr) {
+                    payloadParts.unshift(
+                        `${JSON.stringify('__element')}: ${elementInstanceExpr}`,
+                        `${JSON.stringify('__executeOnLoad')}: ${element.data?.executeOnLoad !== false ? 'true' : 'false'}`
+                    );
+                }
 
-                return `${JSON.stringify(targetId)}: { ${payloadParts.join(', ')} }`;
+                // Element-pin targets get a per-node placeholder key (a live DOM
+                // node cannot be an object key); the runtime reads __element.
+                const entryKey = elementInstanceExpr ? ` nlOutEl:${element.id}` : targetId;
+                const bodyObject = `{ ${payloadParts.join(', ')} }`;
+
+                if (loopStart && elementInstanceExpr) {
+                    const arrayExpr = connectedInputExpressionFor(loopStart, 0, []);
+                    return `${JSON.stringify(entryKey)}: __nodeArrayMapGraph(${arrayExpr}, ${serializeGraphFormulaLiteral(`(${bodyObject})`)})`;
+                }
+                return `${JSON.stringify(entryKey)}: ${bodyObject}`;
             })
             .filter(Boolean);
 
@@ -5088,6 +5574,42 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
             return fromElement?.valueType || null;
+        };
+
+        // Effective array *item* type of a source node, resolved from its
+        // original data so it does not depend on this pass's element ordering
+        // (elementMap holds pre-pass nodes). Teaches the one derived case that is
+        // never persisted: a Get Children node emitting an array yields
+        // Array<element>. Recurses through the array transform / For Each chain
+        // (bounded) so e.g. Get Children -> Filter -> For Each keeps 'element'.
+        // Returns undefined when there is nothing more specific than the source's
+        // own valueType — callers keep their existing fallback for that.
+        const ARRAY_ITEM_INHERITING_TYPES: ReadonlySet<string> = new Set([
+            'array-push', 'array-pop', 'array-sort', 'array-remove-index',
+            'array-replace-index', 'array-map', 'array-filter', 'array-collect',
+            'array-merge', 'array-unique', 'array-for-each',
+        ]);
+        const resolveSourceArrayItemType = (
+            node: CanvasElement | null | undefined,
+            seen: Set<string> = new Set<string>()
+        ): ArrayItemType | undefined => {
+            if (!node || seen.has(node.id)) return undefined;
+            seen.add(node.id);
+            if (node.type === 'get-children') {
+                return getChildrenOutputsArray(node.data) ? 'element' : undefined;
+            }
+            if (node.data?.arrayItemType !== undefined) {
+                return normalizeArrayItemType(node.data.arrayItemType);
+            }
+            if (ARRAY_ITEM_INHERITING_TYPES.has(node.type)) {
+                const upstream = nextConnections.find(
+                    (connection) => connection.toId === node.id && connection.toInput === 'input0'
+                );
+                return upstream
+                    ? resolveSourceArrayItemType(elementMap.get(upstream.fromId), seen)
+                    : undefined;
+            }
+            return undefined;
         };
 
         return nextElements.map((el) => {
@@ -5200,9 +5722,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'element';
                     break;
                 case 'element-property': {
-                    // Type inferred from the selected property or manual attribute
-                    const propType = el.data?.elementPropertyType;
-                    valueType = (propType === 'string' || propType === 'boolean') ? propType : 'number';
+                    // Scalar node valueType stays as pin 0's type (per the agreed
+                    // decision to keep getConnectedType scalar). Single keeps the
+                    // legacy elementPropertyType path for backward compatibility.
+                    if (getElementPropertyMode(el) === 'single') {
+                        const propType = el.data?.elementPropertyType;
+                        valueType = (propType === 'string' || propType === 'boolean') ? propType : 'number';
+                    } else {
+                        const firstKey = resolveElementPropertyOrderedKeys(el)[0] || '';
+                        valueType = getElementPropertyKeyType(el, firstKey);
+                    }
                     break;
                 }
                 case 'memory-read-number':
@@ -5312,6 +5841,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'css-join':
                     valueType = 'css';
                     break;
+                case 'get-children': {
+                    // Single / Child return-as -> element output(s); Children
+                    // return-as -> one Array<element>. The array carries its
+                    // element type so downstream For Each / consumers pick it up.
+                    if (getChildrenOutputsArray(el.data)) {
+                        valueType = 'array';
+                        nextData = { ...el.data, arrayItemType: 'element', arrayItemSchema: [] };
+                    } else {
+                        valueType = 'element';
+                    }
+                    break;
+                }
                 case 'array':
                 case 'array-push':
                 case 'array-pop':
@@ -5322,38 +5863,63 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'array-filter':
                 case 'array-collect':
                 case 'array-merge':
-                case 'array-unique':
+                case 'array-unique': {
                     valueType = 'array';
                     if (el.type === 'array') {
                         const typeConn = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
-                        const candidateConn = typeConn;
-                        const candidateElement = candidateConn ? elementMap.get(candidateConn.fromId) : null;
-                        const candidateArrayType = candidateElement?.data?.arrayItemType;
-                        const candidateValueType = candidateArrayType === 'number' || candidateArrayType === 'string' || candidateArrayType === 'boolean' || candidateArrayType === 'color' || candidateArrayType === 'zip'
+                        const candidateElement = typeConn ? elementMap.get(typeConn.fromId) : null;
+                        const candidateArrayType = normalizeArrayItemType(candidateElement?.data?.arrayItemType);
+                        const candidateItemType = candidateElement?.data?.arrayItemType !== undefined
                             ? candidateArrayType
                             : candidateElement?.valueType;
                         const candidateArraySchema = getArrayItemSchemaFromElement(candidateElement);
-                        if (candidateValueType === 'number' || candidateValueType === 'string' || candidateValueType === 'boolean' || candidateValueType === 'color' || candidateValueType === 'zip') {
-                            nextData = { ...el.data, arrayItemType: candidateValueType, arrayItemSchema: candidateArraySchema };
+                        if (
+                            candidateItemType === 'number' || candidateItemType === 'string'
+                            || candidateItemType === 'boolean' || candidateItemType === 'color'
+                            || candidateItemType === 'zip' || candidateItemType === 'element'
+                        ) {
+                            nextData = { ...el.data, arrayItemType: candidateItemType, arrayItemSchema: candidateArraySchema };
                         }
-                    } else if (el.type === 'array-sort') {
+                    } else {
+                        // Pass-through / transform array nodes: inherit the element
+                        // type of the incoming array so it survives the chain
+                        // (e.g. Get Children -> Filter -> For Each stays Array<element>).
                         const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
                         const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                        const inheritedType = normalizeArrayItemType(
+                            resolveSourceArrayItemType(sourceElement)
+                            ?? sourceElement?.data?.arrayItemType
+                            ?? sourceElement?.valueType
+                        );
                         const sourceSchema = getArrayItemSchemaFromElement(sourceElement);
-                        const currentField = String(el.data?.arraySortField || '').trim();
-                        const hasField = sourceSchema.some((field) => field.id === currentField || field.label === currentField);
-                        if (sourceSchema.length > 0 && (!currentField || !hasField)) {
-                            nextData = { ...el.data, arraySortField: sourceSchema[0].id };
+                        // Only rewrite data when the inherited element type actually
+                        // changed, so just loading a graph never marks it dirty.
+                        if (el.data?.arrayItemType !== inheritedType) {
+                            nextData = { ...el.data, arrayItemType: inheritedType };
+                        }
+                        if (el.type === 'array-sort') {
+                            const currentField = String(el.data?.arraySortField || '').trim();
+                            const hasField = sourceSchema.some((field) => field.id === currentField || field.label === currentField);
+                            if (sourceSchema.length > 0 && (!currentField || !hasField)) {
+                                nextData = { ...(nextData || el.data), arraySortField: sourceSchema[0].id };
+                            }
                         }
                     }
                     break;
+                }
                 case 'array-for-each': {
                     const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
                     const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
-                    const itemType = sourceElement?.data?.arrayItemType || el.data?.arrayItemType;
-                    const normalizedItemType = itemType === 'string' || itemType === 'boolean' || itemType === 'color' || itemType === 'zip'
-                        ? itemType
-                        : 'number';
+                    // Loop item type = the incoming array's element type. Preserves
+                    // 'element' (and every other type) instead of clamping to 'number'.
+                    // resolveSourceArrayItemType is order-independent, so a Get
+                    // Children (Array<element>) source is seen even when it is
+                    // processed after this node in the same pass.
+                    const normalizedItemType = normalizeArrayItemType(
+                        resolveSourceArrayItemType(sourceElement)
+                        ?? sourceElement?.data?.arrayItemType
+                        ?? el.data?.arrayItemType
+                    );
                     valueType = normalizedItemType;
                     nextData = {
                         ...el.data,
@@ -5479,7 +6045,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
             }
 
-            if (el.valueType === valueType && !nextData) {
+            // `arrayTypeCarrier` is a removed feature (the "Array type carrier"
+            // toggle no longer exists). A legacy saved graph can still carry it,
+            // and buildNodeExpression would then emit a bare `[5]` / `[true]`
+            // literal that collides with the `[id]` formula-variable syntax and
+            // gets substituted away. Always rebuild the node when the flag is
+            // present so the `arrayTypeCarrier: undefined` strip below runs.
+            if (el.valueType === valueType && !nextData && el.data?.arrayTypeCarrier === undefined) {
                 return el;
             }
             return {
@@ -5506,19 +6078,68 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const cloneCanvasElements = (items: CanvasElement[]): CanvasElement[] => {
+        let cloned: CanvasElement[];
         try {
-            return JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+            cloned = JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
         } catch {
-            return Array.isArray(items) ? [...items] : [];
+            cloned = Array.isArray(items) ? [...items] : [];
         }
+        // Structural sanitisation for corrupted / hand-edited saved graphs: a
+        // node with no id (or non-object data, non-finite x/y) would crash the
+        // canvas render and break elementMap / connection lookups. Repair rather
+        // than drop, so no user work is silently lost.
+        const sanitised = (Array.isArray(cloned) ? cloned : [])
+            .filter((element): element is CanvasElement => Boolean(element) && typeof element === 'object')
+            .map((element, index) => {
+                // Deterministic id (no Math.random): cloneCanvasElements runs
+                // twice inside areSnapshotsEquivalent, and a non-stable id there
+                // would make two normalisations of the same graph compare unequal.
+                const id = typeof element.id === 'string' && element.id.trim() !== ''
+                    ? element.id
+                    : `recovered-node-${index}`;
+                const type = typeof element.type === 'string' && element.type.trim() !== ''
+                    ? element.type
+                    : 'number';
+                return {
+                    ...element,
+                    id,
+                    type: type as CanvasElement['type'],
+                    name: typeof element.name === 'string' ? element.name : type,
+                    x: Number.isFinite(Number(element.x)) ? Number(element.x) : 0,
+                    y: Number.isFinite(Number(element.y)) ? Number(element.y) : 0,
+                    data: element.data && typeof element.data === 'object' ? element.data : {},
+                };
+            });
+        // Legacy normalization: element-property -> single; get-children -> all/children
+        // (the original "one array of all children"). Both are idempotent and a
+        // no-op for every other node, so running them on every clone/save keeps
+        // loaded, saved and equivalence-checked state consistent.
+        return sanitised.map((element) =>
+            migrateGetChildrenNodeData(migrateElementPropertyNodeData(element))
+        );
     };
 
     const cloneConnections = (items: Connection[]): Connection[] => {
+        let raw: Connection[];
         try {
-            return JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+            raw = JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
         } catch {
-            return Array.isArray(items) ? [...items] : [];
+            raw = Array.isArray(items) ? [...items] : [];
         }
+        // Drop connections that can't be resolved (no endpoints) and coerce the
+        // pin fields to safe strings so `.replace(/^output/…)` etc. never throw
+        // on malformed saved data.
+        return (Array.isArray(raw) ? raw : [])
+            .filter((connection): connection is Connection =>
+                Boolean(connection) && typeof connection === 'object'
+                && typeof connection.fromId === 'string' && connection.fromId !== ''
+                && typeof connection.toId === 'string' && connection.toId !== '')
+            .map((connection, index) => ({
+                ...connection,
+                id: typeof connection.id === 'string' && connection.id !== '' ? connection.id : `conn-recovered-${index}`,
+                fromOutput: typeof connection.fromOutput === 'string' && connection.fromOutput !== '' ? connection.fromOutput : 'output0',
+                toInput: typeof connection.toInput === 'string' && connection.toInput !== '' ? connection.toInput : 'input0',
+            }));
     };
 
     const areSnapshotsEquivalent = (
@@ -5584,14 +6205,44 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
     };
 
+    // One-time migration: the Output node gained a leading "Element" target
+    // input pin, so every pre-existing Output value connection (input0..N) must
+    // shift to (input1..N+1). Marked per node via data.outputTargetElementPin so
+    // it never runs twice. No-op in custom-node mode (Output pins are label
+    // slots there, not element targets) and for every non-Output node.
+    const migrateOutputTargetElementPin = (
+        els: CanvasElement[],
+        conns: Connection[]
+    ): { elements: CanvasElement[]; connections: Connection[] } => {
+        if (customNodeMode) return { elements: els, connections: conns };
+        const shiftNodeIds = new Set<string>();
+        const nextEls = els.map((el) => {
+            if (el.type !== 'output' || el.data?.outputTargetElementPin === true) return el;
+            shiftNodeIds.add(el.id);
+            return { ...el, data: { ...el.data, outputTargetElementPin: true } };
+        });
+        if (shiftNodeIds.size === 0) return { elements: nextEls, connections: conns };
+        const nextConns = conns.map((connection) => {
+            if (!shiftNodeIds.has(connection.toId)) return connection;
+            const match = /^input(\d+)$/i.exec(String(connection.toInput || ''));
+            if (!match) return connection;
+            return { ...connection, toInput: `input${Number(match[1]) + 1}` };
+        });
+        return { elements: nextEls, connections: nextConns };
+    };
+
     const normalizeSnapshotState = (snapshot: Partial<SavedState> | null | undefined): SavedState | null => {
         if (!snapshot || typeof snapshot !== 'object') {
             return null;
         }
 
+        const migrated = migrateOutputTargetElementPin(
+            cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []),
+            cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : [])
+        );
         return {
-            elements: cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []),
-            connections: cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : []),
+            elements: migrated.elements,
+            connections: migrated.connections,
             formula: typeof snapshot.formula === 'string' ? snapshot.formula : '',
             customNodeUi: snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null,
             updatedAt: Number.isFinite(Number(snapshot.updatedAt)) ? Number(snapshot.updatedAt) : Date.now(),
@@ -5619,8 +6270,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return;
         }
 
-        const nextElements = cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []);
-        const nextConnections = cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : []);
+        const migratedSnapshot = migrateOutputTargetElementPin(
+            cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []),
+            cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : [])
+        );
+        const nextElements = migratedSnapshot.elements;
+        const nextConnections = migratedSnapshot.connections;
         const nextFormula = typeof snapshot.formula === 'string' ? snapshot.formula : '';
         const nextCustomNodeUi = snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null;
         const normalizedElements = updateElementValueTypes(
@@ -5927,8 +6582,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
 
         if (activeSnapshot) {
-            const nextElements = cloneCanvasElements(Array.isArray(activeSnapshot.elements) ? activeSnapshot.elements : []);
-            const nextConnections = cloneConnections(Array.isArray(activeSnapshot.connections) ? activeSnapshot.connections : []);
+            const migratedActive = migrateOutputTargetElementPin(
+                cloneCanvasElements(Array.isArray(activeSnapshot.elements) ? activeSnapshot.elements : []),
+                cloneConnections(Array.isArray(activeSnapshot.connections) ? activeSnapshot.connections : [])
+            );
+            const nextElements = migratedActive.elements;
+            const nextConnections = migratedActive.connections;
             const nextFormula = typeof activeSnapshot.formula === 'string' ? activeSnapshot.formula : '';
             const nextCustomNodeUi = activeSnapshot.customNodeUi ? normalizeCustomNodeUiState(activeSnapshot.customNodeUi) : null;
             const normalizedElements = updateElementValueTypes(
@@ -6150,6 +6809,256 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         refreshTemplates();
     }, [refreshTemplates, templateToolsEnabled]);
 
+    // ── Element Property: apply a config change + prune now-invalid connections ─
+    const applyNodeDataChange = (nodeId: string, dataPatch: Record<string, unknown>) => {
+        const patchedElements = (elementsRef.current || []).map((element) =>
+            element.id === nodeId
+                ? { ...element, data: { ...element.data, ...dataPatch } }
+                : element
+        );
+        const nextElements = updateElementValueTypes(patchedElements, connectionsRef.current);
+        const nextConnections = pruneStaleDynamicOutputConnections(nextElements, connectionsRef.current);
+        const connectionsChanged = nextConnections.length !== (connectionsRef.current || []).length;
+
+        elementsRef.current = nextElements;
+        setElements(nextElements);
+
+        if (connectionsChanged) {
+            syncConnectionsAndTypes(nextConnections);
+        }
+    };
+
+    // Resolve the manual / dropdown target id a connected element-ref points at.
+    const resolveElementRefTargetId = (refNode: CanvasElement | null | undefined): string =>
+        refNode
+            ? String(
+                refNode.data?.elementUseManualId
+                    ? (refNode.data?.customElementId || '')
+                    : (refNode.data?.selectedElement || '')
+            ).trim()
+            : '';
+
+    const parsePinIndex = (pinName: string | undefined): number => {
+        const n = Number.parseInt(String(pinName || '').replace(/^(?:output|input)/i, ''), 10);
+        return Number.isFinite(n) && n >= 0 ? n : 0;
+    };
+
+    // Editor-side mirror of the runtime element-resolution chain: given a node
+    // and one of its output pins, return the concrete live preview Element that
+    // pin represents (or null). Per-node-type dispatch, exactly like
+    // buildNodeExpression / getOutputPinType — extensible by adding a case, not a
+    // special-case at the call site. Used so any element-producing node feeding
+    // an `element` pin is inspected for its real properties, not just element-ref.
+    const resolveNodeOutputPreviewElement = (
+        node: CanvasElement | null | undefined,
+        outputIndex: number,
+        depth = 0
+    ): Element | null => {
+        if (!node || depth > 12) return null;
+
+        const resolveInput0Element = (): Element | null => {
+            const conn = connectionsRef.current.find(
+                (candidate) => candidate.toId === node.id && candidate.toInput === 'input0'
+            );
+            if (!conn) return null;
+            const source = elementsRef.current.find((element) => element.id === conn.fromId);
+            return resolveNodeOutputPreviewElement(source, parsePinIndex(conn.fromOutput), depth + 1);
+        };
+
+        switch (node.type) {
+            case 'element-ref': {
+                const id = resolveElementRefTargetId(node);
+                return id ? resolvePreviewElement(id, { unwrapControl: false }) : null;
+            }
+            case 'get-children': {
+                const mode = readGetChildrenMode(node.data);
+                // The "Children" array output is not a single element.
+                if (mode !== 'single' && readGetChildrenReturnAs(node.data) === 'children') {
+                    return null;
+                }
+                // Same detection-independent pin -> child-index mapping the
+                // formula uses, so the editor preview and the frontend resolve
+                // the identical child.
+                const childIndex = getChildrenPinChildIndex(node.data, outputIndex);
+                if (childIndex === null) return null;
+                return getPreviewChildAt(resolveInput0Element(), childIndex);
+            }
+            case 'array-for-each': {
+                // Editor-time representative for the loop item: the first element
+                // of the source array (best effort — runtime iterates all).
+                if (outputIndex !== 0) return null;
+                const conn = connectionsRef.current.find(
+                    (candidate) => candidate.toId === node.id && candidate.toInput === 'input0'
+                );
+                const source = conn ? elementsRef.current.find((element) => element.id === conn.fromId) : null;
+                if (!source) return null;
+                if (source.type === 'get-children') {
+                    const first = getChildrenPinChildIndex(source.data, 0) ?? 0;
+                    const parentConn = connectionsRef.current.find(
+                        (candidate) => candidate.toId === source.id && candidate.toInput === 'input0'
+                    );
+                    const parentSource = parentConn ? elementsRef.current.find((element) => element.id === parentConn.fromId) : null;
+                    return getPreviewChildAt(
+                        resolveNodeOutputPreviewElement(parentSource, parsePinIndex(parentConn?.fromOutput), depth + 1),
+                        first
+                    );
+                }
+                return null;
+            }
+            case 'fallback':
+            case 'node-branch':
+            case 'switch-branch': {
+                // Pass-through nodes that can carry an element value: follow input0.
+                return resolveInput0Element();
+            }
+            default:
+                return null;
+        }
+    };
+
+    // Refresh detection when the editor preview DOM mutates (Gutenberg / Elementor).
+    const hasElementPropertyNode = elements.some((element) => element.type === 'element-property');
+    const hasGetChildrenNode = elements.some((element) => element.type === 'get-children');
+    const needsPreviewDetection = hasElementPropertyNode || hasGetChildrenNode;
+    useEffect(() => {
+        if (!needsPreviewDetection) return undefined;
+        const dispose = observePreviewDomChanges(
+            () => setPreviewDomVersion((version) => version + 1),
+            { debounceMs: 150 }
+        );
+        return dispose;
+    }, [needsPreviewDetection]);
+
+    // Recompute detected properties for every element-property node.
+    useEffect(() => {
+        const propertyNodes = elementsRef.current.filter((element) => element.type === 'element-property');
+        const nextDetections: Record<string, DetectedElementProperty[]> = {};
+
+        propertyNodes.forEach((node) => {
+            const connection = connectionsRef.current.find(
+                (candidate) => candidate.toId === node.id && candidate.toInput === 'input0'
+            );
+            const sourceNode = connection
+                ? elementsRef.current.find((element) => element.id === connection.fromId)
+                : null;
+
+            // Resolve the concrete live element this node's Element input points
+            // at, whatever produced it (element-ref by id, Get Children child,
+            // a pass-through node, ...). Falls back to null when nothing is
+            // connected or the source can't be resolved in the current preview.
+            const liveElement = connection
+                ? resolveNodeOutputPreviewElement(sourceNode, parsePinIndex(connection.fromOutput))
+                : null;
+
+            // Legacy static supplement: only when the source is an element-ref
+            // whose id maps to a known NodeLogic block (DetectedElement).
+            const staticId = sourceNode?.type === 'element-ref' ? resolveElementRefTargetId(sourceNode) : '';
+
+            // The Element input is a *generic* element (no concrete preview node
+            // to sniff) when the wired source pin is element-typed — e.g. an
+            // Array<element> loop item from For Each. O(1): a pin-type lookup,
+            // never any iteration over the runtime array. Drives only which
+            // fallback property list the editor offers; runtime is untouched.
+            const sourceIsElementTyped = !!sourceNode
+                && getOutputPinType(sourceNode, parsePinIndex(connection?.fromOutput ?? 'output0')) === 'element';
+
+            if (!liveElement && !staticId) {
+                nextDetections[node.id] = sourceIsElementTyped ? genericElementProperties() : [];
+                return;
+            }
+
+            let live: DetectedElementProperty[] = [];
+            if (liveElement) {
+                try {
+                    live = detectElementProperties('', { element: liveElement }).properties;
+                } catch {
+                    live = [];
+                }
+            }
+
+            const detectedElement = staticId
+                ? detectedElementsRef.current.find((entry) => entry.id === staticId)
+                : null;
+            const staticProps: DetectedElementProperty[] = detectedElement
+                ? getElementTypeProps(detectedElement).map((property) => ({
+                    key: property.key,
+                    type: property.type,
+                    source: 'dom-property' as const,
+                }))
+                : [];
+
+            const seenKeys = new Set(live.map((property) => property.key.toLowerCase()));
+            const merged = [...live];
+            staticProps.forEach((property) => {
+                if (!seenKeys.has(property.key.toLowerCase())) {
+                    seenKeys.add(property.key.toLowerCase());
+                    merged.push(property);
+                }
+            });
+
+            nextDetections[node.id] = merged;
+        });
+
+        const signature = JSON.stringify(nextDetections);
+        if (signature === elementPropertyDetectionSignatureRef.current) {
+            return;
+        }
+        elementPropertyDetectionSignatureRef.current = signature;
+        elementPropertyDetectionsRef.current = nextDetections;
+        setElementPropertyDetections(nextDetections);
+
+        const prunedConnections = pruneStaleDynamicOutputConnections(
+            elementsRef.current,
+            connectionsRef.current
+        );
+        if (prunedConnections.length !== connectionsRef.current.length) {
+            syncConnectionsAndTypes(prunedConnections);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [elements, connections, detectedElements, previewDomVersion]);
+
+    // Recompute detected direct children for every get-children node.
+    useEffect(() => {
+        const childNodes = elementsRef.current.filter((element) => element.type === 'get-children');
+        const nextDetections: Record<string, DetectedChild[]> = {};
+
+        childNodes.forEach((node) => {
+            const connection = connectionsRef.current.find(
+                (candidate) => candidate.toId === node.id && candidate.toInput === 'input0'
+            );
+            const refNode = connection
+                ? elementsRef.current.find((element) => element.id === connection.fromId)
+                : null;
+            const targetId = resolveElementRefTargetId(refNode);
+            if (!targetId) {
+                nextDetections[node.id] = [];
+                return;
+            }
+            try {
+                nextDetections[node.id] = detectElementChildren(targetId).children;
+            } catch {
+                nextDetections[node.id] = [];
+            }
+        });
+
+        const signature = JSON.stringify(nextDetections);
+        if (signature === elementChildrenDetectionSignatureRef.current) {
+            return;
+        }
+        elementChildrenDetectionSignatureRef.current = signature;
+        elementChildrenDetectionsRef.current = nextDetections;
+        setElementChildrenDetections(nextDetections);
+
+        const prunedConnections = pruneStaleDynamicOutputConnections(
+            elementsRef.current,
+            connectionsRef.current
+        );
+        if (prunedConnections.length !== connectionsRef.current.length) {
+            syncConnectionsAndTypes(prunedConnections);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [elements, connections, detectedElements, previewDomVersion]);
+
     useEffect(() => {
         if (!isStateLoaded || templateMode || customNodeMode || draftRecoveryCheckedRef.current) {
             return;
@@ -6252,6 +7161,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const getDefaultNodeDataForTreeItem = (type: TreeItem['type']): CanvasElement['data'] => {
         switch (type) {
+            case 'output':
+                // New Output nodes already have the leading Element pin, so they
+                // must not be reindexed by the migration.
+                return { outputTargetElementPin: true };
             case 'array':
                 return { arrayItemType: 'number', arrayItemSchema: [] };
             case 'chart-data':
@@ -6309,7 +7222,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'element-ref':
                 return { selectedElement: '', elementUseManualId: false, customElementId: '' };
             case 'element-property':
-                return { elementProperty: '', elementPropertyUseManual: false, elementPropertyType: 'number' };
+                return { elementProperty: '', elementPropertyUseManual: false, elementPropertyType: 'number', elementPropertyMode: 'single' as const };
+            case 'get-children':
+                return { getChildrenMode: 'all' as const, getChildrenReturnAs: 'children' as const };
             case 'element-id':
                 return { elementId: '', customOutputType: 'string' as const };
             // New action nodes
@@ -6370,14 +7285,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return;
         }
         pushHistory(elementsRef.current, connectionsRef.current);
-        setElements((prev) => {
-            const next = prev.filter((element) => element.id !== elementId);
-            if (selected === elementId) {
-                setSelected(next[0]?.id || null);
-            }
-            return next;
-        });
-        setConnections((prev) => prev.filter((connection) => connection.fromId !== elementId && connection.toId !== elementId));
+        // Drop the node's wires first, then recompute downstream value types
+        // against the post-delete connection set — matching every other mutation
+        // path so a node that fed a now-deleted source doesn't keep a stale type.
+        const nextConnections = (connectionsRef.current || []).filter(
+            (connection) => connection.fromId !== elementId && connection.toId !== elementId
+        );
+        setConnections(nextConnections);
+        setElements((prev) =>
+            updateElementValueTypes(prev.filter((element) => element.id !== elementId), nextConnections)
+        );
+        if (selectedRef.current === elementId) {
+            const fallback = (elementsRef.current || []).find(
+                (element) => element.id !== elementId && element.id !== 'main-block'
+            );
+            setSelected(fallback ? fallback.id : null);
+        }
         markGraphDirty();
     };
 
@@ -6387,7 +7310,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
 
         const target = event.target as HTMLElement | null;
-        if (target?.closest('.pin') || target?.closest('.input-control') || target?.closest('.delete-btn') || target?.closest('.api-list-mapper-scroll')) {
+        if (
+            target?.closest('.pin')
+            || target?.closest('.input-control')
+            || target?.closest('.delete-btn')
+            || target?.closest('.api-list-mapper-scroll')
+            || target?.closest('.nl-scroll-guard')
+        ) {
             return;
         }
 
@@ -6480,7 +7409,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const handleWheel = (event: WheelEvent | React.WheelEvent<HTMLElement>) => {
         const target = event.target as HTMLElement | null;
-        if (apiListMapperScrollLockRef.current || target?.closest('.api-list-mapper-scroll')) {
+        if (
+            apiListMapperScrollLockRef.current
+            || target?.closest('.api-list-mapper-scroll')
+            || target?.closest('.nl-scroll-guard')
+        ) {
+            // Wheel started inside a scrollable node sub-panel (property list,
+            // child list, ...). Let the browser scroll that element natively —
+            // do not preventDefault and do not zoom the canvas.
             return;
         }
 
@@ -7401,6 +8337,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'element'
                             || el.type === 'element-ref'
                             || el.type === 'element-property'
+                            || el.type === 'get-children'
                             || el.type === 'output'
                             || el.type === 'constant-boolean'
                             || el.type === 'constant-string'
@@ -7461,13 +8398,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 }}
                                 title={dynamicInputGapErrors[el.id] || ''}
                                 onMouseDown={(e) => {
-                                    // Don't trigger element select on pin interaction
+                                    // Don't start a node drag from a pin, a form
+                                    // control, or a scrollable config sub-panel
+                                    // (its scrollbar included) — just consume it.
                                     const target = e.target as HTMLElement;
-                                    if (target.classList.contains('pin') || target.classList.contains('input-control')) {
+                                    if (
+                                        target.classList.contains('pin')
+                                        || target.classList.contains('input-control')
+                                        || target.closest('.nl-scroll-guard')
+                                    ) {
                                         e.stopPropagation();
                                         return;
                                     }
-                                    
+
                                     // Delegate to handleMouseDown in canvas
                                     handleMouseDown(e as any);
                                     e.stopPropagation();
@@ -7587,6 +8530,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     <option value="boolean">Boolean</option>
                                                     <option value="color">Color</option>
                                                     <option value="zip">Object</option>
+                                                    <option value="element">Element</option>
                                                 </select>
                                             ) : el.type === 'condition' ? (
                                                 <div className="input-row-special">
@@ -7977,93 +8921,388 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'element-property' ? (
                                                 (() => {
-                                                    // Build property options from the connected element-ref node
-                                                    const connectedElementRefId = connections.find(c =>
-                                                        c.toId === el.id && c.toInput === 'input0'
-                                                    )?.fromId;
-                                                    const connectedRef = connectedElementRefId
-                                                        ? elements.find(e => e.id === connectedElementRefId)
+                                                    const nodeId = el.id;
+                                                    const data = el.data || {};
+                                                    const mode = getElementPropertyMode(el);
+                                                    const detected = getAutoDetectedProperties(nodeId);
+                                                    const elementInputConnection = connections.find((c) => c.toId === nodeId && c.toInput === 'input0');
+                                                    const elementInputSource = elementInputConnection
+                                                        ? elements.find((e) => e.id === elementInputConnection.fromId)
                                                         : null;
-                                                    const refElementId = connectedRef?.data?.elementUseManualId
-                                                        ? String(connectedRef?.data?.customElementId || '')
-                                                        : String(connectedRef?.data?.selectedElement || '');
-                                                    const detectedEl = refElementId
-                                                        ? detectedElements.find(d => d.id === refElementId)
-                                                        : null;
-                                                    const knownProps: Array<{ key: string; type: 'number' | 'string' | 'boolean' }> = getElementTypeProps(detectedEl);
-                                                    const currentProp = el.data?.elementProperty || '';
-                                                    const useManual = !!el.data?.elementPropertyUseManual;
-                                                    // Detect type from known props
-                                                    const inferredType = knownProps.find(p => p.key === currentProp)?.type;
+                                                    const selected = Array.isArray(data.elementPropertySelected)
+                                                        ? data.elementPropertySelected
+                                                        : [];
+                                                    const selectedKeys = new Set(selected.map((entry) => entry.key));
+                                                    const currentSingle = String(data.elementProperty || '');
+                                                    const listExpanded = customPropertyListExpanded.has(nodeId);
+                                                    const draft = customPropertyDraft[nodeId] || '';
+
+                                                    // Single dropdown: detected props + the current key even when it
+                                                    // is not (currently) detected, so a migrated legacy manual
+                                                    // property is never silently dropped.
+                                                    const singleOptions: Array<{ key: string; type: string }> = detected.map((p) => ({ key: p.key, type: p.type }));
+                                                    if (currentSingle && !singleOptions.some((option) => option.key === currentSingle)) {
+                                                        singleOptions.unshift({ key: currentSingle, type: getElementPropertyKeyType(el, currentSingle) });
+                                                    }
+                                                    const singleType = currentSingle ? getElementPropertyKeyType(el, currentSingle) : '';
+
+                                                    // Custom-mode clickable list: every detected prop + any selected
+                                                    // key not currently detected (kept so a temporarily missing DOM
+                                                    // property does not destroy the saved selection).
+                                                    const itemByKey = new Map<string, { key: string; type: string; origin: 'detected' | 'custom'; selected: boolean }>();
+                                                    detected.forEach((p) => {
+                                                        itemByKey.set(p.key, { key: p.key, type: p.type, origin: 'detected', selected: selectedKeys.has(p.key) });
+                                                    });
+                                                    selected.forEach((entry) => {
+                                                        const existing = itemByKey.get(entry.key);
+                                                        if (existing) {
+                                                            existing.selected = true;
+                                                            if (entry.origin === 'custom') existing.origin = 'custom';
+                                                        } else {
+                                                            itemByKey.set(entry.key, {
+                                                                key: entry.key,
+                                                                type: getElementPropertyKeyType(el, entry.key),
+                                                                origin: entry.origin === 'custom' ? 'custom' : 'detected',
+                                                                selected: true,
+                                                            });
+                                                        }
+                                                    });
+                                                    const customItems = Array.from(itemByKey.values());
+
+                                                    const setMode = (nextMode: ElementPropertyMode) => {
+                                                        if (nextMode === mode) return;
+                                                        const patch: Record<string, unknown> = { elementPropertyMode: nextMode };
+                                                        if (nextMode === 'custom' && !Array.isArray(data.elementPropertySelected)) {
+                                                            patch.elementPropertySelected = currentSingle
+                                                                ? [{ key: currentSingle, origin: detected.some((p) => p.key === currentSingle) ? 'detected' : 'custom' }]
+                                                                : [];
+                                                        }
+                                                        applyNodeDataChange(nodeId, patch);
+                                                    };
+                                                    const setSingle = (key: string) => {
+                                                        applyNodeDataChange(nodeId, {
+                                                            elementProperty: key,
+                                                            elementPropertyType: key ? getElementPropertyKeyType(el, key) : undefined,
+                                                        });
+                                                    };
+                                                    const commitSelected = (nextSelected: ElementPropertySelectedEntry[]) => {
+                                                        applyNodeDataChange(nodeId, { elementPropertySelected: nextSelected });
+                                                    };
+                                                    const toggleDetected = (key: string) => {
+                                                        commitSelected(
+                                                            selectedKeys.has(key)
+                                                                ? selected.filter((entry) => entry.key !== key)
+                                                                : [...selected, { key, origin: 'detected' as const }]
+                                                        );
+                                                    };
+                                                    const removeCustom = (key: string) => {
+                                                        commitSelected(selected.filter((entry) => entry.key !== key));
+                                                    };
+                                                    const addCustom = (raw: string) => {
+                                                        const key = raw.trim();
+                                                        if (!key || selected.some((entry) => entry.key === key)) {
+                                                            setCustomPropertyDraft((prev) => ({ ...prev, [nodeId]: '' }));
+                                                            return;
+                                                        }
+                                                        const origin: 'detected' | 'custom' = detected.some((p) => p.key === key) ? 'detected' : 'custom';
+                                                        commitSelected([...selected, { key, origin }]);
+                                                        setCustomPropertyDraft((prev) => ({ ...prev, [nodeId]: '' }));
+                                                    };
+                                                    const toggleExpanded = () => {
+                                                        setCustomPropertyListExpanded((prev) => {
+                                                            const next = new Set(prev);
+                                                            if (next.has(nodeId)) next.delete(nodeId);
+                                                            else next.add(nodeId);
+                                                            return next;
+                                                        });
+                                                    };
+
                                                     return (
-                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                            {useManual ? (
-                                                                <input
-                                                                    type="text"
-                                                                    className="input-control"
-                                                                    value={currentProp}
-                                                                    placeholder="e.g. value, max, data-x"
-                                                                    onChange={(e) => {
-                                                                        const elementProperty = e.target.value;
-                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: undefined } } : elem
-                                                                        )));
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                />
-                                                            ) : knownProps.length > 0 ? (
-                                                                <select
-                                                                    className="input-control"
-                                                                    value={currentProp}
-                                                                    onChange={(e) => {
-                                                                        const elementProperty = e.target.value;
-                                                                        const propType = knownProps.find(p => p.key === elementProperty)?.type;
-                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty, elementPropertyType: propType } } : elem
-                                                                        )));
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                >
-                                                                    <option value="">-- Property --</option>
-                                                                    {knownProps.map(p => (
-                                                                        <option key={p.key} value={p.key}>{p.key} ({p.type})</option>
-                                                                    ))}
-                                                                </select>
-                                                            ) : (
-                                                                <input
-                                                                    type="text"
-                                                                    className="input-control"
-                                                                    value={currentProp}
-                                                                    placeholder="Connect element first"
-                                                                    onChange={(e) => {
-                                                                        const elementProperty = e.target.value;
-                                                                        setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                            elem.id === el.id ? { ...elem, data: { ...elem.data, elementProperty } } : elem
-                                                                        )));
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                />
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }} onClick={(e) => e.stopPropagation()}>
+                                                            <div style={{ fontSize: '10px', color: elementInputSource ? '#86efac' : '#94a3b8' }}>
+                                                                {elementInputSource
+                                                                    ? `Element: from ${elementInputSource.name || elementInputSource.type} pin`
+                                                                    : 'Element: connect the Element pin (or an Element Reference)'}
+                                                            </div>
+                                                            <select
+                                                                className="input-control"
+                                                                value={mode}
+                                                                onChange={(e) => setMode(e.target.value as ElementPropertyMode)}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            >
+                                                                <option value="single">Single</option>
+                                                                <option value="all">All</option>
+                                                                <option value="custom">Custom</option>
+                                                            </select>
+
+                                                            {mode === 'single' && (
+                                                                <>
+                                                                    <select
+                                                                        className="input-control"
+                                                                        value={currentSingle}
+                                                                        onChange={(e) => setSingle(e.target.value)}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                    >
+                                                                        <option value="">-- Property --</option>
+                                                                        {singleOptions.map((option) => (
+                                                                            <option key={option.key} value={option.key}>
+                                                                                {option.key}{option.type ? ` (${option.type})` : ''}
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                    {currentSingle && singleType && (
+                                                                        <div style={{ fontSize: '10px', color: '#64748b' }}>Type: {singleType}</div>
+                                                                    )}
+                                                                    {detected.length === 0 && (
+                                                                        <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                                                            No live preview element — type a property name above.
+                                                                        </div>
+                                                                    )}
+                                                                </>
                                                             )}
-                                                            {!useManual && inferredType && (
-                                                                <div style={{ fontSize: '10px', color: '#64748b' }}>Type: {inferredType}</div>
+
+                                                            {mode === 'all' && (
+                                                                <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                                                    {detected.length > 0 ? (
+                                                                        <>
+                                                                            <div>{detected.length} propert{detected.length === 1 ? 'y' : 'ies'} &rarr; {detected.length} output{detected.length === 1 ? '' : 's'}</div>
+                                                                            <div className="nl-scroll-guard" style={{ marginTop: '3px', maxHeight: '92px', overflowY: 'auto' }}>
+                                                                                {detected.map((p) => (
+                                                                                    <div key={p.key}>&#9679; {p.key} <span style={{ opacity: 0.6 }}>({p.type})</span></div>
+                                                                                ))}
+                                                                            </div>
+                                                                        </>
+                                                                    ) : (
+                                                                        <span>No properties detected. Connect an Element Reference to an element that exists in the preview.</span>
+                                                                    )}
+                                                                </div>
                                                             )}
-                                                            <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
-                                                                <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
+
+                                                            {mode === 'custom' && (
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="input-control"
+                                                                        style={{ textAlign: 'left', cursor: 'pointer' }}
+                                                                        onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+                                                                    >
+                                                                        Properties {listExpanded ? '▾' : '▸'} ({selected.length} selected)
+                                                                    </button>
+                                                                    {listExpanded && (
+                                                                        <div className="nl-scroll-guard" style={{ maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                                            {customItems.length === 0 && (
+                                                                                <div style={{ fontSize: '10px', color: '#94a3b8', padding: '2px 4px' }}>
+                                                                                    No detected properties. Add a custom property below.
+                                                                                </div>
+                                                                            )}
+                                                                            {customItems.map((item) => (
+                                                                                <div
+                                                                                    key={item.key}
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        if (item.origin === 'custom') removeCustom(item.key);
+                                                                                        else toggleDetected(item.key);
+                                                                                    }}
+                                                                                    title={item.origin === 'custom'
+                                                                                        ? 'Custom property — click to remove'
+                                                                                        : (item.selected ? 'Click to deselect' : 'Click to select')}
+                                                                                    style={{
+                                                                                        cursor: 'pointer',
+                                                                                        userSelect: 'none',
+                                                                                        fontSize: '11px',
+                                                                                        padding: '3px 6px',
+                                                                                        borderRadius: '3px',
+                                                                                        display: 'flex',
+                                                                                        justifyContent: 'space-between',
+                                                                                        alignItems: 'center',
+                                                                                        background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
+                                                                                        color: item.selected ? '#86efac' : '#fca5a5',
+                                                                                    }}
+                                                                                >
+                                                                                    <span>{item.origin === 'custom' ? '★ ' : ''}{item.key}</span>
+                                                                                    <span style={{ opacity: 0.6 }}>{item.type}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
                                                                     <input
-                                                                        type="checkbox"
-                                                                        checked={useManual}
+                                                                        type="text"
+                                                                        className="input-control"
+                                                                        placeholder="Add custom property, press Enter"
+                                                                        value={draft}
                                                                         onChange={(e) => {
-                                                                            const elementPropertyUseManual = e.target.checked;
-                                                                            setElements(prev => updateElementValueTypes(prev.map(elem =>
-                                                                                elem.id === el.id ? { ...elem, data: { ...elem.data, elementPropertyUseManual } } : elem
-                                                                            )));
+                                                                            const value = e.target.value;
+                                                                            setCustomPropertyDraft((prev) => ({ ...prev, [nodeId]: value }));
+                                                                        }}
+                                                                        onKeyDown={(e) => {
+                                                                            if (e.key === 'Enter') {
+                                                                                e.preventDefault();
+                                                                                addCustom(e.currentTarget.value);
+                                                                            }
                                                                         }}
                                                                         onClick={(e) => e.stopPropagation()}
-                                                                        style={{ cursor: 'pointer' }}
                                                                     />
-                                                                    Manual property
-                                                                </label>
-                                                            </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()
+                                            ) : el.type === 'get-children' ? (
+                                                (() => {
+                                                    const nodeId = el.id;
+                                                    const data = el.data || {};
+                                                    const mode = readGetChildrenMode(data);
+                                                    const returnAs = readGetChildrenReturnAs(data);
+                                                    const detected = getGetChildrenDetectedChildren(nodeId);
+                                                    const singleIndex = readGetChildrenSingleIndex(data);
+                                                    const selected = readGetChildrenSelectedIndices(data);
+                                                    const selectedSet = new Set(selected);
+                                                    const listExpanded = customPropertyListExpanded.has(nodeId);
+
+                                                    const setMode = (nextMode: GetChildrenMode) => {
+                                                        if (nextMode !== mode) applyNodeDataChange(nodeId, { getChildrenMode: nextMode });
+                                                    };
+                                                    const setReturnAs = (nextReturnAs: GetChildrenReturnAs) => {
+                                                        if (nextReturnAs !== returnAs) applyNodeDataChange(nodeId, { getChildrenReturnAs: nextReturnAs });
+                                                    };
+                                                    const setSingle = (index: number) => {
+                                                        applyNodeDataChange(nodeId, { getChildrenSingleIndex: Math.max(0, Math.trunc(index) || 0) });
+                                                    };
+                                                    const toggleChild = (index: number) => {
+                                                        applyNodeDataChange(nodeId, {
+                                                            getChildrenSelected: selectedSet.has(index)
+                                                                ? selected.filter((value) => value !== index)
+                                                                : [...selected, index],
+                                                        });
+                                                    };
+                                                    const toggleExpanded = () => {
+                                                        setCustomPropertyListExpanded((prev) => {
+                                                            const next = new Set(prev);
+                                                            if (next.has(nodeId)) next.delete(nodeId);
+                                                            else next.add(nodeId);
+                                                            return next;
+                                                        });
+                                                    };
+
+                                                    const singleOptions: Array<{ value: number; label: string }> =
+                                                        detected.map((child) => ({ value: child.index, label: child.label }));
+                                                    if (singleIndex >= detected.length) {
+                                                        singleOptions.push({ value: singleIndex, label: `${singleIndex}: (not in preview)` });
+                                                    }
+
+                                                    const itemByIndex = new Map<number, { index: number; label: string; selected: boolean; missing: boolean }>();
+                                                    detected.forEach((child) => {
+                                                        itemByIndex.set(child.index, { index: child.index, label: child.label, selected: selectedSet.has(child.index), missing: false });
+                                                    });
+                                                    selected.forEach((index) => {
+                                                        const existing = itemByIndex.get(index);
+                                                        if (existing) existing.selected = true;
+                                                        else itemByIndex.set(index, { index, label: `${index}: (not in preview)`, selected: true, missing: true });
+                                                    });
+                                                    const customItems = Array.from(itemByIndex.values()).sort((a, b) => a.index - b.index);
+
+                                                    const returnAsControl = (
+                                                        <div style={{ display: 'flex', gap: '10px', fontSize: '11px', color: '#94a3b8', alignItems: 'center' }}>
+                                                            <span>Return as:</span>
+                                                            <label style={{ display: 'flex', alignItems: 'center', gap: '3px', cursor: 'pointer' }}>
+                                                                <input type="radio" checked={returnAs === 'child'} onChange={() => setReturnAs('child')} onClick={(e) => e.stopPropagation()} /> Child
+                                                            </label>
+                                                            <label style={{ display: 'flex', alignItems: 'center', gap: '3px', cursor: 'pointer' }}>
+                                                                <input type="radio" checked={returnAs === 'children'} onChange={() => setReturnAs('children')} onClick={(e) => e.stopPropagation()} /> Children
+                                                            </label>
+                                                        </div>
+                                                    );
+
+                                                    return (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }} onClick={(e) => e.stopPropagation()}>
+                                                            <select
+                                                                className="input-control"
+                                                                value={mode}
+                                                                onChange={(e) => setMode(e.target.value as GetChildrenMode)}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            >
+                                                                <option value="single">Single</option>
+                                                                <option value="all">All</option>
+                                                                <option value="custom">Custom</option>
+                                                            </select>
+
+                                                            {mode === 'single' && (
+                                                                detected.length > 0 ? (
+                                                                    <select
+                                                                        className="input-control"
+                                                                        value={String(singleIndex)}
+                                                                        onChange={(e) => setSingle(Number(e.target.value))}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                    >
+                                                                        {singleOptions.map((option) => (
+                                                                            <option key={option.value} value={String(option.value)}>{option.label}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                ) : (
+                                                                    <input
+                                                                        className="input-control"
+                                                                        type="number"
+                                                                        min={0}
+                                                                        value={String(singleIndex)}
+                                                                        placeholder="Child index (no preview)"
+                                                                        onChange={(e) => setSingle(Number(e.target.value))}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                    />
+                                                                )
+                                                            )}
+
+                                                            {mode === 'all' && (
+                                                                <>
+                                                                    <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                                                        {detected.length > 0
+                                                                            ? `${detected.length} child${detected.length === 1 ? '' : 'ren'} detected`
+                                                                            : 'No children detected. Connect an Element Reference to an element in the preview.'}
+                                                                    </div>
+                                                                    {returnAsControl}
+                                                                </>
+                                                            )}
+
+                                                            {mode === 'custom' && (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="input-control"
+                                                                        style={{ textAlign: 'left', cursor: 'pointer' }}
+                                                                        onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+                                                                    >
+                                                                        Children {listExpanded ? '▾' : '▸'} ({selected.length} selected)
+                                                                    </button>
+                                                                    {listExpanded && (
+                                                                        <div className="nl-scroll-guard" style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                                            {customItems.length === 0 && (
+                                                                                <div style={{ fontSize: '10px', color: '#94a3b8', padding: '2px 4px' }}>No children detected.</div>
+                                                                            )}
+                                                                            {customItems.map((item) => (
+                                                                                <div
+                                                                                    key={item.index}
+                                                                                    onClick={(e) => { e.stopPropagation(); toggleChild(item.index); }}
+                                                                                    title={item.selected ? 'Click to deselect' : 'Click to select'}
+                                                                                    style={{
+                                                                                        cursor: 'pointer',
+                                                                                        userSelect: 'none',
+                                                                                        fontSize: '11px',
+                                                                                        padding: '3px 6px',
+                                                                                        borderRadius: '3px',
+                                                                                        display: 'flex',
+                                                                                        justifyContent: 'space-between',
+                                                                                        alignItems: 'center',
+                                                                                        background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
+                                                                                        color: item.selected ? '#86efac' : '#fca5a5',
+                                                                                    }}
+                                                                                >
+                                                                                    <span>{item.missing ? '⚠ ' : ''}{item.label}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                    {returnAsControl}
+                                                                </>
+                                                            )}
                                                         </div>
                                                     );
                                                 })()
@@ -8288,10 +9527,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     </div>
                                                 </div>
                                             ) : el.type === 'output' ? (
+                                                (() => {
+                                                const outputElementConnection = connections.find((c) => c.toId === el.id && c.toInput === 'input0');
+                                                const outputElementSource = outputElementConnection
+                                                    ? elements.find((e) => e.id === outputElementConnection.fromId)
+                                                    : null;
+                                                return (
                                                 <div className="node-output-controls" style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
                                                     {!customNodeMode && (
                                                         <>
-                                                            {el.data?.useIdInput ? (
+                                                            {outputElementSource ? (
+                                                                <div style={{ fontSize: '10px', color: '#86efac' }}>
+                                                                    Target: {outputElementSource.name || outputElementSource.type} pin (ID controls disabled)
+                                                                </div>
+                                                            ) : el.data?.useIdInput ? (
                                                                 <input
                                                                     type="text"
                                                                     className="input-control output-target-control"
@@ -8337,6 +9586,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 </select>
                                                             )}
                                                             <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                                            {!outputElementSource && (
                                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
                                                                 <input
                                                                     type="checkbox"
@@ -8356,6 +9606,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 />
                                                                 Use ID Input
                                                             </label>
+                                                            )}
                                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer', userSelect: 'none' }} onClick={(e) => e.stopPropagation()}>
                                                                 <input
                                                                     type="checkbox"
@@ -8403,6 +9654,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     )}
                                                 </div>
+                                                );
+                                                })()
                                             ) : el.type === 'string-split' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={(e) => e.stopPropagation()}>
                                                     <input type="text" className="input-control" value={el.data?.splitDelimiter ?? ','} placeholder="Delimiter" onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, splitDelimiter: v } } : em)); }} onClick={(e) => e.stopPropagation()} />

@@ -182,6 +182,7 @@ add_action('elementor/init', function () {
 
                 <div
                     class="nodelogic-logic-block"
+                    data-nodelogic-logic="1"
                     data-editor-id="<?php echo esc_attr($editor_id); ?>"
                     data-graph-state="<?php echo esc_attr($graph_state); ?>"
                     data-formula="<?php echo esc_attr($formula); ?>"

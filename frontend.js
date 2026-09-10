@@ -212,6 +212,11 @@
       "__nodeApiListMapper",
       "__nodeImageFromLink",
       "__nodeImageFromElement",
+      "__nodeGetElement",
+      "__nodeGetElementProp",
+      "__nodeGetChildren",
+      "__nodeGetChildAt",
+      "__nodeGetChildrenSubset",
       "__nodeCountTrue",
       "__nodeGradient",
       "__nodeUnzip",
@@ -702,11 +707,33 @@
 
   function __nodeArrayUnique(arrayValue) {
     const list = Array.isArray(arrayValue) ? arrayValue : [];
-    const seen = new Set();
+    const seenKeys = new Set();
+    const seenRefs = new Set();
     return list.filter((item) => {
-      const key = typeof item === "object" ? JSON.stringify(item) : `${typeof item}:${String(item)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (item && typeof item === "object") {
+        // Live DOM nodes (and any non-serialisable object) dedup by identity —
+        // JSON.stringify(<element>) is "{}" for every element and would collapse
+        // an Array<element> to a single item.
+        if (item.nodeType || typeof item.tagName === "string") {
+          if (seenRefs.has(item)) return false;
+          seenRefs.add(item);
+          return true;
+        }
+        let key;
+        try {
+          key = "o:" + JSON.stringify(item);
+        } catch {
+          if (seenRefs.has(item)) return false;
+          seenRefs.add(item);
+          return true;
+        }
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      }
+      const key = `${typeof item}:${String(item)}`;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
       return true;
     });
   }
@@ -778,15 +805,18 @@
         : requestUrl;
 
       xhr.open(requestMethod, finalUrl, false);
-      xhr.withCredentials = sameOrigin;
+      // Some browsers throw InvalidAccessError when `withCredentials` is set on
+      // a synchronous XHR from a document. Same-origin requests already carry
+      // cookies by default, so recover rather than lose the whole request.
+      try { xhr.withCredentials = sameOrigin; } catch { /* sync-XHR restriction */ }
 
       if (requestMethod !== "GET") {
-        xhr.setRequestHeader("Content-Type", "application/json");
+        try { xhr.setRequestHeader("Content-Type", "application/json"); } catch { /* ignore */ }
       }
 
       const nonce = sameOrigin ? window?.wpApiSettings?.nonce : "";
       if (nonce) {
-        xhr.setRequestHeader("X-WP-Nonce", nonce);
+        try { xhr.setRequestHeader("X-WP-Nonce", nonce); } catch { /* ignore */ }
       }
 
       xhr.send(requestMethod === "GET" ? null : JSON.stringify(data ?? {}));
@@ -981,6 +1011,61 @@
     });
   }
 
+  // Canonical NodeLogic element-attribute selectors, in resolution priority order.
+  const NL_ELEMENT_ATTR_SELECTORS = [
+    "data-nodelogic-id",
+    "data-nodelogic-chart-id",
+    "data-nodelogic-custom-element-id",
+    "data-slider-id"
+  ];
+
+  // Run the canonical selector chain inside a single document.
+  // Preserves the historical behaviour of resolveNodeElement:
+  //   - #/./[ selectors  -> querySelector (no id/attr fallback)
+  //   - bare token       -> getElementById, then data-* attribute selectors
+  function nlQueryElementInDocument(selector, doc) {
+    if (!doc || typeof doc.querySelector !== "function") return null;
+
+    if (selector.startsWith("#") || selector.startsWith(".") || selector.includes("[")) {
+      try {
+        return doc.querySelector(selector) || null;
+      } catch {
+        return null;
+      }
+    }
+
+    if (typeof doc.getElementById === "function") {
+      const byId = doc.getElementById(selector);
+      if (byId) return byId;
+    }
+
+    for (let i = 0; i < NL_ELEMENT_ATTR_SELECTORS.length; i++) {
+      try {
+        const found = doc.querySelector(
+          `[${NL_ELEMENT_ATTR_SELECTORS[i]}="${CSS.escape(selector)}"]`
+        );
+        if (found) return found;
+      } catch {
+        /* ignore malformed selector for this attribute */
+      }
+    }
+
+    return null;
+  }
+
+  // Safely reach an iframe's document; returns null for cross-origin / unloaded frames.
+  function nlAccessibleFrameDocument(frame) {
+    try {
+      return (
+        frame.contentDocument ||
+        (frame.contentWindow && frame.contentWindow.document) ||
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
+
   function resolveNodeElement(rawSelector) {
     let selector = toSafeString(rawSelector).trim();
     if (!selector) return null;
@@ -991,20 +1076,399 @@
 
     if (!selector) return null;
 
-    if (selector.startsWith("#") || selector.startsWith(".") || selector.includes("[")) {
-      try {
-        return document.querySelector(selector);
-      } catch {
-        return null;
+    // Primary lookup: the main runtime document (unchanged behaviour).
+    const primary = nlQueryElementInDocument(selector, document);
+    if (primary) return primary;
+
+    // Fallback only when nothing matched in the main document: scan same-origin
+    // iframes (isolated preview / embed containers). Elements that exist in the
+    // main document are always returned before this runs, so existing behaviour
+    // is preserved.
+    let frames = null;
+    try {
+      frames = document.querySelectorAll("iframe");
+    } catch {
+      frames = null;
+    }
+    if (frames) {
+      for (let i = 0; i < frames.length; i++) {
+        const frameDoc = nlAccessibleFrameDocument(frames[i]);
+        if (!frameDoc) continue;
+        const inFrame = nlQueryElementInDocument(selector, frameDoc);
+        if (inFrame) return inFrame;
       }
     }
 
-    return document.getElementById(selector)
-      || document.querySelector(`[data-nodelogic-id="${CSS.escape(selector)}"]`)
-      || document.querySelector(`[data-nodelogic-chart-id="${CSS.escape(selector)}"]`)
-      || document.querySelector(`[data-nodelogic-custom-element-id="${CSS.escape(selector)}"]`)
-      || document.querySelector(`[data-slider-id="${CSS.escape(selector)}"]`)
-      || null;
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Element Reference / Element Property runtime helpers
+  // ---------------------------------------------------------------------------
+
+  // Curated map of lowercase property key -> canonical DOM property name.
+  // Only these DOM *properties* are ever read via el[prop]; everything else is
+  // restricted to string-only attribute reads, so the formula interpreter can
+  // never receive an object / DOM node / function.
+  const NL_PROP_CANON = {
+    value: "value",
+    checked: "checked",
+    disabled: "disabled",
+    required: "required",
+    readonly: "readOnly",
+    hidden: "hidden",
+    min: "min",
+    max: "max",
+    step: "step",
+    minlength: "minLength",
+    maxlength: "maxLength",
+    selectedindex: "selectedIndex",
+    valueasnumber: "valueAsNumber",
+    textcontent: "textContent",
+    innerhtml: "innerHTML",
+    id: "id",
+    classname: "className",
+    name: "name",
+    type: "type",
+    placeholder: "placeholder",
+    src: "src",
+    alt: "alt",
+    width: "width",
+    height: "height",
+    href: "href",
+    title: "title",
+    tabindex: "tabIndex"
+  };
+  // Attribute name to use for the fallback read (null = no meaningful attribute).
+  const NL_PROP_ATTR = {
+    readonly: "readonly",
+    classname: "class",
+    tabindex: "tabindex",
+    valueasnumber: null,
+    selectedindex: null,
+    textcontent: null,
+    innerhtml: null
+  };
+  const NL_PROP_BOOLEAN = new Set([
+    "checked",
+    "disabled",
+    "required",
+    "readonly",
+    "hidden"
+  ]);
+  const NL_PROP_NUMERIC = new Set([
+    "min",
+    "max",
+    "step",
+    "minlength",
+    "maxlength",
+    "selectedindex",
+    "valueasnumber",
+    "tabindex",
+    "width",
+    "height"
+  ]);
+  // Keys for which a wrapper element (e.g. .slider-container) should be
+  // unwrapped to its inner form control before reading.
+  const NL_CONTROL_KEYS = new Set([
+    "value",
+    "checked",
+    "disabled",
+    "required",
+    "readonly",
+    "min",
+    "max",
+    "step",
+    "minlength",
+    "maxlength",
+    "selectedindex",
+    "valueasnumber",
+    "placeholder",
+    "type",
+    "selectedoption",
+    "selectedtext"
+  ]);
+  const NL_CONTROL_TAGS = new Set(["INPUT", "SELECT", "TEXTAREA", "BUTTON"]);
+
+  function nlIsElement(node) {
+    return !!node && typeof node === "object" && node.nodeType === 1;
+  }
+
+  // Container-unwrap rule: if the resolved node is a wrapper (not itself a form
+  // control) and the requested key is control-oriented, descend to the inner
+  // input/select/textarea. Structural / text / attribute keys read the node
+  // itself.
+  function nlUnwrapForProp(el, lowerKey) {
+    if (!nlIsElement(el)) return el;
+    if (NL_CONTROL_TAGS.has(el.tagName)) return el;
+    if (!NL_CONTROL_KEYS.has(lowerKey)) return el;
+    let inner = null;
+    try {
+      inner = el.querySelector && el.querySelector("input, select, textarea");
+    } catch {
+      inner = null;
+    }
+    return inner || el;
+  }
+
+  function nlResolveElementRef(ref) {
+    if (nlIsElement(ref)) return ref;
+    const el = resolveNodeElement(ref);
+    return nlIsElement(el) ? el : null;
+  }
+
+  // Read an attribute from an element, falling back to its inner form control
+  // when the element is a NodeLogic wrapper (id sits on the container, custom
+  // attributes may live on the nested input/select/textarea). Returns the raw
+  // attribute string, or null when absent.
+  function nlGetAttrDeep(el, attrName) {
+    if (!nlIsElement(el) || !attrName || typeof el.getAttribute !== "function") {
+      return null;
+    }
+    if (el.hasAttribute(attrName)) {
+      return el.getAttribute(attrName);
+    }
+    if (!NL_CONTROL_TAGS.has(el.tagName)) {
+      let inner = null;
+      try {
+        inner = el.querySelector && el.querySelector("input, select, textarea");
+      } catch {
+        inner = null;
+      }
+      if (inner && typeof inner.getAttribute === "function" && inner.hasAttribute(attrName)) {
+        return inner.getAttribute(attrName);
+      }
+    }
+    return null;
+  }
+
+  // Returns a DOM Element or null. Never returns any other value.
+  function __nodeGetElement(elementIdOrSelector) {
+    const el = resolveNodeElement(elementIdOrSelector);
+    return nlIsElement(el) ? el : null;
+  }
+
+  // Reads a single property / attribute from an element reference.
+  // Returns only string | number | boolean | null (never undefined, never an
+  // object / DOM node / function).
+  function __nodeGetElementProp(elementRef, propertyKey) {
+    const name = toSafeString(propertyKey).trim();
+    if (!name) return null;
+
+    let el = nlResolveElementRef(elementRef);
+    if (!el) return null;
+
+    const lower = name.toLowerCase();
+    el = nlUnwrapForProp(el, lower);
+    if (!nlIsElement(el)) return null;
+
+    try {
+      // <select> convenience keys
+      if (lower === "selectedoption" || lower === "selectedtext") {
+        if (el.tagName !== "SELECT" || !el.options) return null;
+        const opt = el.options[el.selectedIndex];
+        if (!opt) return null;
+        const raw = lower === "selectedoption" ? opt.value : opt.text;
+        return typeof raw === "string" ? raw : String(raw == null ? "" : raw);
+      }
+
+      // Arbitrary data-* / aria-* / custom attributes -> string-only read.
+      if (!Object.prototype.hasOwnProperty.call(NL_PROP_CANON, lower)) {
+        const av = nlGetAttrDeep(el, name);
+        return av === null || av === undefined ? null : String(av);
+      }
+
+      const canonical = NL_PROP_CANON[lower];
+
+      // type-aware read for `value`
+      if (lower === "value") {
+        const tag = el.tagName;
+        const itype = (
+          (typeof el.getAttribute === "function" && el.getAttribute("type")) ||
+          el.type ||
+          ""
+        )
+          .toString()
+          .toLowerCase();
+        if (tag === "INPUT" && (itype === "number" || itype === "range")) {
+          const vn =
+            typeof el.valueAsNumber === "number"
+              ? el.valueAsNumber
+              : Number(el.value);
+          return Number.isFinite(vn) ? vn : null;
+        }
+        const sv = el.value;
+        if (sv === null || sv === undefined) return null;
+        if (typeof sv === "string") return sv;
+        if (typeof sv === "number") return Number.isFinite(sv) ? String(sv) : null;
+        if (typeof sv === "boolean") return String(sv);
+        return null;
+      }
+
+      // Curated DOM property present on the element.
+      if (canonical in el) {
+        const raw = el[canonical];
+        if (raw !== null && raw !== undefined) {
+          if (typeof raw === "boolean") {
+            return NL_PROP_NUMERIC.has(lower) ? (raw ? 1 : 0) : raw;
+          }
+          if (typeof raw === "number") {
+            return Number.isFinite(raw) ? raw : null;
+          }
+          if (typeof raw === "string") {
+            if (NL_PROP_BOOLEAN.has(lower)) return raw.length > 0;
+            if (NL_PROP_NUMERIC.has(lower)) {
+              if (raw.trim() === "") return null;
+              const num = Number(raw);
+              return Number.isFinite(num) ? num : null;
+            }
+            return raw;
+          }
+          // Non-primitive property value (e.g. SVGAnimatedString) -> attr fallback.
+        }
+      }
+
+      // Attribute fallback for curated keys.
+      if (NL_PROP_BOOLEAN.has(lower)) {
+        const boolAttr = Object.prototype.hasOwnProperty.call(NL_PROP_ATTR, lower)
+          ? NL_PROP_ATTR[lower]
+          : lower;
+        return boolAttr ? nlGetAttrDeep(el, boolAttr) !== null : false;
+      }
+
+      const attrName = Object.prototype.hasOwnProperty.call(NL_PROP_ATTR, lower)
+        ? NL_PROP_ATTR[lower]
+        : lower;
+      if (attrName === null) return null;
+      const av = nlGetAttrDeep(el, attrName);
+      if (av === null || av === undefined) return null;
+      if (NL_PROP_NUMERIC.has(lower)) {
+        if (String(av).trim() === "") return null;
+        const an = Number(av);
+        return Number.isFinite(an) ? an : null;
+      }
+      return String(av);
+    } catch {
+      return null;
+    }
+  }
+
+  // Page builders wrap a block's real content in a structural element that
+  // carries no authored meaning. Elementor renders every widget as
+  //   <div class="elementor-element" id="my-id"><div class="elementor-widget-container">…content…</div></div>
+  // and flex containers add an inner <div class="e-con-inner">. "The children
+  // of my-id" means the children of that content, not a one-item list holding
+  // the wrapper — and the editor preview shows it that way. Descend through
+  // such a wrapper while it is the element's only child. Bounded; a no-op on
+  // Gutenberg / plain markup (the wrapper classes never appear there).
+  const NL_TRANSPARENT_CONTAINER_CLASSES = [
+    "elementor-widget-container",
+    "e-con-inner"
+  ];
+  // Elementor's editor/preview injects helper + handle elements as real DOM
+  // children that DO NOT exist in the rendered frontend (the overlay with the
+  // edit/duplicate/remove controls, jQuery-UI resize handles, add-section
+  // affordances, the empty-container placeholder). The editor-side Get Children
+  // discovery filters these out before it builds the child list + index
+  // mapping, so the stored child index refers to rendered children only. This
+  // runtime copy keeps the two enumerations identical (defensive if the shared
+  // element resolver ever reaches an editor document); on the rendered frontend
+  // none of these classes exist, so it is a no-op.
+  const NL_ELEMENTOR_EDITOR_ONLY_CLASSES = [
+    "elementor-element-overlay",
+    "elementor-editor-element-settings",
+    "ui-resizable-handle",
+    "elementor-empty-view",
+    "elementor-first-add",
+    "elementor-widget-empty-icon"
+  ];
+  function nlIsElementorEditorChrome(el) {
+    const cl = el && el.classList;
+    if (!cl) return false;
+    for (let i = 0; i < NL_ELEMENTOR_EDITOR_ONLY_CLASSES.length; i++) {
+      if (cl.contains(NL_ELEMENTOR_EDITOR_ONLY_CLASSES[i])) return true;
+    }
+    for (let i = 0; i < cl.length; i++) {
+      if (String(cl[i]).indexOf("elementor-add-") === 0) return true;
+    }
+    return false;
+  }
+  // Direct element children that will exist in the rendered frontend: text
+  // nodes and Elementor editor-only helper/handle elements removed.
+  function nlRenderedChildElements(node) {
+    const out = [];
+    const kids = node && node.children;
+    if (!kids) return out;
+    for (let i = 0; i < kids.length; i++) {
+      const child = kids[i];
+      if (child && child.nodeType === 1 && !nlIsElementorEditorChrome(child)) out.push(child);
+    }
+    return out;
+  }
+
+  // Returns the direct child DOM Elements of an element reference, as they will
+  // exist in the rendered frontend, in DOM order. Text nodes, nested
+  // descendants and Elementor editor-only helper/handle elements are never
+  // included; a lone structural wrapper is stepped through. Operates on the
+  // element's OWN document, so an element resolved from a same-origin iframe
+  // yields that iframe's children (no main-document lookup). Returns [] on any
+  // failure (including a cross-origin / unresolved reference) — never throws.
+  function __nodeGetChildren(elementRef) {
+    try {
+      const resolved = nlResolveElementRef(elementRef);
+      if (!nlIsElement(resolved)) return [];
+      let node = resolved;
+      for (let hop = 0; hop < 6; hop++) {
+        const real = nlRenderedChildElements(node);
+        if (real.length !== 1 || !real[0].classList) return real;
+        let isWrapper = false;
+        for (let i = 0; i < NL_TRANSPARENT_CONTAINER_CLASSES.length; i++) {
+          if (real[0].classList.contains(NL_TRANSPARENT_CONTAINER_CLASSES[i])) { isWrapper = true; break; }
+        }
+        if (!isWrapper) return real;
+        node = real[0];
+      }
+      return nlRenderedChildElements(node);
+    } catch {
+      return [];
+    }
+  }
+
+  // Returns the Nth direct child DOM Element (0-based, among element children
+  // only), or null. Same iframe / failure semantics as __nodeGetChildren.
+  function __nodeGetChildAt(elementRef, indexValue) {
+    try {
+      const idx = Math.trunc(Number(indexValue));
+      if (!Number.isFinite(idx) || idx < 0) return null;
+      const kids = __nodeGetChildren(elementRef);
+      return idx < kids.length ? kids[idx] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Returns the direct child DOM Elements at the given 0-based indices, in the
+  // order the indices are supplied. Out-of-range indices are skipped. Accepts a
+  // real array or a JSON string of numbers. Returns [] on any failure.
+  function __nodeGetChildrenSubset(elementRef, indicesValue) {
+    try {
+      let indices = indicesValue;
+      if (typeof indices === "string") {
+        try { indices = JSON.parse(indices); } catch { indices = []; }
+      }
+      if (!Array.isArray(indices)) return [];
+      const kids = __nodeGetChildren(elementRef);
+      const out = [];
+      for (let i = 0; i < indices.length; i++) {
+        const idx = Math.trunc(Number(indices[i]));
+        if (Number.isFinite(idx) && idx >= 0 && idx < kids.length) {
+          out.push(kids[idx]);
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   function resolveImageSourceFromElement(element) {
@@ -1116,8 +1580,39 @@
   function __nodeCaseEquals(left, right) {
     if (left === right) return true;
 
-    const leftText = toSafeString(left).trim();
-    const rightText = toSafeString(right).trim();
+    // Unwrap a `{ value: X }` presentation wrapper (a zip/structured scalar)
+    // so it still compares as its inner value.
+    const scalarize = (value) => {
+      let current = value;
+      let guard = 0;
+      while (
+        current !== null && typeof current === "object" && !Array.isArray(current)
+        && current.nodeType === undefined
+        && Object.prototype.hasOwnProperty.call(current, "value")
+        && guard++ < 8
+      ) {
+        current = current.value;
+      }
+      return current;
+    };
+    const leftScalar = scalarize(left);
+    const rightScalar = scalarize(right);
+    if (leftScalar === rightScalar) return true;
+
+    // Anything still an object (a live DOM node, an array, a plain object) only
+    // matches by reference identity — never by string coercion. Every DOM
+    // element JSON-stringifies to "{}" and an <a> stringifies to "", so string
+    // comparison would report unrelated elements as equal (breaking
+    // array-contains / array-find over Array<element>).
+    if (
+      (leftScalar !== null && typeof leftScalar === "object")
+      || (rightScalar !== null && typeof rightScalar === "object")
+    ) {
+      return false;
+    }
+
+    const leftText = toSafeString(leftScalar).trim();
+    const rightText = toSafeString(rightScalar).trim();
 
     const leftNum = Number(leftText);
     const rightNum = Number(rightText);
@@ -1165,16 +1660,10 @@
     const type = toSafeString(eventType).trim() || 'click';
     if (!id || !type) return null;
 
-    // Handle both ID (with or without #) and selectors
-    let element = null;
-    if (id.startsWith('#') || id.startsWith('.') || id.includes('[')) {
-      // It's a selector
-      element = document.querySelector(id);
-    } else {
-      // It's an ID without #
-      element = document.getElementById(id);
-    }
-    
+    // Handle both ID (with or without #) and selectors, plus the canonical
+    // NodeLogic data-* attribute fallbacks and same-origin preview frames.
+    const element = resolveNodeElement(id);
+
     if (!element) {
       console.warn(`Element not found: ${id}`);
       return null;
@@ -1309,10 +1798,9 @@
     const id = toSafeString(sourceId).trim();
     if (!id) return null;
 
-    return document.getElementById(id)
-      || document.querySelector(`[data-nodelogic-id="${CSS.escape(id)}"]`)
-      || document.querySelector(`[data-nodelogic-custom-element-id="${CSS.escape(id)}"]`)
-      || document.querySelector(`[data-slider-id="${CSS.escape(id)}"]`);
+    // Canonical resolver (adds data-nodelogic-chart-id + selector support +
+    // same-origin preview frames; main-document matches still win first).
+    return resolveNodeElement(id);
   }
 
   function removeActionBinding(targetId) {
@@ -2259,8 +2747,15 @@
     prepared = evaluateCaseBlocks(prepared, values);
     prepared = evaluateIfBlocks(prepared, values);
 
-    prepared = replaceFormulaVarsOutsideStrings(prepared, (_, id) => {
+    prepared = replaceFormulaVarsOutsideStrings(prepared, (match, id) => {
       const raw = values[id];
+      // A bare `[5]` / `[-2]` / `[true]` is a one-element array literal, not a
+      // `[id]` dynamic-variable reference. Only treat it as a variable when a
+      // real value is bound to that id (i.e. a form control literally named
+      // "5"); otherwise leave the array literal untouched.
+      if (raw === undefined && /^(-?\d+(?:\.\d+)?|true|false)$/.test(id)) {
+        return match;
+      }
       if (id === "cost" && useGrosze) {
         return String(toGrosze(toNumber(raw, 0)));
       }
@@ -2830,6 +3325,11 @@
       __nodeApiListMapper,
       __nodeImageFromLink,
       __nodeImageFromElement,
+      __nodeGetElement,
+      __nodeGetElementProp,
+      __nodeGetChildren,
+      __nodeGetChildAt,
+      __nodeGetChildrenSubset,
       __nodeToBase,
       __nodeCountTrue,
       __nodeGradient,
@@ -4497,7 +4997,24 @@
       let evaluation = formulaEvaluationCache.get(evaluationKey);
       if (!evaluation) {
         evaluation = evaluateFormulaExpression(formula, values);
-        if (evaluation.valid) {
+        // An Output "Element" pin resolves to a live DOM node inside the result
+        // (raw.__element). That node can be replaced between recalculations, so
+        // its evaluation must NOT be cached — a stale entry would hand a
+        // detached node to the value / action path. Everything else caches as
+        // before.
+        const entryHoldsElement = (v) =>
+          v && typeof v === "object" && v.__element && v.__element.nodeType === 1;
+        const holdsLiveElement =
+          evaluation.valid &&
+          evaluation.value &&
+          typeof evaluation.value === "object" &&
+          Object.keys(evaluation.value).some((k) => {
+            const v = evaluation.value[k];
+            if (entryHoldsElement(v)) return true;
+            // For Each output: an array of per-item payload objects.
+            return Array.isArray(v) && v.some(entryHoldsElement);
+          });
+        if (evaluation.valid && !holdsLiveElement) {
           if (formulaEvaluationCache.size > 100) {
             formulaEvaluationCache.delete(formulaEvaluationCache.keys().next().value);
           }
@@ -4507,19 +5024,45 @@
       if (!evaluation.valid || !evaluation.value || typeof evaluation.value !== "object") return;
 
       const map = evaluation.value;
-      Object.keys(map).forEach(targetId => {
-        const raw = map[targetId];
+      // An Output node driven by a For Each loop yields an ARRAY of per-item
+      // payload objects under one key (from __nodeArrayMapGraph). Flatten it to
+      // one synthetic key per item so every iteration is applied independently;
+      // action-binding keys stay unique so iterations can't clobber each other.
+      const outputEntries = [];
+      Object.keys(map).forEach(key => {
+        const value = map[key];
+        if (Array.isArray(value)) {
+          value.forEach((item, itemIndex) => {
+            if (item && typeof item === "object") {
+              outputEntries.push([`${key}#${itemIndex}`, item]);
+            }
+          });
+        } else {
+          outputEntries.push([key, value]);
+        }
+      });
+      outputEntries.forEach(([targetId, raw]) => {
         if (!raw || typeof raw !== "object") return;
+
+        // The Output node's "Element" input pin, when connected, provides the
+        // target as a live element instance (raw.__element) instead of an id.
+        const elementInstance =
+          raw.__element && typeof raw.__element === "object" && raw.__element.nodeType === 1
+            ? raw.__element
+            : null;
 
         // Check if this output should execute on first load
         const config = outputConfigs[targetId] || {};
-        const executeOnLoad = config.executeOnLoad !== false; // Default true
+        const executeOnLoad = elementInstance
+          ? (raw.__executeOnLoad !== false)
+          : (config.executeOnLoad !== false); // Default true
         if (isFirstExecution && !executeOnLoad) {
           return; // Skip this output on first execution
         }
 
         // Find target element
-        let target = document.getElementById(targetId)
+        let target = elementInstance
+          || document.getElementById(targetId)
           || document.querySelector(`[data-nodelogic-id="${CSS.escape(targetId)}"]`)
           || document.querySelector(`[data-nodelogic-chart-id="${CSS.escape(targetId)}"]`)
           || document.querySelector(`[data-nodelogic-custom-element-id="${CSS.escape(targetId)}"]`)
@@ -4534,7 +5077,10 @@
         }
 
         const payload = normalizeFormulaPayload(raw);
-        const structuredValue = shouldPreserveStructuredPayload(raw) ? raw : payload.value;
+        // The Element-pin payload carries meta keys (__element/__executeOnLoad),
+        // so its "raw" object is never a structured chart/zip payload — use the
+        // extracted value. (Structured targets are NodeLogic blocks addressed by id.)
+        const structuredValue = (!elementInstance && shouldPreserveStructuredPayload(raw)) ? raw : payload.value;
         const arrayListRoot = target.matches("[data-nodelogic-array-list='1'], .nodelogic-array-list");
         const imageEl = target.matches("img") ? target : target.querySelector("img");
         const chartRoot = target.matches("[data-nodelogic-chart='1'], .nodelogic-chart");

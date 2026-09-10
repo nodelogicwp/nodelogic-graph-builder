@@ -1,0 +1,2 @@
+# Built by tests/run.js from src/components/graphEditor/*.ts
+*.cjs

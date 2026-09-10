@@ -348,6 +348,14 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     padding: 10px;
 }
 
+/* Scrollable config sub-panels inside a node card (Element Property / Get
+   Children property & child lists). Keep their wheel/scroll gesture local and
+   stop it from chaining out to the canvas zoom or the sidebar. Pointer
+   isolation from node dragging is handled in graphEditor.tsx. */
+.nl-scroll-guard {
+    overscroll-behavior: contain;
+}
+
 .tree-node {
     user-select: none;
 }

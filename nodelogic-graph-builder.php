@@ -370,7 +370,16 @@ add_action('enqueue_block_assets', function () {
 // FRONTEND — działa tylko na stronie, NIE w Elementorze
 add_action('wp_enqueue_scripts', function () {
 
-    if ( \Elementor\Plugin::$instance->editor->is_edit_mode() ) {
+    // Elementor is an optional integration — this plugin is Gutenberg-first.
+    // Guard the class reference so the site frontend does not fatal when
+    // Elementor is inactive. is_edit_mode() is only ever true in the Elementor
+    // editor, so "Elementor missing" always means "not the editor".
+    if (
+        class_exists('\Elementor\Plugin')
+        && isset(\Elementor\Plugin::$instance->editor)
+        && \Elementor\Plugin::$instance->editor
+        && \Elementor\Plugin::$instance->editor->is_edit_mode()
+    ) {
         return; // nie ładujemy runtime w edytorze
     }
 

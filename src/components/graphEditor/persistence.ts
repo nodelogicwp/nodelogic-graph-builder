@@ -1,6 +1,9 @@
 export interface CustomNodeUiNode {
     id: string;
-    kind: 'container' | 'field';
+    // `normalizeCustomNodeUiNode` accepts and preserves 'image' nodes, and
+    // `normalizeCustomNodeUiState` derives an 'image' -> string shared variable
+    // from them, so the type must include it (was silently widened at runtime).
+    kind: 'container' | 'field' | 'image';
     parentId: string | null;
     sortOrder: number;
     label: string;
@@ -217,7 +220,7 @@ export const normalizeSnapshot = (raw: unknown): GraphSnapshot | null => {
 const getCompletenessScore = (snapshot: GraphSnapshot): number => {
     const connectionsScore = snapshot.connections.length * 1000;
     const elementsScore = Math.max(snapshot.elements.length - 1, 0) * 10;
-    const formulaScore = snapshot.formula ? 1 : 0;
+    const formulaScore = snapshot.mainFormula ? 1 : 0;
     const customUiScore = snapshot.customNodeUi?.enabled ? 50 : 0;
     const customUiNodeScore = Array.isArray(snapshot.customNodeUi?.nodes) ? snapshot.customNodeUi!.nodes.length * 5 : 0;
     const customUiSharedVariableScore = Array.isArray(snapshot.customNodeUi?.sharedVariables) ? snapshot.customNodeUi!.sharedVariables.length * 5 : 0;
@@ -244,7 +247,7 @@ export const resolveInitialSnapshot = (...candidates: Array<GraphSnapshot | null
         return richest;
     }
 
-    const sameFormula = newest.formula === richest.formula;
+    const sameFormula = newest.mainFormula === richest.mainFormula;
     if (sameFormula && newest.connections.length === 0 && richest.connections.length > 0) {
         return richest;
     }

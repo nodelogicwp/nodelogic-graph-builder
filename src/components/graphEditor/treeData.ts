@@ -31,6 +31,7 @@ export const TREE_DATA = [
             { id: '10', name: 'Element Node', type: 'element' },
             { id: '110', name: 'Element Reference', type: 'element-ref' },
             { id: '111', name: 'Element Property', type: 'element-property' },
+            { id: '112', name: 'Get Children', type: 'get-children' },
             { id: '11', name: 'Number Constant', type: 'number' },
             { id: '12', name: 'Boolean Constant', type: 'constant-boolean' },
             { id: '13', name: 'String Constant', type: 'constant-string' },

@@ -247,7 +247,17 @@
       "className",
       "pattern",
       "min",
-      "max"
+      "max",
+      "condition",
+      "trueActions",
+      "falseActions",
+      "name",
+      "property",
+      "mode",
+      "message",
+      "duration",
+      "target",
+      "url"
     ]);
 
     const allowedMathMembers = new Set([
@@ -1194,6 +1204,32 @@
     return !!node && typeof node === "object" && node.nodeType === 1;
   }
 
+  // Stable identity for a live element that some operation genuinely needs a
+  // STRING key for (e.g. an event-listener registry keyed by id), even
+  // though the element itself may have no HTML id at all -- e.g. a child
+  // reached via Get Children / For Each with no id attribute. A real id is
+  // always reused as-is (already stable, unique, and independently
+  // resolvable). Otherwise a synthetic id is generated ONCE per element,
+  // tracked in a WeakMap (garbage-collected with the element, no DOM
+  // mutation, no attribute added) so the SAME element always gets back the
+  // SAME synthetic id on every later call, and two different elements never
+  // share one. Never regenerated, never shared, never touches the DOM --
+  // callers that need to re-find the element BY that id later (rather than
+  // already holding the live reference) must resolve it themselves; this
+  // purely gives an in-memory registry something stable to key on.
+  const nlGeneratedElementIds = new WeakMap();
+  let nlGeneratedElementIdSeq = 0;
+  function nlEnsureElementId(el) {
+    if (!nlIsElement(el)) return "";
+    if (el.id) return el.id;
+    let generated = nlGeneratedElementIds.get(el);
+    if (!generated) {
+      generated = `__nlgen_${++nlGeneratedElementIdSeq}`;
+      nlGeneratedElementIds.set(el, generated);
+    }
+    return generated;
+  }
+
   // Container-unwrap rule: if the resolved node is a wrapper (not itself a form
   // control) and the requested key is control-oriented, descend to the inner
   // input/select/textarea. Structural / text / attribute keys read the node
@@ -1655,21 +1691,31 @@
   // Event functions
   window.eventStore = window.eventStore || {};
 
-  function __nodeEvent(elementId, eventType) {
-    const id = toSafeString(elementId).trim();
+  function __nodeEvent(elementIdOrRef, eventType) {
     const type = toSafeString(eventType).trim() || 'click';
-    if (!id || !type) return null;
+    if (!type) return null;
 
-    // Handle both ID (with or without #) and selectors, plus the canonical
-    // NodeLogic data-* attribute fallbacks and same-origin preview frames.
-    const element = resolveNodeElement(id);
+    // A live element reference (e.g. a For Each item with no id of its own,
+    // passed straight from a wired Element input) is used directly -- no ID
+    // lookup, and no ID is written to the DOM. Otherwise, handle both ID
+    // (with or without #) and selectors, plus the canonical NodeLogic data-*
+    // attribute fallbacks and same-origin preview frames.
+    const isLiveRef = nlIsElement(elementIdOrRef);
+    const id = isLiveRef ? "" : toSafeString(elementIdOrRef).trim();
+    if (!isLiveRef && !id) return null;
+    const element = isLiveRef ? elementIdOrRef : resolveNodeElement(id);
 
     if (!element) {
       console.warn(`Element not found: ${id}`);
       return null;
     }
 
-    const key = `${id}_${type}`;
+    // The registry key must stay stable across recalculations for the SAME
+    // element -- an id string when one exists (unchanged from before), or a
+    // generated-but-stable id (nlEnsureElementId) for a live reference with
+    // none, so an id-less child gets its own persistent registration instead
+    // of colliding with every other id-less element under the same event type.
+    const key = `${isLiveRef ? nlEnsureElementId(element) : id}_${type}`;
     
     // Initialize event data if not exists
     if (!window.eventStore[key]) {
@@ -1804,7 +1850,14 @@
   }
 
   function removeActionBinding(targetId) {
-    const key = toSafeString(targetId).trim();
+    // NOT .trim()'d: entry keys for Element-pin-driven outputs are
+    // deliberately space-prefixed (" nlOutEl:<id>" / " nlOutTarget:<id>") so
+    // they can never collide with a real target-id string used as a plain
+    // dropdown key. window.nodelogicActionBindings is always written with
+    // that exact (untrimmed) key -- trimming it here made the lookup miss
+    // every such binding, so its listeners/removers were NEVER torn down:
+    // a real event-listener leak, not merely a lookup no-op.
+    const key = toSafeString(targetId);
     if (!key || !window.nodelogicActionBindings[key]) return;
 
     const entry = window.nodelogicActionBindings[key];
@@ -1818,9 +1871,36 @@
     delete window.nodelogicActionBindings[key];
   }
 
-  function getActionPlanSignature(actionNodes) {
+  // Stable identity for ONE Action->Event node (bind nested actions to a DOM
+  // event on a source element), independent of any sibling action in the same
+  // plan. Used only to decide whether a listener for THIS node already exists
+  // -- never to gate re-applying leaf actions (see applyLeafActionNodes).
+  // An Action->Event node's source element: a wired Element input pin
+  // (actionNode.__element, a live DOM node produced by the SAME resolution
+  // mechanism as every other Element-pin node) wins when present; otherwise
+  // the existing ID-control fallback (sourceId, resolved through
+  // findActionSourceElement). One resolution model, not two.
+  function resolveActionEventSourceElement(actionNode) {
+    if (actionNode && actionNode.__element && typeof actionNode.__element === "object" && actionNode.__element.nodeType === 1) {
+      return actionNode.__element;
+    }
+    return findActionSourceElement(actionNode.sourceId || actionNode.targetId || actionNode.actionTargetId || "");
+  }
+
+  function getEventActionSignature(actionNode) {
     try {
-      return JSON.stringify(actionNodes ?? []);
+      // A wired Element input pin (actionNode.__element, a live DOM node) has
+      // no stable JSON.stringify representation and no sourceId of its own --
+      // __nodeId (the compiled action-event node's own graph id) is what
+      // disambiguates it from any other wired action-event node instead.
+      const key = (actionNode && actionNode.__nodeId)
+        || (actionNode && (actionNode.sourceId || actionNode.targetId || actionNode.actionTargetId))
+        || "";
+      return JSON.stringify({
+        key,
+        eventType: (actionNode && actionNode.eventType) || "",
+        actions: (actionNode && actionNode.actions) || [],
+      });
     } catch {
       return "";
     }
@@ -2016,7 +2096,151 @@
     }
   }
 
-  function executeActionTree(target, inputEl, actionNodes, targetId, bindingState) {
+  // Action plans are applied in independent passes with different idempotency
+  // rules (see the "event node stops after first execution" bug):
+  //
+  //  - registerActionListeners: an Action->Event child binds a REAL DOM
+  //    listener. That must happen exactly once per distinct node (dedup'd by
+  //    its own signature, independent of any sibling action). Never applies a
+  //    leaf action, never removes anything -- see collectActionEventKeys /
+  //    pruneStaleActionListeners for cleanup. Safe to call again from inside
+  //    an already-firing listener's own callback, to lazily register any
+  //    nested Action->Event grandchildren the first time their parent fires.
+  //  - collectActionEventKeys + pruneStaleActionListeners: run ONCE per
+  //    applyLogicBlocks pass, from the top of the CURRENT plan, to tear down
+  //    a previously-registered listener whose node no longer appears anywhere
+  //    in it (branch flip, deleted node, ...). Deliberately separate from
+  //    registerActionListeners's reentrant, partial-subtree walk -- pruning
+  //    from a partial walk would treat everything outside that subtree
+  //    (including the very listener currently executing) as stale and tear
+  //    it down after its first firing, which is its own version of this bug.
+  //  - applyLeafActionNodes: every other action (setText, addClass, notify,
+  //    ...) is a one-shot effect that must run EVERY time the caller has a
+  //    non-empty action plan for this target -- including when the newly
+  //    computed plan is byte-identical to the one applied last time, which is
+  //    the overwhelmingly common case for a repeating event with a constant
+  //    result (a click that always sets the same text, always toggles the
+  //    same class, ...). Gating this pass on "did the plan change" silently
+  //    drops every occurrence after the first whose result matches a prior
+  //    one, which is the primary bug being fixed here.
+  //
+  // All three recurse the same way through array nesting and actionIf
+  // branches (following only the currently-active branch); an Action->Event
+  // node's OWN nested actions are only ever run later, from inside that
+  // node's listener callback -- never as part of the pass that reached it.
+  function registerActionListeners(target, inputEl, actionNodes, targetId, bindingState) {
+    if (!Array.isArray(actionNodes)) return;
+
+    actionNodes.forEach((actionNode) => {
+      if (!actionNode) return;
+      if (Array.isArray(actionNode)) {
+        registerActionListeners(target, inputEl, actionNode, targetId, bindingState);
+        return;
+      }
+
+      const actionType = toSafeString(actionNode.type || actionNode.kind || "").trim();
+
+      if (actionType === "event") {
+        const sourceEl = resolveActionEventSourceElement(actionNode);
+        const eventType = toSafeString(actionNode.eventType || "change").trim() || "change";
+        const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
+        if (!sourceEl || nestedActions.length === 0) return;
+
+        const nodeKey = getEventActionSignature(actionNode);
+        if (bindingState.listeners.has(nodeKey)) return; // already bound
+
+        const listener = () => {
+          try {
+            registerActionListeners(target, inputEl, nestedActions, targetId, bindingState);
+            applyLeafActionNodes(target, inputEl, nestedActions);
+            // Mirror __nodeEvent's listener (the older Event-node primitive,
+            // see line ~1737): without this, a "connected logic flow" Set
+            // Value that reads live DOM state (e.g. __nodeGetElementProp of
+            // the same target this Action Event writes to) is computed and
+            // baked into THIS closure exactly once -- whenever the block was
+            // last freshly evaluated -- and never refreshed again, because a
+            // plain trigger element (not a form control, button-group, or
+            // [id]-referenced in the formula) is never otherwise wired to
+            // scheduleRecalculation. Every later click of this branch, or any
+            // sibling branch on the same Output, then silently reapplies that
+            // frozen value -- indistinguishable from one branch clobbering
+            // another. Scheduling a recalculation here re-registers this
+            // listener with a freshly computed value before its NEXT click;
+            // it does not re-apply this click's own leaf actions again
+            // (applyLeafActionNodes above already ran, and the recalculation
+            // pass explicitly skips "event"-typed nodes).
+            scheduleRecalculation();
+          } catch (error) {
+            console.warn("[NodeLogic Runtime] action event execution failed", error);
+          }
+        };
+        sourceEl.addEventListener(eventType, listener);
+        const remove = () => {
+          try {
+            sourceEl.removeEventListener(eventType, listener);
+          } catch {}
+        };
+        bindingState.removers.push(remove);
+        bindingState.listeners.set(nodeKey, remove);
+        return;
+      }
+
+      if (actionType === "actionIf") {
+        const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
+        registerActionListeners(target, inputEl, Array.isArray(branch) ? branch : [], targetId, bindingState);
+      }
+    });
+  }
+
+  // Every Action->Event node signature reachable from the CURRENT plan --
+  // unlike registerActionListeners this recurses INTO an event node's own
+  // nested actions too, so a listener several events deep is still
+  // recognised as desired even before its ancestor(s) have fired and lazily
+  // registered it.
+  function collectActionEventKeys(actionNodes, into) {
+    if (!Array.isArray(actionNodes)) return into;
+
+    actionNodes.forEach((actionNode) => {
+      if (!actionNode) return;
+      if (Array.isArray(actionNode)) {
+        collectActionEventKeys(actionNode, into);
+        return;
+      }
+
+      const actionType = toSafeString(actionNode.type || actionNode.kind || "").trim();
+
+      if (actionType === "event") {
+        const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
+        const hasSource = !!(actionNode.__nodeId || actionNode.sourceId || actionNode.targetId || actionNode.actionTargetId);
+        if (hasSource && nestedActions.length > 0) {
+          into.add(getEventActionSignature(actionNode));
+        }
+        collectActionEventKeys(nestedActions, into);
+        return;
+      }
+
+      if (actionType === "actionIf") {
+        const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
+        collectActionEventKeys(Array.isArray(branch) ? branch : [], into);
+      }
+    });
+
+    return into;
+  }
+
+  function pruneStaleActionListeners(bindingState, desiredKeys) {
+    bindingState.listeners.forEach((remove, key) => {
+      if (desiredKeys.has(key)) return;
+      try {
+        remove();
+      } catch {}
+      bindingState.listeners.delete(key);
+      const idx = bindingState.removers.indexOf(remove);
+      if (idx !== -1) bindingState.removers.splice(idx, 1);
+    });
+  }
+
+  function applyLeafActionNodes(target, inputEl, actionNodes) {
     if (!Array.isArray(actionNodes)) return;
 
     actionNodes.forEach((actionNode) => {
@@ -2024,42 +2248,16 @@
         if (!actionNode) return;
 
         if (Array.isArray(actionNode)) {
-          executeActionTree(target, inputEl, actionNode, targetId, bindingState);
+          applyLeafActionNodes(target, inputEl, actionNode);
           return;
         }
 
         const actionType = toSafeString(actionNode.type || actionNode.kind || "").trim();
-        if (!actionType) return;
-
-        if (actionType === "event") {
-          const sourceEl = findActionSourceElement(actionNode.sourceId || actionNode.targetId || actionNode.actionTargetId || "");
-          const eventType = toSafeString(actionNode.eventType || "change").trim() || "change";
-          const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
-
-          if (!sourceEl || nestedActions.length === 0) {
-            return;
-          }
-
-          const listener = () => {
-            try {
-              executeActionTree(target, inputEl, nestedActions, targetId, bindingState);
-            } catch (error) {
-              console.warn("[NodeLogic Runtime] action event execution failed", error);
-            }
-          };
-
-          sourceEl.addEventListener(eventType, listener);
-          bindingState.removers.push(() => {
-            try {
-              sourceEl.removeEventListener(eventType, listener);
-            } catch {}
-          });
-          return;
-        }
+        if (!actionType || actionType === "event") return; // handled by registerActionListeners
 
         if (actionType === "actionIf") {
           const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
-          executeActionTree(target, inputEl, Array.isArray(branch) ? branch : [], targetId, bindingState);
+          applyLeafActionNodes(target, inputEl, Array.isArray(branch) ? branch : []);
           return;
         }
 
@@ -4637,6 +4835,34 @@
     return values;
   }
 
+  // A logic block's formula reads event state (__nodeEvent, __nodeTimerEvent,
+  // ...) by CALLING those functions during evaluation, not through
+  // getAllDynamicValues()/`values` -- so a firing event never, by itself,
+  // changes `values`. applyLogicBlocks' formulaEvaluationCache is keyed off
+  // `values`, so without this signature a repeated event that doesn't also
+  // happen to coincide with some unrelated control changing would key to the
+  // SAME cache entry every time: the formula would only ever be evaluated
+  // once (for whichever recalculation first produced that key) and every
+  // later occurrence of the event would silently reuse that stale, frozen
+  // result forever. Folding every event's triggeredCount into the cache key
+  // makes a genuinely new event occurrence always force a fresh evaluation.
+  function getEventStoreSignature() {
+    const store = window.eventStore;
+    if (!store) return "";
+    const parts = [];
+    for (const key in store) {
+      if (!Object.prototype.hasOwnProperty.call(store, key)) continue;
+      const entry = store[key];
+      // Skips the boolean `${key}_listener` registration markers alongside
+      // the real {triggeredCount} entries -- only the latter match this shape.
+      if (entry && typeof entry === "object" && typeof entry.triggeredCount === "number") {
+        parts.push(`${key}:${entry.triggeredCount}`);
+      }
+    }
+    parts.sort();
+    return parts.join(",");
+  }
+
   // =====================
   // SLIDER UI
   // =====================
@@ -4961,11 +5187,48 @@
   function applyLogicBlocks() {
     if (!DOM.logicBlocks.length) return;
     const values = getAllDynamicValues();
+    // Computed once per pass (matches `values` above): every logic block's
+    // cache key folds this in, so any event firing anywhere forces a fresh
+    // evaluation for every block that could be affected by it.
+    const eventStoreSignature = getEventStoreSignature();
     const activeActionTargets = new Set();
 
     DOM.logicBlocks.forEach((block, blockIndex) => {
       const formula = (block.dataset.formula || "").trim();
       if (!formula) return;
+
+      // An Output entry's bookkeeping key (entryKey, below) is derived ONLY
+      // from that Output NODE's own graph id -- unique within the graph that
+      // produced it, but NOT guaranteed unique across separate logic blocks
+      // (two widgets built from the same template/duplicated widget keep the
+      // same internal node ids). window.nodelogicActionBindings is one GLOBAL,
+      // page-wide registry, so two different blocks' Output nodes sharing an
+      // entryKey would share one bindingState -- each block's own retarget
+      // check ("did THIS node's target change") then misfires on the OTHER
+      // block's differing target, tearing its listener down and rebuilding
+      // it every single pass. Whichever block is processed last every pass
+      // permanently keeps the only working listener -- exactly the
+      // "newest Event steals the older one's target" symptom.
+      //
+      // data-editor-id ALONE is not a safe disambiguator either: it is a
+      // value the editor persists into the widget's own saved settings
+      // (see assets/elementor/elementor-logic.js's getGraphData -- generated
+      // once from the widget's container id, then written back with
+      // settings.set so it survives across saves), and a native "Duplicate"
+      // of that widget (Elementor duplicate, a saved template inserted
+      // twice, a global/synced widget, ...) clones the ENTIRE settings
+      // object verbatim -- including that already-persisted editor_id. Two
+      // widgets produced that way share the exact same data-editor-id (and,
+      // since the graph itself was cloned too, the same internal node ids),
+      // silently recreating this exact collision even with the entryKey
+      // prefix below. blockIndex -- this block's own fixed position among
+      // DOM.logicBlocks for the current page load -- is unaffected by any of
+      // that: it is always distinct for two different rendered blocks on one
+      // page, no matter what their data-editor-id says. Always fold it in
+      // (not merely as a fallback for a missing editor id) so a duplicated
+      // widget's stale/shared editor_id can never collapse two blocks back
+      // into one binding scope.
+      const blockScope = `${String(block.dataset.editorId || "").trim() || "noid"}#${blockIndex}`;
 
       // Reset active event flow for this logic block
       window.activeEventFlow = false;
@@ -4993,8 +5256,16 @@
       } catch {
         valuesSignature = "";
       }
-      const evaluationKey = `${formula}\u0000${valuesSignature}`;
+      const evaluationKey = `${formula}\u0000${valuesSignature}\u0000${eventStoreSignature}`;
       let evaluation = formulaEvaluationCache.get(evaluationKey);
+      // A cache HIT reuses an evaluation computed for a PRIOR pass (including,
+      // e.g., a __nodeEventProcessor-gated "true" from whichever pass first
+      // saw a given event occurrence). Replaying that stale, already-applied
+      // action plan on every later pass that happens to hash to the same key
+      // would re-fire one-shot actions (toggleClass, notify, ...) for nothing
+      // -- so only actions computed by a genuinely FRESH evaluation this pass
+      // are (re-)applied below; see isFreshEvaluation.
+      const isFreshEvaluation = !evaluation;
       if (!evaluation) {
         evaluation = evaluateFormulaExpression(formula, values);
         // An Output "Element" pin resolves to a live DOM node inside the result
@@ -5014,7 +5285,20 @@
             // For Each output: an array of per-item payload objects.
             return Array.isArray(v) && v.some(entryHoldsElement);
           });
-        if (evaluation.valid && !holdsLiveElement) {
+        // Get Element Property (__nodeGetElementProp) reads a live, mutable
+        // DOM property -- one a PRIOR pass of this very formula (Set Element
+        // Property / an Output "value" write) can have just changed. Caching
+        // this evaluation would freeze every future pass on whatever that
+        // property read on the FIRST call, forever, because the cache key
+        // (formula + tracked-control/event state) has no way to reflect an
+        // arbitrary element's mutated property. A formula that calls it is
+        // therefore never persisted, exactly like the live-element case
+        // above -- it is always re-evaluated, so each execution reads the
+        // current DOM, while unrelated cacheable formulas are unaffected.
+        // Detected once per formula text; this has no effect within a single
+        // pass, where evaluateFormulaExpression is called exactly once.
+        const readsLiveElementProperty = formula.indexOf("__nodeGetElementProp") !== -1;
+        if (evaluation.valid && !holdsLiveElement && !readsLiveElementProperty) {
           if (formulaEvaluationCache.size > 100) {
             formulaEvaluationCache.delete(formulaEvaluationCache.keys().next().value);
           }
@@ -5041,7 +5325,7 @@
           outputEntries.push([key, value]);
         }
       });
-      outputEntries.forEach(([targetId, raw]) => {
+      outputEntries.forEach(([entryKey, raw]) => {
         if (!raw || typeof raw !== "object") return;
 
         // The Output node's "Element" input pin, when connected, provides the
@@ -5050,6 +5334,13 @@
           raw.__element && typeof raw.__element === "object" && raw.__element.nodeType === 1
             ? raw.__element
             : null;
+
+        // entryKey is unique PER OUTPUT NODE (never the target id/element
+        // identity — two different Output nodes can target the same element).
+        // The actual DOM target id to look up lives inside the payload
+        // (__targetId), falling back to entryKey for formulas compiled before
+        // that field existed, where entryKey WAS the literal target id.
+        const targetId = typeof raw.__targetId === "string" && raw.__targetId ? raw.__targetId : entryKey;
 
         // Check if this output should execute on first load
         const config = outputConfigs[targetId] || {};
@@ -5356,29 +5647,43 @@
           }
         }
         const actionNodes = Array.isArray(raw.actions) ? raw.actions : [];
-        const actionSignature = getActionPlanSignature(actionNodes);
         if (actionNodes.length > 0) {
-          activeActionTargets.add(targetId);
-          const existingBinding = window.nodelogicActionBindings[targetId];
-          const bindingChanged =
-            !existingBinding
-            || existingBinding.signature !== actionSignature
-            || existingBinding.target !== target
-            || existingBinding.inputEl !== inputEl;
-
-          if (bindingChanged) {
-            removeActionBinding(targetId);
-            const bindingState = {
-              signature: actionSignature,
-              target,
-              inputEl,
-              removers: []
-            };
-            window.nodelogicActionBindings[targetId] = bindingState;
-            executeActionTree(target, inputEl, actionNodes, targetId, bindingState);
+          // Bookkeeping (listener registration / dedup / cleanup) is keyed by
+          // bindingKey = this logic block's own stable identity + entryKey
+          // (entryKey alone is unique PER OUTPUT NODE within ONE graph, not
+          // across separate logic blocks -- see blockScope above). Two
+          // different Output nodes can legitimately target the SAME element;
+          // keying by targetId would make them share one bindingState and
+          // each one's prune pass would tear down the other's still-current
+          // listeners.
+          const bindingKey = `${blockScope}::${entryKey}`;
+          activeActionTargets.add(bindingKey);
+          let bindingState = window.nodelogicActionBindings[bindingKey];
+          let bindingJustCreated = false;
+          if (!bindingState || bindingState.target !== target || bindingState.inputEl !== inputEl) {
+            // New target (or this Output retargeted to a different element):
+            // any previously-registered listeners belonged to the old target.
+            removeActionBinding(bindingKey);
+            bindingState = { target, inputEl, removers: [], listeners: new Map() };
+            window.nodelogicActionBindings[bindingKey] = bindingState;
+            bindingJustCreated = true;
+          }
+          // Listener registration is dedup'd per Action->Event node and
+          // pruned against the current plan; leaf actions re-apply on every
+          // genuinely fresh evaluation so a repeating event keeps producing an
+          // effect even when its result is identical to the previous
+          // occurrence -- but NOT on a cache hit (isFreshEvaluation false),
+          // where `raw` is a stale, already-applied evaluation reused only
+          // because this pass happened to hash to the same evaluationKey; a
+          // brand new binding still needs its listeners/actions applied once
+          // even on a cache hit, since nothing has been applied to it yet.
+          if (isFreshEvaluation || bindingJustCreated) {
+            pruneStaleActionListeners(bindingState, collectActionEventKeys(actionNodes, new Set()));
+            registerActionListeners(target, inputEl, actionNodes, bindingKey, bindingState);
+            applyLeafActionNodes(target, inputEl, actionNodes);
           }
         } else {
-          removeActionBinding(targetId);
+          removeActionBinding(`${blockScope}::${entryKey}`);
         }
         if (raw["custom-css"] !== undefined) {
           // Apply raw CSS string via cssText append â€” parse key:value pairs

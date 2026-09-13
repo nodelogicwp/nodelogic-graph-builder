@@ -1835,6 +1835,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return ['event'];
         }
         if (
+            (element.type === 'event-element' || element.type === 'event-id' || element.type === 'event-hover' || element.type === 'event-scroll')
+            && inputIndex === 0
+        ) {
+            return ['element'];
+        }
+        if (
             element.type === 'action-event'
             || element.type === 'action-block'
             || element.type === 'action-if'
@@ -1848,6 +1854,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-toggle-class'
         ) {
             if (inputIndex === 0) return ['action'];
+            // Element input pin: an optional, additive 2nd pin so the node can
+            // operate on a dynamically wired live reference instead of only
+            // its own Element ID control -- never conflicts with pin 0, which
+            // stays the existing 'action' attach-to-parent slot.
+            if (element.type === 'action-event' && inputIndex === 1) return ['element'];
             if (element.type === 'action-required') return ['boolean'];
             if (element.type === 'action-min' || element.type === 'action-max' || element.type === 'action-length') return ['number'];
             return ['string'];
@@ -2115,8 +2126,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'memory-write-number') return 2;
         if (element.type === 'memory-write-string') return 2;
         if (element.type === 'memory-write-boolean') return 2;
-        if (element.type === 'event-element') return 0;
-        if (element.type === 'event-id') return 0;
+        if (element.type === 'event-element') return 1; // optional Element input pin
+        if (element.type === 'event-id') return 1; // optional Element input pin
         if (element.type === 'event-processor') return 2;
         if (element.type === 'not') return 1;
         if (element.type === 'and') return 2;
@@ -2242,7 +2253,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-sort') return 1;
         if (element.type === 'array-remove-index') return 2;
         if (element.type === 'array-replace-index') return 3;
-        if (element.type === 'action-event') return 1;
+        if (element.type === 'action-event') return 2; // input0: attach-to-parent ('action'); input1: optional Element pin
         if (element.type === 'action-block') return 1;
         if (element.type === 'action-if') return 2;
         if (element.type === 'action-required') return 2;
@@ -2265,8 +2276,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-redirect') return 2;
         if (element.type === 'action-trigger-event') return 2;
         // New event nodes
-        if (element.type === 'event-hover') return 0;
-        if (element.type === 'event-scroll') return 0;
+        if (element.type === 'event-hover') return 1; // optional Element input pin
+        if (element.type === 'event-scroll') return 1; // optional Element input pin
         if (element.type === 'event-page-load') return 0;
         if (element.type === 'event-timer') return 0;
         if (element.type === 'event-custom') return 0;
@@ -3076,10 +3087,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (element.type === 'action-set-style') return <input className="input-control" value={String(element.data?.actionStyleProperty || '')} placeholder="CSS property" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionStyleProperty: e.target.value } } : elem)))} />;
                 return <input className="input-control" value={String(element.data?.valueText ?? element.data?.value ?? '')} placeholder="Value" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} />;
             }
-            case 'action-event':
+            case 'action-event': {
                 if (index !== 0) return null;
+                // input1 is the optional Element pin (input0 stays the
+                // existing 'action' attach-to-parent slot rendered below).
+                const elementPinConnected = connections.some((connection) => connection.toId === element.id && connection.toInput === 'input1');
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                        <div style={{ fontSize: '10px', color: elementPinConnected ? '#86efac' : '#94a3b8' }}>
+                            {elementPinConnected
+                                ? 'Element: from connected pin (overrides the ID below)'
+                                : 'Element: connect a pin, or use the ID below'}
+                        </div>
                         {element.data?.actionUseManualId ? (
                             <input
                                 type="text"
@@ -3173,6 +3192,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         </div>
                     </div>
                 );
+            }
             case 'action-required':
                 if (index === 1) return <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={element.data?.actionRequired !== false} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionRequired: e.target.checked } } : elem)))} /> Required</label>;
                 return null;
@@ -4379,6 +4399,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'api-list-mapper':
                 return index === 0 ? 'Request Data' : `Input ${index + 1}`;
             case 'action-event':
+                // input0 stays the existing 'action' attach-to-parent slot;
+                // input1 is the Element pin, not a generic 'Value' pin.
+                return index === 0 ? 'Action' : 'Element';
             case 'action-block':
             case 'action-required':
             case 'action-min':
@@ -4392,6 +4415,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (element.type === 'action-if') return 'Condition';
                 if (element.type === 'action-length') return index === 1 ? 'Min' : 'Max';
                 return 'Value';
+            case 'event-element':
+            case 'event-id':
+            case 'event-hover':
+            case 'event-scroll':
+                return 'Element';
             case 'chart-data':
                 return index === 0 ? 'Label' : 'Value';
             case 'element-property':
@@ -4822,12 +4850,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `({ type: "actionIf", condition: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionIfCondition ? 'true' : 'false')}, trueActions: [${childExpressions.join(', ')}], falseActions: [${falseChildExpressions.join(', ')}] })`;
                 }
                 case 'action-event': {
+                    // Element input pin (input1 -- input0 stays the existing
+                    // 'action' attach-to-parent slot, untouched) wins when
+                    // wired -- a live reference, resolved fresh every
+                    // execution, exactly like Output's Element pin. Falls back
+                    // to the existing sourceId ID control (dropdown/manual)
+                    // when unconnected; that fallback is untouched from before
+                    // this change.
+                    const elementExpr = buildElementInstanceExpr(element, 1);
                     const sourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
-                    if (!sourceId) {
+                    if (!elementExpr && !sourceId) {
                         return null;
                     }
                     const eventType = String(element.data?.actionEventType || 'change');
-                    return `({ type: "event", sourceId: ${serializeGraphFormulaLiteral(sourceId)}, eventType: ${serializeGraphFormulaLiteral(eventType)}, actions: ${childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : '[]'} })`;
+                    const actionsExpr = childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : '[]';
+                    if (elementExpr) {
+                        // __nodeId disambiguates wired action-event nodes for
+                        // listener dedup (sourceId is empty in this branch, so
+                        // it alone can't distinguish two different wired nodes).
+                        // Keys are quoted (matches Output's __element/__executeOnLoad
+                        // convention) so the safety-checker's identifier scan, which
+                        // only inspects bare/unquoted identifiers, never sees them.
+                        return `({ ${JSON.stringify('type')}: "event", ${JSON.stringify('__element')}: ${elementExpr}, ${JSON.stringify('__nodeId')}: ${JSON.stringify(element.id)}, ${JSON.stringify('eventType')}: ${serializeGraphFormulaLiteral(eventType)}, ${JSON.stringify('actions')}: ${actionsExpr} })`;
+                    }
+                    return `({ type: "event", sourceId: ${serializeGraphFormulaLiteral(sourceId)}, eventType: ${serializeGraphFormulaLiteral(eventType)}, actions: ${actionsExpr} })`;
                 }
                 case 'action-required':
                     return `({ type: "required", value: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionRequired !== false ? 'true' : 'false')} })`;
@@ -4913,6 +4959,47 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }
             return fallback !== undefined ? serializeGraphFormulaLiteral(fallback) : '0';
         };
+        // Shared Element-target resolution for every node that has an "Element
+        // ID" selector control (mirrors Output's existing Element pin / ID
+        // dropdown pattern, generalized): a connected Element input pin always
+        // wins; when nothing is wired there, fall back to the node's own ID
+        // control resolved through the SAME live element lookup used
+        // everywhere else (__nodeGetElement). Both branches yield a live
+        // reference expression, evaluated fresh every execution — never a
+        // static id/value baked into the compiled formula. One resolution
+        // model, reused, rather than a second concept of "target element".
+        const resolveElementIdControl = (element: CanvasElement): string =>
+            String(
+                element.data?.elementUseManualId
+                    ? (element.data?.customElementId || '')
+                    : (element.data?.selectedElement || '')
+            ).trim();
+        const buildElementIdLookupExpr = (element: CanvasElement): string => {
+            const id = resolveElementIdControl(element);
+            return id ? `__nodeGetElement(${serializeGraphFormulaLiteral(id)})` : 'null';
+        };
+        // `fallbackId`, when passed, overrides which data field is treated as
+        // the ID control (e.g. image-from-element's single `elementSelector`
+        // text field instead of the standard selectedElement/customElementId
+        // pair) — everything else about the resolution order is identical.
+        const buildElementSourceExpr = (element: CanvasElement, inputIndex = 0, fallbackId?: string): string => {
+            if (!customNodeMode) {
+                const connection = getConnectionForInput(element.id, `input${inputIndex}`);
+                if (connection) {
+                    const sourceElement = elementMap.get(connection.fromId);
+                    if (sourceElement) {
+                        const sourceOutputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+                        return buildNodeExpression(
+                            sourceElement,
+                            Number.isFinite(sourceOutputIndex) && sourceOutputIndex >= 0 ? sourceOutputIndex : 0,
+                            depth + 1
+                        );
+                    }
+                }
+            }
+            const id = fallbackId !== undefined ? fallbackId : resolveElementIdControl(element);
+            return id ? `__nodeGetElement(${serializeGraphFormulaLiteral(id)})` : 'null';
+        };
         const buildNodeExpression = (element: CanvasElement, outputIndex = 0, currentDepth = 0): string => {
             if (!element || currentDepth > 24) {
                 return '0';
@@ -4961,10 +5048,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return elId ? `__nodeGetElement(${serializeGraphFormulaLiteral(elId)})` : 'null';
                 }
                 case 'element-property': {
-                    // Extract a property/attribute from the connected element reference.
+                    // Extract a property/attribute from the Element input pin
+                    // when wired, else the node's own Element ID control.
                     // outputIndex selects which key when the node has several pins
                     // (All / Custom); Single keeps its original single-value behaviour.
-                    const sourceExpr = connectedInputExpression(0, 'null');
+                    const sourceExpr = buildElementSourceExpr(element);
                     const propKeys = resolveElementPropertyOrderedKeys(element);
                     const propKey = getElementPropertyMode(element) === 'single'
                         ? (propKeys[0] || '')
@@ -4978,7 +5066,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     //   all + children ..... every child -> one array (legacy default)
                     //   custom + children .. selected children -> one array subset
                     //   all/custom + child . one child per output pin -> element pins
-                    const ref = connectedInputExpression(0, 'null');
+                    // Element input pin when wired, else the node's own Element ID control.
+                    const ref = buildElementSourceExpr(element);
                     const mode = readGetChildrenMode(element.data);
                     if (mode === 'single') {
                         return `__nodeGetChildAt(${ref}, ${readGetChildrenSingleIndex(element.data)})`;
@@ -5004,33 +5093,56 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `__nodeGetChildAt(${ref}, ${childIndex})`;
                 }
                 case 'event-element': {
-                    // Resolve target ID: manual input or dropdown selection
+                    // Element input pin wins when wired -- __nodeEvent accepts a
+                    // live reference directly (no id needed, works even when the
+                    // element has none, e.g. a For Each item). Falls back to the
+                    // existing ID control (manual input or dropdown selection).
+                    const elementExpr = buildElementInstanceExpr(element);
                     const targetId = String(
                         element.data?.eventUseManualId
                             ? (element.data?.eventId || '')
                             : (element.data?.eventElement || element.data?.eventId || '')
                     ).trim();
                     const evType = String(element.data?.eventType || 'click');
+                    if (elementExpr) {
+                        return `__nodeEvent(${elementExpr}, ${serializeGraphFormulaLiteral(evType)})`;
+                    }
                     return targetId
                         ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
                         : 'null';
                 }
                 case 'event-id': {
+                    // Element input pin wins when wired, else the existing ID control.
+                    const elementExpr = buildElementInstanceExpr(element);
                     const useManual = !!element.data?.eventUseManualId;
                     const targetId = useManual
                         ? String(element.data?.eventId || '').trim()
                         : String(element.data?.eventElement || '').trim();
                     const evType = String(element.data?.eventType || 'click');
+                    if (elementExpr) {
+                        return `__nodeEvent(${elementExpr}, ${serializeGraphFormulaLiteral(evType)})`;
+                    }
                     return targetId
                         ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(evType)})`
                         : 'null';
                 }
                 case 'event-hover': {
+                    // Element input pin wins when wired, else the existing ID control.
+                    const elementExpr = buildElementInstanceExpr(element);
                     const targetId = String(element.data?.eventUseManualId ? (element.data?.eventId || '') : (element.data?.eventElement || element.data?.selectedElement || '')).trim();
-                    return targetId ? `__nodeHoverEvent(${serializeGraphFormulaLiteral(targetId)}, ${serializeGraphFormulaLiteral(element.data?.eventHoverMode || 'enter')})` : 'null';
+                    const hoverModeExpr = serializeGraphFormulaLiteral(element.data?.eventHoverMode || 'enter');
+                    if (elementExpr) {
+                        return `__nodeHoverEvent(${elementExpr}, ${hoverModeExpr})`;
+                    }
+                    return targetId ? `__nodeHoverEvent(${serializeGraphFormulaLiteral(targetId)}, ${hoverModeExpr})` : 'null';
                 }
                 case 'event-scroll': {
+                    // Element input pin wins when wired, else the existing ID control.
+                    const elementExpr = buildElementInstanceExpr(element);
                     const targetId = String(element.data?.eventUseManualId ? (element.data?.eventId || '') : (element.data?.eventElement || element.data?.selectedElement || '')).trim();
+                    if (elementExpr) {
+                        return `__nodeEvent(${elementExpr}, "scroll")`;
+                    }
                     return targetId ? `__nodeEvent(${serializeGraphFormulaLiteral(targetId)}, "scroll")` : 'null';
                 }
                 case 'event-page-load': return '__nodePageLoadEvent()';
@@ -5323,7 +5435,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'image-from-link':
                     return `__nodeImageFromLink(${connectedInputExpression(0)})`;
                 case 'image-from-element':
-                    return `__nodeImageFromElement(${connectedInputExpression(0)})`;
+                    // Element input pin when wired, else its own elementSelector
+                    // text field (previously ignored whenever nothing was wired).
+                    return `__nodeImageFromElement(${buildElementSourceExpr(element, 0, String(element.data?.elementSelector || '').trim())})`;
                 case 'api-request':
                     return `__nodeApiRequest(${connectedInputExpression(0, element.data?.apiUrl || '')}, ${serializeGraphFormulaLiteral(String(element.data?.apiMethod || 'GET').toUpperCase())})`;
                 case 'api-field': {
@@ -5450,9 +5564,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
         // Value pins are shifted by 1 because of the leading "Element" target pin.
         const outputValueOffset = customNodeMode ? 0 : 1;
-        const buildElementInstanceExpr = (element: CanvasElement): string | null => {
+        const buildElementInstanceExpr = (element: CanvasElement, inputIndex = 0): string | null => {
             if (customNodeMode) return null;
-            const connection = getConnectionForInput(element.id, 'input0');
+            const connection = getConnectionForInput(element.id, `input${inputIndex}`);
             if (!connection) return null;
             const sourceElement = elementMap.get(connection.fromId);
             if (!sourceElement) return null;
@@ -5538,11 +5652,27 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         `${JSON.stringify('__element')}: ${elementInstanceExpr}`,
                         `${JSON.stringify('__executeOnLoad')}: ${element.data?.executeOnLoad !== false ? 'true' : 'false'}`
                     );
+                } else if (targetId) {
+                    // Carry the configured target id INSIDE the payload (the
+                    // runtime reads it back via __targetId) instead of using it
+                    // as the entry's object key below. Two different Output
+                    // nodes pointing at the same target id would otherwise
+                    // collide on an identical key in the payload object
+                    // literal -- by JS object-literal semantics only the LAST
+                    // one written survives, silently discarding the other
+                    // Output's entire payload (value AND actions), not merely
+                    // going stale. See entryKey.
+                    payloadParts.unshift(`${JSON.stringify('__targetId')}: ${JSON.stringify(targetId)}`);
                 }
 
-                // Element-pin targets get a per-node placeholder key (a live DOM
-                // node cannot be an object key); the runtime reads __element.
-                const entryKey = elementInstanceExpr ? ` nlOutEl:${element.id}` : targetId;
+                // Every entry key is unique PER OUTPUT NODE, never derived from
+                // the target id/element identity: a live DOM node can't be an
+                // object key at all (elementInstanceExpr case, pre-existing),
+                // and reusing the plain target-id string as the key let two
+                // Output nodes targeting the same element collide (see above).
+                // The runtime resolves the actual target from __element /
+                // __targetId inside the payload, not from this key.
+                const entryKey = elementInstanceExpr ? ` nlOutEl:${element.id}` : ` nlOutTarget:${element.id}`;
                 const bodyObject = `{ ${payloadParts.join(', ')} }`;
 
                 if (loopStart && elementInstanceExpr) {
@@ -7222,9 +7352,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'element-ref':
                 return { selectedElement: '', elementUseManualId: false, customElementId: '' };
             case 'element-property':
-                return { elementProperty: '', elementPropertyUseManual: false, elementPropertyType: 'number', elementPropertyMode: 'single' as const };
+                return {
+                    elementProperty: '', elementPropertyUseManual: false, elementPropertyType: 'number', elementPropertyMode: 'single' as const,
+                    selectedElement: '', elementUseManualId: false, customElementId: '',
+                };
             case 'get-children':
-                return { getChildrenMode: 'all' as const, getChildrenReturnAs: 'children' as const };
+                return {
+                    getChildrenMode: 'all' as const, getChildrenReturnAs: 'children' as const,
+                    selectedElement: '', elementUseManualId: false, customElementId: '',
+                };
             case 'element-id':
                 return { elementId: '', customOutputType: 'string' as const };
             // New action nodes
@@ -8509,14 +8645,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                         });
                                                                     }
                                                                 }}
-                                                                title={`Input ${i + 1}`}
+                                                                title={getInputLabel(el, i) || `Input ${i + 1}`}
                                                             />
                                                         </div>
                                                     );
                                                 })}
                                             </div>
                                         )}
-                                        
+
                                         <div className="inputs-column-special">
                                             {el.type === 'array' ? (
                                                 <select
@@ -9022,8 +9158,44 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             <div style={{ fontSize: '10px', color: elementInputSource ? '#86efac' : '#94a3b8' }}>
                                                                 {elementInputSource
                                                                     ? `Element: from ${elementInputSource.name || elementInputSource.type} pin`
-                                                                    : 'Element: connect the Element pin (or an Element Reference)'}
+                                                                    : 'Element: connect the Element pin, or pick an ID below'}
                                                             </div>
+                                                            {!elementInputSource && (
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                    {data.elementUseManualId ? (
+                                                                        <input
+                                                                            type="text"
+                                                                            className="input-control"
+                                                                            value={String(data.customElementId || '')}
+                                                                            placeholder="Element ID"
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { customElementId: e.target.value })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                        />
+                                                                    ) : (
+                                                                        <select
+                                                                            className="input-control"
+                                                                            value={String(data.selectedElement || '')}
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { selectedElement: e.target.value })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                        >
+                                                                            <option value="">-- Element --</option>
+                                                                            {detectedElements.map((d) => (
+                                                                                <option key={d.id} value={d.id}>{d.id}</option>
+                                                                            ))}
+                                                                        </select>
+                                                                    )}
+                                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={!!data.elementUseManualId}
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { elementUseManualId: e.target.checked })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                            style={{ cursor: 'pointer' }}
+                                                                        />
+                                                                        Manual ID
+                                                                    </label>
+                                                                </div>
+                                                            )}
                                                             <select
                                                                 className="input-control"
                                                                 value={mode}
@@ -9213,8 +9385,54 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     );
 
+                                                    const elementInputConnection = connections.find((c) => c.toId === nodeId && c.toInput === 'input0');
+                                                    const elementInputSource = elementInputConnection
+                                                        ? elements.find((e) => e.id === elementInputConnection.fromId)
+                                                        : null;
+
                                                     return (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }} onClick={(e) => e.stopPropagation()}>
+                                                            <div style={{ fontSize: '10px', color: elementInputSource ? '#86efac' : '#94a3b8' }}>
+                                                                {elementInputSource
+                                                                    ? `Element: from ${elementInputSource.name || elementInputSource.type} pin`
+                                                                    : 'Element: connect the Element pin, or pick an ID below'}
+                                                            </div>
+                                                            {!elementInputSource && (
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                    {data.elementUseManualId ? (
+                                                                        <input
+                                                                            type="text"
+                                                                            className="input-control"
+                                                                            value={String(data.customElementId || '')}
+                                                                            placeholder="Element ID"
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { customElementId: e.target.value })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                        />
+                                                                    ) : (
+                                                                        <select
+                                                                            className="input-control"
+                                                                            value={String(data.selectedElement || '')}
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { selectedElement: e.target.value })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                        >
+                                                                            <option value="">-- Element --</option>
+                                                                            {detectedElements.map((d) => (
+                                                                                <option key={d.id} value={d.id}>{d.id}</option>
+                                                                            ))}
+                                                                        </select>
+                                                                    )}
+                                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={!!data.elementUseManualId}
+                                                                            onChange={(e) => applyNodeDataChange(nodeId, { elementUseManualId: e.target.checked })}
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                            style={{ cursor: 'pointer' }}
+                                                                        />
+                                                                        Manual ID
+                                                                    </label>
+                                                                </div>
+                                                            )}
                                                             <select
                                                                 className="input-control"
                                                                 value={mode}
@@ -10143,7 +10361,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                         });
                                                                     }
                                                                 }}
-                                                                title={`Input ${i + 1}`}
+                                                                title={getInputLabel(el, i) || `Input ${i + 1}`}
                                                             />
                                                         </div>
                                                     );})

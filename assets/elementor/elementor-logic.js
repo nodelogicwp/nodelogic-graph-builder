@@ -217,12 +217,28 @@
         let editorId =
             settings.get('editor_id');
 
+        const expectedEditorId =
+            'nodelogic-elementor-' +
+            container.id;
 
-        if (!editorId) {
+        /*
+         * Elementor's native "Duplicate" (and inserting the same saved
+         * template twice, or a global/synced widget) clones this widget's
+         * ENTIRE settings object verbatim -- including an already-persisted
+         * editor_id from the widget it was copied from. That stale id no
+         * longer matches THIS container's own id, so two separate widgets
+         * would silently share one editor_id (and therefore one runtime
+         * event-binding scope on the frontend) unless we detect and
+         * self-heal that mismatch here, not just on first-ever creation.
+         */
+
+        if (
+            !editorId ||
+            editorId !== expectedEditorId
+        ) {
 
             editorId =
-                'nodelogic-elementor-' +
-                container.id;
+                expectedEditorId;
 
             /*
              * editor_id jest ustawiany bezpośrednio.

@@ -115,6 +115,11 @@ interface TreeItem {
         | 'memory-write-number'
         | 'memory-write-string'
         | 'memory-write-boolean'
+        | 'memory-has'
+        | 'memory-delete'
+        | 'memory-increment'
+        | 'memory-array-append'
+        | 'memory-array-remove'
         | 'css-unit'
         | 'css-display'
         | 'css-color'
@@ -134,6 +139,7 @@ interface TreeItem {
         | 'image-from-link'
         | 'image-from-element'
         | 'api-request'
+        | 'api-status'
         | 'api-field'
         | 'api-list-mapper'
         | 'action-event'
@@ -259,6 +265,7 @@ interface CanvasElement {
         | 'image-from-link'
         | 'image-from-element'
         | 'api-request'
+        | 'api-status'
         | 'api-field'
         | 'api-list-mapper'
         | 'action-event'
@@ -284,6 +291,11 @@ interface CanvasElement {
         | 'memory-write-number'
         | 'memory-write-string'
         | 'memory-write-boolean'
+        | 'memory-has'
+        | 'memory-delete'
+        | 'memory-increment'
+        | 'memory-array-append'
+        | 'memory-array-remove'
         | 'event-element'
         | 'event-id'
         | 'event-processor'
@@ -415,6 +427,11 @@ interface CanvasElement {
         variableKey?: string;
         defaultValue?: number | string | boolean;
         persistVariable?: boolean;
+        // 'widget' (default): scoped to this logic block, so two duplicated
+        // Elementor widget instances never collide on the same variable name.
+        // 'page': unscoped, for intentional cross-widget sharing on one page.
+        memoryScope?: 'widget' | 'page';
+        incrementStep?: number;
         // For Event nodes
         eventElement?: string;
         eventId?: string;
@@ -476,6 +493,9 @@ interface CanvasElement {
         // API nodes
         apiUrl?: string;
         apiMethod?: string;
+        // JSON object string, e.g. '{"Authorization":"Bearer xyz"}'
+        apiHeaders?: string;
+        apiTimeout?: number;
         apiFieldPath?: string;
         apiFieldType?: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case';
         apiFieldFallback?: string;
@@ -520,6 +540,13 @@ interface CanvasElement {
     valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element';
     connections?: Connection[];
 }
+
+const MEMORY_NODE_TYPES = new Set<CanvasElement['type']>([
+    'memory-read-number', 'memory-read-string', 'memory-read-boolean',
+    'memory-write-number', 'memory-write-string', 'memory-write-boolean',
+    'memory-has', 'memory-delete', 'memory-increment', 'memory-array-append', 'memory-array-remove',
+]);
+const isMemoryNodeType = (type: CanvasElement['type']): boolean => MEMORY_NODE_TYPES.has(type);
 
 interface Connection {
     id: string;
@@ -1947,8 +1974,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'image-from-element') {
             return ['string', 'zip'];
         }
-        if (element.type === 'api-request') {
-            return ['string'];
+        if (element.type === 'api-request' || element.type === 'api-status') {
+            return inputIndex === 0 ? ['string'] : ['zip'];
         }
         if (element.type === 'api-field') {
             if (inputIndex === 0) return ['zip'];
@@ -2056,6 +2083,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'memory-read-number': [],
             'memory-read-string': [],
             'memory-read-boolean': [],
+            'memory-has': [],
+            'memory-delete': [['boolean']],
+            'memory-increment': [['boolean']],
+            'memory-array-append': [['number', 'string', 'boolean', 'color', 'zip', 'css'], ['boolean']],
+            'memory-array-remove': [['number', 'string', 'boolean', 'color', 'zip', 'css'], ['boolean']],
             'event-element': [],
             'event-id': [],
             'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
@@ -2126,6 +2158,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'memory-write-number') return 2;
         if (element.type === 'memory-write-string') return 2;
         if (element.type === 'memory-write-boolean') return 2;
+        if (element.type === 'memory-has') return 0;
+        if (element.type === 'memory-delete') return 1; // optional Trigger input pin
+        if (element.type === 'memory-increment') return 1; // optional Trigger input pin
+        if (element.type === 'memory-array-append') return 2; // Item, optional Trigger
+        if (element.type === 'memory-array-remove') return 2; // Item, optional Trigger
         if (element.type === 'event-element') return 1; // optional Element input pin
         if (element.type === 'event-id') return 1; // optional Element input pin
         if (element.type === 'event-processor') return 2;
@@ -2294,7 +2331,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-unique') return 1;     // array
         if (element.type === 'image-from-link') return 1;
         if (element.type === 'image-from-element') return 1;
-        if (element.type === 'api-request') return 1;
+        if (element.type === 'api-request') return 2; // URL, optional Body
+        if (element.type === 'api-status') return 2; // URL, optional Body
         if (element.type === 'api-field') return 2;
         if (element.type === 'api-list-mapper') return 1;
         if (element.type === 'chart-data') return 2;
@@ -2465,6 +2503,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-write-number':
             case 'memory-write-string':
             case 'memory-write-boolean':
+            case 'memory-has':
+            case 'memory-delete':
+            case 'memory-increment':
+            case 'memory-array-append':
+            case 'memory-array-remove':
             case 'event-element':
             case 'event-id':
             case 'event-processor':
@@ -2566,6 +2609,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'image-from-link':
             case 'image-from-element':
             case 'api-request':
+            case 'api-status':
             case 'api-field':
             case 'api-list-mapper':
             case 'chart-data':
@@ -2655,6 +2699,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
         if (element.type === 'image-from-link' || element.type === 'image-from-element') return 'string';
         if (element.type === 'api-request') return 'zip';
+        if (element.type === 'api-status') return 'zip';
         if (element.type === 'api-field') {
             const apiFieldType = element.data?.apiFieldType;
             if (apiFieldType === 'string' || apiFieldType === 'boolean' || apiFieldType === 'color' || apiFieldType === 'case' || apiFieldType === 'zip' || apiFieldType === 'number') {
@@ -2694,7 +2739,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const getNodeHeight = (element: CanvasElement): number => {
-        if (element.type === 'api-request') return 136;
+        if (element.type === 'api-request') return 220;
+        if (element.type === 'api-status') return 220;
         if (element.type === 'api-field') return 180;
         if (element.type === 'api-list-mapper') return 216;
         if (element.type === 'array-sort') return element.data?.sortMode?.startsWith('custom') ? 120 : 86;
@@ -3717,7 +3763,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 return null;
             }
-            case 'api-request': {
+            case 'api-request':
+            case 'api-status': {
                 if (index !== 0) return null;
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -4140,7 +4187,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             );
         };
 
-        if (el.type === 'api-request') {
+        if (el.type === 'api-request' || el.type === 'api-status') {
             return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
                     <input
@@ -4157,10 +4204,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         onChange={(e) => updateApiNode({ apiMethod: e.target.value })}
                         onClick={(e) => e.stopPropagation()}
                     >
-                        {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => (
+                        {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((method) => (
                             <option key={method} value={method}>{method}</option>
                         ))}
                     </select>
+                    <input
+                        type="text"
+                        className="input-control"
+                        value={String(el.data?.apiHeaders || '')}
+                        placeholder='Headers JSON, e.g. {"Authorization":"Bearer ..."}'
+                        onChange={(e) => updateApiNode({ apiHeaders: e.target.value })}
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                    <input
+                        type="number"
+                        className="input-control"
+                        value={String(el.data?.apiTimeout ?? 15000)}
+                        placeholder="Timeout (ms)"
+                        min={0}
+                        onChange={(e) => {
+                            const v = parseInt(e.target.value, 10);
+                            updateApiNode({ apiTimeout: Number.isFinite(v) && v > 0 ? v : 15000 });
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    />
                 </div>
             );
         }
@@ -4261,6 +4328,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-write-string':
             case 'memory-write-boolean':
                 return index === 0 ? 'Value' : 'Reset';
+            case 'memory-delete':
+            case 'memory-increment':
+                return 'Trigger';
+            case 'memory-array-append':
+            case 'memory-array-remove':
+                return index === 0 ? 'Item' : 'Trigger';
             case 'event-processor':
                 return index === 0 ? 'Event' : 'Payload';
             case 'bool-count':
@@ -4393,7 +4466,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'get-children':
                 return 'Element';
             case 'api-request':
-                return 'URL';
+            case 'api-status':
+                return index === 0 ? 'URL' : 'Body';
             case 'api-field':
                 return index === 0 ? 'Source' : 'Path';
             case 'api-list-mapper':
@@ -4495,6 +4569,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-write-number':
             case 'memory-write-string':
             case 'memory-write-boolean':
+            case 'memory-has':
+            case 'memory-delete':
+            case 'memory-increment':
+            case 'memory-array-append':
+            case 'memory-array-remove':
             case 'event-element':
             case 'event-id':
             case 'event-processor':
@@ -4627,6 +4706,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Image';
             case 'api-request':
                 return 'Data';
+            case 'api-status':
+                return 'Status';
             case 'api-field':
                 return 'Value';
             case 'api-list-mapper':
@@ -5172,6 +5253,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `__nodeToNumber(${connectedInputExpression(0)})`;
                 case 'number-to-string':
                     return `__nodeToString(${connectedInputExpression(0)})`;
+                case 'number-parse':
+                    return `__nodeParseRadix(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(Number(element.data?.parseRadix ?? 10))})`;
+                case 'number-to-base':
+                    return `__nodeToBase(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(Number(element.data?.parseRadix ?? 16))}, ${serializeGraphFormulaLiteral(Number(element.data?.minLength ?? 0))})`;
                 case 'math':
                     return connectedInputExpression(0);
                 case 'calculation': {
@@ -5243,6 +5328,93 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `String(${connectedInputExpression(0, '')}).includes(String(${connectedInputExpression(1, '')}))`;
                 case 'string-count-chars':
                     return `String(${connectedInputExpression(0, '')}).length`;
+                case 'string-count-words':
+                    return `__nodeCountWords(${connectedInputExpression(0, '')})`;
+                case 'string-find-start':
+                    return `__nodeFindStart(${connectedInputExpression(0, '')}, ${connectedInputExpression(1, '')})`;
+                case 'string-find-end':
+                    return `__nodeFindEnd(${connectedInputExpression(0, '')}, ${connectedInputExpression(1, '')})`;
+                case 'bool-count': {
+                    const inputCount = Math.max(1, getInputCount(element));
+                    const parts = Array.from({ length: inputCount }, (_, index) => connectedInputExpression(index));
+                    return `__nodeCountTrue(${parts.join(', ')})`;
+                }
+                case 'string-split': {
+                    const delimiter = String(element.data?.splitDelimiter ?? ',');
+                    const index = Number(element.data?.splitIndex ?? 0);
+                    return `(String(${connectedInputExpression(0, '')}).split(${serializeGraphFormulaLiteral(delimiter)})[${serializeGraphFormulaLiteral(index)}] ?? '')`;
+                }
+                case 'string-replace': {
+                    const find = String(element.data?.replaceFind ?? '');
+                    const replaceWith = String(element.data?.replaceWith ?? '');
+                    return `String(${connectedInputExpression(0, '')}).split(${serializeGraphFormulaLiteral(find)}).join(${serializeGraphFormulaLiteral(replaceWith)})`;
+                }
+                // Memory nodes: runtime helpers (__nodeMemoryGet/Set/Has/Delete/
+                // Increment/ArrayAppend/ArrayRemove) already exist in frontend.js;
+                // these cases were entirely missing (silent input0 pass-through).
+                // `memoryScope` ('widget' default | 'page') is a compile-time
+                // literal baked into the call; the runtime combines it with the
+                // per-logic-block blockScope so duplicated Elementor widgets never
+                // collide on the same variable name -- see __nodeMemoryResolveKey.
+                case 'memory-read-number':
+                case 'memory-read-string':
+                case 'memory-read-boolean': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const persistExpr = element.data?.persistVariable ? 'true' : 'false';
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    if (element.type === 'memory-read-number') {
+                        const defaultExpr = serializeGraphFormulaLiteral(Number(element.data?.defaultValue ?? 0));
+                        return `Number(__nodeMemoryGet(${key}, ${defaultExpr}, ${persistExpr}, ${scope}))`;
+                    }
+                    if (element.type === 'memory-read-boolean') {
+                        const defaultExpr = serializeGraphFormulaLiteral(Boolean(element.data?.defaultValue ?? false));
+                        return `!!(__nodeMemoryGet(${key}, ${defaultExpr}, ${persistExpr}, ${scope}))`;
+                    }
+                    const defaultExpr = serializeGraphFormulaLiteral(String(element.data?.defaultValue ?? ''));
+                    return `__nodeToString(__nodeMemoryGet(${key}, ${defaultExpr}, ${persistExpr}, ${scope}))`;
+                }
+                case 'memory-write-number':
+                case 'memory-write-string':
+                case 'memory-write-boolean': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const fallbackValue = element.type === 'memory-write-boolean' ? false : element.type === 'memory-write-string' ? '' : 0;
+                    const valueExpr = connectedInputExpression(0, fallbackValue);
+                    const resetExpr = connectedInputExpression(1, false);
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    return `__nodeMemorySet(${key}, ${valueExpr}, ${resetExpr}, ${scope})`;
+                }
+                case 'memory-has': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    return `__nodeMemoryHas(${key}, ${scope})`;
+                }
+                case 'memory-delete': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    // Unwired Trigger compiles to the literal `true`, so
+                    // __nodeMemoryConsumeTrigger fires on every evaluation --
+                    // matching plain memory-write's "apply every pass" default.
+                    const triggerExpr = connectedInputExpression(0, true);
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    return `__nodeMemoryDelete(${key}, ${triggerExpr}, ${scope})`;
+                }
+                case 'memory-increment': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const stepExpr = serializeGraphFormulaLiteral(Number(element.data?.incrementStep ?? 1));
+                    const triggerExpr = connectedInputExpression(0, true);
+                    const persistExpr = element.data?.persistVariable ? 'true' : 'false';
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    return `__nodeMemoryIncrement(${key}, ${stepExpr}, ${triggerExpr}, ${persistExpr}, ${scope})`;
+                }
+                case 'memory-array-append':
+                case 'memory-array-remove': {
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const itemExpr = connectedInputExpression(0, '');
+                    const triggerExpr = connectedInputExpression(1, true);
+                    const persistExpr = element.data?.persistVariable ? 'true' : 'false';
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    const fn = element.type === 'memory-array-append' ? '__nodeMemoryArrayAppend' : '__nodeMemoryArrayRemove';
+                    return `${fn}(${key}, ${itemExpr}, ${triggerExpr}, ${persistExpr}, ${scope})`;
+                }
                 // CSS / gradient / event-processor: the runtime helpers
                 // (__nodeCssJoin, __nodeGradient, __nodeEventProcessor) and the
                 // node config UIs already exist; the formula-gen cases were lost
@@ -5439,7 +5611,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     // text field (previously ignored whenever nothing was wired).
                     return `__nodeImageFromElement(${buildElementSourceExpr(element, 0, String(element.data?.elementSelector || '').trim())})`;
                 case 'api-request':
-                    return `__nodeApiRequest(${connectedInputExpression(0, element.data?.apiUrl || '')}, ${serializeGraphFormulaLiteral(String(element.data?.apiMethod || 'GET').toUpperCase())})`;
+                case 'api-status': {
+                    const urlExpr = connectedInputExpression(0, element.data?.apiUrl || '');
+                    const methodExpr = serializeGraphFormulaLiteral(String(element.data?.apiMethod || 'GET').toUpperCase());
+                    const bodyExpr = connectedInputExpression(1, '');
+                    const headersExpr = serializeGraphFormulaLiteral(String(element.data?.apiHeaders || ''));
+                    const timeoutExpr = serializeGraphFormulaLiteral(Number(element.data?.apiTimeout ?? 15000));
+                    const fn = element.type === 'api-status' ? '__nodeApiStatus' : '__nodeApiRequest';
+                    return `${fn}(${urlExpr}, ${methodExpr}, ${bodyExpr}, ${headersExpr}, ${timeoutExpr})`;
+                }
                 case 'api-field': {
                     const sourceExpr = connectedInputExpression(0);
                     const pathExpr = connectedInputExpression(1, element.data?.apiFieldPath || '');
@@ -5880,6 +6060,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = inputType || (el.type === 'memory-write-string' ? 'string' : el.type === 'memory-write-boolean' ? 'boolean' : 'number');
                     break;
                 }
+                case 'memory-has':
+                case 'memory-delete':
+                    valueType = 'boolean';
+                    break;
+                case 'memory-increment':
+                    valueType = 'number';
+                    break;
+                case 'memory-array-append':
+                case 'memory-array-remove':
+                    valueType = 'array';
+                    break;
                 case 'event-element':
                 case 'event-id':
                     valueType = 'event';
@@ -5948,7 +6139,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'clamp':
                 case 'min-val':
                 case 'max-val':
-                case 'number-parse':
                     valueType = 'number';
                     break;
                 case 'number-to-base':
@@ -6082,6 +6272,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     valueType = 'number';
                     break;
                 case 'api-request':
+                case 'api-status':
                     valueType = 'zip';
                     break;
                 case 'api-field': {
@@ -7311,7 +7502,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'image-from-element':
                 return { elementSelector: '' };
             case 'api-request':
-                return { apiUrl: '', apiMethod: 'GET' };
+                return { apiUrl: '', apiMethod: 'GET', apiHeaders: '', apiTimeout: 15000 };
+            case 'api-status':
+                return { apiUrl: '', apiMethod: 'GET', apiHeaders: '', apiTimeout: 15000 };
             case 'api-field':
                 return { apiFieldPath: '', apiFieldType: 'string', apiFieldFallback: '' };
             case 'api-list-mapper':
@@ -8326,6 +8519,142 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 />
                                             </div>
                                         )}
+
+                                        {(selEl.type === 'memory-has' || selEl.type === 'memory-delete') && (
+                                            <div>
+                                                <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Variable Key</div>
+                                                <input
+                                                    type="text"
+                                                    className="input-control"
+                                                    value={selEl.data?.variableKey || ''}
+                                                    onChange={(e) => {
+                                                        const variableKey = e.target.value;
+                                                        setElements(prev =>
+                                                            updateElementValueTypes(
+                                                                prev.map(elem =>
+                                                                    elem.id === selected
+                                                                        ? { ...elem, data: { ...elem.data, variableKey } }
+                                                                        : elem
+                                                                )
+                                                            )
+                                                        );
+                                                    }}
+                                                    placeholder="Variable key"
+                                                    style={{ width: '100%' }}
+                                                />
+                                                {selEl.type === 'memory-delete' && (
+                                                    <div style={{ color: '#888', fontSize: '10px', marginTop: '4px' }}>
+                                                        Deletes on every wired Trigger occurrence. Unwired: deletes every evaluation.
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {selEl.type === 'memory-increment' && (
+                                            <>
+                                                <div>
+                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Variable Key</div>
+                                                    <input
+                                                        type="text"
+                                                        className="input-control"
+                                                        value={selEl.data?.variableKey || ''}
+                                                        onChange={(e) => {
+                                                            const variableKey = e.target.value;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, variableKey } }
+                                                                            : elem
+                                                                    )
+                                                                )
+                                                            );
+                                                        }}
+                                                        placeholder="Variable key"
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Step</div>
+                                                    <input
+                                                        type="number"
+                                                        className="input-control"
+                                                        value={String(selEl.data?.incrementStep ?? 1)}
+                                                        onChange={(e) => {
+                                                            const incrementStep = parseFloat(e.target.value);
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, incrementStep: Number.isFinite(incrementStep) ? incrementStep : 1 } }
+                                                                            : elem
+                                                                    )
+                                                                )
+                                                            );
+                                                        }}
+                                                        placeholder="1"
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                    <div style={{ color: '#888', fontSize: '10px', marginTop: '4px' }}>
+                                                        Negative to decrement. Applies on every wired Trigger occurrence; unwired: every evaluation.
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {(selEl.type === 'memory-array-append' || selEl.type === 'memory-array-remove') && (
+                                            <div>
+                                                <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Variable Key</div>
+                                                <input
+                                                    type="text"
+                                                    className="input-control"
+                                                    value={selEl.data?.variableKey || ''}
+                                                    onChange={(e) => {
+                                                        const variableKey = e.target.value;
+                                                        setElements(prev =>
+                                                            updateElementValueTypes(
+                                                                prev.map(elem =>
+                                                                    elem.id === selected
+                                                                        ? { ...elem, data: { ...elem.data, variableKey } }
+                                                                        : elem
+                                                                )
+                                                            )
+                                                        );
+                                                    }}
+                                                    placeholder="Variable key"
+                                                    style={{ width: '100%' }}
+                                                />
+                                                <div style={{ color: '#888', fontSize: '10px', marginTop: '4px' }}>
+                                                    Item pin (input0) sets the value. Applies on every wired Trigger occurrence; unwired: every evaluation.
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {isMemoryNodeType(selEl.type) && (
+                                            <div>
+                                                <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Scope</div>
+                                                <select
+                                                    className="input-control"
+                                                    value={String(selEl.data?.memoryScope || 'widget')}
+                                                    onChange={(e) => {
+                                                        const memoryScope = e.target.value === 'page' ? 'page' : 'widget';
+                                                        setElements(prev =>
+                                                            updateElementValueTypes(
+                                                                prev.map(elem =>
+                                                                    elem.id === selected
+                                                                        ? { ...elem, data: { ...elem.data, memoryScope } }
+                                                                        : elem
+                                                                )
+                                                            )
+                                                        );
+                                                    }}
+                                                    style={{ width: '100%' }}
+                                                >
+                                                    <option value="widget">This widget only (default, avoids collisions)</option>
+                                                    <option value="page">Shared across widgets on this page</option>
+                                                </select>
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })()}
@@ -8509,8 +8838,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'image-from-link'
                             || el.type === 'image-from-element'
                             || el.type === 'api-request'
+                            || el.type === 'api-status'
                             || el.type === 'api-field'
-                            || el.type === 'api-list-mapper';
+                            || el.type === 'api-list-mapper'
+                            || isMemoryNodeType(el.type);
                         const calcSegments = el.type === 'calculation' ? (calcFlowByNode[el.id] || []) : [];
                         const calcMarkerId = `calc-flow-arrow-${el.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
                         const activeDragDelta = dragElementDelta?.elementId === el.id ? dragElementDelta : null;
@@ -8925,7 +9256,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     );
                                                 })()
-                                              ) : el.type === 'api-request' || el.type === 'api-field' || el.type === 'api-list-mapper' ? (
+                                              ) : el.type === 'api-request' || el.type === 'api-status' || el.type === 'api-field' || el.type === 'api-list-mapper' ? (
                                                   renderApiNodeControls(el)
                                               ) : el.type === 'element-id' ? (
                                                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
@@ -9524,7 +9855,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     );
                                                 })()
-                                            ) : el.type === 'memory-read-number' || el.type === 'memory-read-string' || el.type === 'memory-read-boolean' || el.type === 'memory-write-number' || el.type === 'memory-write-string' || el.type === 'memory-write-boolean' ? (
+                                            ) : isMemoryNodeType(el.type) ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
                                                     Configure in sidebar
                                                 </div>

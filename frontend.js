@@ -209,6 +209,7 @@
       "__nodeLoopItem",
       "__nodeLoopIndex",
       "__nodeApiRequest",
+      "__nodeApiStatus",
       "__nodeApiListMapper",
       "__nodeImageFromLink",
       "__nodeImageFromElement",
@@ -224,6 +225,11 @@
       "__nodeGetPath",
       "__nodeMemoryGet",
       "__nodeMemorySet",
+      "__nodeMemoryHas",
+      "__nodeMemoryDelete",
+      "__nodeMemoryIncrement",
+      "__nodeMemoryArrayAppend",
+      "__nodeMemoryArrayRemove",
       "__nodeEvent",
       "__nodeHoverEvent",
       "__nodePageLoadEvent",
@@ -239,6 +245,7 @@
       "parseInt",
       "String",
       "__nodeToBase",
+      "__nodeParseRadix",
       // Action node keys used in compiled action plan expressions
       "type",
       "sourceId",
@@ -784,23 +791,63 @@
     }
   }
 
-  function __nodeApiRequest(url, method = "GET", data) {
-    const requestUrl = toSafeString(url).trim();
-    if (!requestUrl) return null;
+  // cacheKeys currently in flight, so two nodes requesting the exact same
+  // (method, url, body, headers) -- e.g. an api-request and an api-status
+  // node pointed at the same endpoint -- share ONE network request instead
+  // of firing a duplicate.
+  const apiInFlightRequests = new Set();
 
-    const requestMethod = toSafeString(method).trim().toUpperCase() || "GET";
-    const requestBody = requestMethod === "GET" ? "" : JSON.stringify(data ?? {});
-    const cacheKey = `${requestMethod}:${requestUrl}:${requestBody}`;
+  function __nodeApiParseHeaders(headersJson) {
+    const text = toSafeString(headersJson).trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // Malformed headers JSON: proceed without the extra headers rather
+      // than failing the whole request.
+    }
+    return {};
+  }
+
+  // Real HTTP requests are asynchronous. This used to be a SYNCHRONOUS XHR
+  // (xhr.open(method, url, false)), which blocks the page's main thread for
+  // every API node on every recalculation -- the "faking synchronous
+  // behavior" anti-pattern. Fixed to fire a real async XHR: a fresh request
+  // returns a "no value yet" entry immediately (null / loading), and once
+  // the response lands, the result is cached and scheduleRecalculation()
+  // re-runs the graph so the real value flows through on the next pass --
+  // the same "external event -> cache -> recalculate" pattern already used
+  // for __nodeEvent. Concurrent identical requests are deduped via
+  // apiInFlightRequests; distinct requests get distinct cache keys, so a
+  // newer request can never be overwritten by a stale, slower-to-resolve one.
+  // A string Body input (raw text, or an already-serialized JSON string) is
+  // sent as-is; anything else (object/array/number/boolean) is JSON-encoded.
+  // Without this, wiring a pre-built JSON string into Body double-encoded it.
+  function __nodeApiSerializeBody(data) {
+    if (typeof data === "string") return data;
+    return JSON.stringify(data ?? {});
+  }
+
+  function __nodeApiFetch(requestUrl, requestMethod, data, headersJson, timeout) {
+    const requestBody = (requestMethod === "GET" || requestMethod === "HEAD") ? "" : __nodeApiSerializeBody(data);
+    const cacheKey = `${requestMethod}:${requestUrl}:${requestBody}:${toSafeString(headersJson)}`;
     const cached = apiRequestCache.get(cacheKey);
     if (cached && typeof cached.timestamp === "number" && Date.now() - cached.timestamp < API_REQUEST_CACHE_TTL) {
-      return cached.value;
+      return cached;
+    }
+    if (apiInFlightRequests.has(cacheKey) || typeof XMLHttpRequest === "undefined") {
+      return cached || null;
     }
 
-    try {
-      if (typeof XMLHttpRequest === "undefined") {
-        return null;
-      }
+    apiInFlightRequests.add(cacheKey);
+    const finish = (entry) => {
+      apiInFlightRequests.delete(cacheKey);
+      apiRequestCache.set(cacheKey, { timestamp: Date.now(), ...entry });
+      scheduleRecalculation();
+    };
 
+    try {
       let sameOrigin = false;
       try {
         const parsedUrl = new URL(requestUrl, window?.location?.href || document?.baseURI || "");
@@ -814,34 +861,58 @@
         ? `${requestUrl}${requestUrl.includes("?") ? "&" : "?"}_t=${Date.now()}`
         : requestUrl;
 
-      xhr.open(requestMethod, finalUrl, false);
-      // Some browsers throw InvalidAccessError when `withCredentials` is set on
-      // a synchronous XHR from a document. Same-origin requests already carry
-      // cookies by default, so recover rather than lose the whole request.
-      try { xhr.withCredentials = sameOrigin; } catch { /* sync-XHR restriction */ }
+      xhr.open(requestMethod, finalUrl, true);
+      const timeoutMs = Number.isFinite(Number(timeout)) && Number(timeout) > 0 ? Number(timeout) : 15000;
+      xhr.timeout = timeoutMs;
+      try { xhr.withCredentials = sameOrigin; } catch { /* strict-browser restriction */ }
 
-      if (requestMethod !== "GET") {
+      if (requestMethod !== "GET" && requestMethod !== "HEAD") {
         try { xhr.setRequestHeader("Content-Type", "application/json"); } catch { /* ignore */ }
       }
-
       const nonce = sameOrigin ? window?.wpApiSettings?.nonce : "";
       if (nonce) {
         try { xhr.setRequestHeader("X-WP-Nonce", nonce); } catch { /* ignore */ }
       }
+      const extraHeaders = __nodeApiParseHeaders(headersJson);
+      Object.keys(extraHeaders).forEach((headerName) => {
+        try { xhr.setRequestHeader(headerName, toSafeString(extraHeaders[headerName])); } catch { /* ignore */ }
+      });
 
-      xhr.send(requestMethod === "GET" ? null : JSON.stringify(data ?? {}));
+      xhr.onload = () => {
+        const responseText = toSafeString(xhr.responseText || "");
+        if (xhr.status >= 200 && xhr.status < 300) {
+          finish({ value: tryParseJsonValue(responseText), ok: true, status: xhr.status, statusText: xhr.statusText || "", error: "" });
+        } else {
+          finish({ value: null, ok: false, status: xhr.status, statusText: xhr.statusText || "", error: `HTTP ${xhr.status}` });
+        }
+      };
+      xhr.onerror = () => finish({ value: null, ok: false, status: 0, statusText: "", error: "Network error" });
+      xhr.ontimeout = () => finish({ value: null, ok: false, status: 0, statusText: "", error: "Timeout" });
+      xhr.onabort = () => finish({ value: null, ok: false, status: 0, statusText: "", error: "Aborted" });
 
-      const responseText = toSafeString(xhr.responseText || "");
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const parsed = tryParseJsonValue(responseText);
-        apiRequestCache.set(cacheKey, { timestamp: Date.now(), value: parsed });
-        return parsed;
-      }
-    } catch {
-      return null;
+      xhr.send((requestMethod === "GET" || requestMethod === "HEAD") ? null : __nodeApiSerializeBody(data));
+    } catch (e) {
+      finish({ value: null, ok: false, status: 0, statusText: "", error: "Request failed" });
     }
 
-    return null;
+    return cached || null;
+  }
+
+  function __nodeApiRequest(url, method = "GET", data, headersJson, timeout) {
+    const requestUrl = toSafeString(url).trim();
+    if (!requestUrl) return null;
+    const requestMethod = toSafeString(method).trim().toUpperCase() || "GET";
+    const entry = __nodeApiFetch(requestUrl, requestMethod, data, headersJson, timeout);
+    return entry ? entry.value : null;
+  }
+
+  function __nodeApiStatus(url, method = "GET", data, headersJson, timeout) {
+    const requestUrl = toSafeString(url).trim();
+    if (!requestUrl) return { ok: false, status: 0, statusText: "", error: "Missing URL", loading: false };
+    const requestMethod = toSafeString(method).trim().toUpperCase() || "GET";
+    const entry = __nodeApiFetch(requestUrl, requestMethod, data, headersJson, timeout);
+    if (!entry) return { ok: false, status: 0, statusText: "", error: "", loading: true };
+    return { ok: !!entry.ok, status: entry.status || 0, statusText: entry.statusText || "", error: entry.error || "", loading: false };
   }
 
   function isApiScalarType(type) {
@@ -1548,6 +1619,13 @@
     return str;
   }
 
+  function __nodeParseRadix(value, radix) {
+    const str = toSafeString(value).trim();
+    if (!str) return 0;
+    const parsed = parseInt(str, radix || 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   function __nodeCountTrue(...values) {
     return values.reduce((count, value) => {
       return count + (toFormulaBoolean(value) ? 1 : 0);
@@ -1670,22 +1748,6 @@
     }
 
     return leftText === rightText;
-  }
-
-  // Memory functions
-  window.memoryStore = window.memoryStore || {};
-
-  function __nodeMemoryGet(varName, defaultValue) {
-    const key = toSafeString(varName).trim();
-    if (!key) return defaultValue;
-    return window.memoryStore[key] !== undefined ? window.memoryStore[key] : defaultValue;
-  }
-
-  function __nodeMemorySet(varName, value) {
-    const key = toSafeString(varName).trim();
-    if (!key) return value;
-    window.memoryStore[key] = value;
-    return value;
   }
 
   // Event functions
@@ -2309,21 +2371,39 @@
   window.memoryStore = window.memoryStore || {};
   window.memoryPersistFlags = window.memoryPersistFlags || {}; // Track which variables should persist
 
-  function __nodeMemoryGet(varName, defaultValue, persist) {
+  // Two duplicated Elementor widget instances (native "Duplicate", a saved
+  // template inserted twice, a synced/global widget, ...) can share the same
+  // user-chosen memory variable name -- e.g. both built from the same
+  // template using "counter". window.memoryStore is one GLOBAL, page-wide
+  // object, so without scoping those two widgets would silently read and
+  // overwrite each other's value. __nodeMemoryResolveKey folds in the
+  // runtime blockScope (the same per-logic-block disambiguator already used
+  // for window.nodelogicActionBindings -- see applyLogicBlocks) UNLESS the
+  // node explicitly opts into the 'page' scope for intentional cross-widget
+  // sharing (e.g. a cart counter read by several widgets on one page).
+  function __nodeMemoryResolveKey(varName, scope, blockScope) {
     const key = toSafeString(varName).trim();
-    if (!key) return defaultValue;
-    
+    if (!key) return "";
+    if (scope === "page" || scope === "global") return key;
+    return `${blockScope || "noid"}::${key}`;
+  }
+
+  function __nodeMemoryGet(varName, defaultValue, persist, scope, blockScope) {
+    const rawKey = toSafeString(varName).trim();
+    if (!rawKey) return defaultValue;
+    const key = __nodeMemoryResolveKey(rawKey, scope, blockScope);
+
     // Initialize memoryDefaults if not exists
     window.memoryDefaults = window.memoryDefaults || {};
-    
+
     // Store the default value for potential reset operations
     window.memoryDefaults[key] = defaultValue;
-    
+
     // Track that this variable should persist
     if (persist) {
       window.memoryPersistFlags[key] = true;
     }
-    
+
     // If persist is true, try to load from localStorage first
     if (persist) {
       try {
@@ -2338,18 +2418,19 @@
         // Ignore localStorage errors
       }
     }
-    
+
     // Return from memory store or default
     return window.memoryStore[key] !== undefined ? window.memoryStore[key] : defaultValue;
   }
 
-  function __nodeMemorySet(varName, value, reset) {
-    const key = toSafeString(varName).trim();
-    if (!key) return value;
-    
+  function __nodeMemorySet(varName, value, reset, scope, blockScope) {
+    const rawKey = toSafeString(varName).trim();
+    if (!rawKey) return value;
+    const key = __nodeMemoryResolveKey(rawKey, scope, blockScope);
+
     // Handle reset logic - check for various reset conditions
     let shouldReset = false;
-    
+
     // Only reset if reset input is explicitly activated
     if (reset === true || reset === 'true') {
       shouldReset = true;
@@ -2358,7 +2439,7 @@
       const eventKey = reset.eventKey;
       const currentCount = reset.triggeredCount || 0;
       const consumedCount = window.eventProcessorConsumed[eventKey] || 0;
-      
+
       // Only reset if event was triggered since last consumption
       if (currentCount > consumedCount) {
         shouldReset = true;
@@ -2368,23 +2449,23 @@
     } else if (typeof reset === 'string' && reset.toLowerCase() === 'event') {
       shouldReset = true;
     }
-    
+
     if (shouldReset) {
       // For reset, we need to find the default value from Memory Read nodes
-      const defaultValue = window.memoryDefaults && window.memoryDefaults[key] !== undefined 
-        ? window.memoryDefaults[key] 
+      const defaultValue = window.memoryDefaults && window.memoryDefaults[key] !== undefined
+        ? window.memoryDefaults[key]
         : (typeof value === 'number' ? 0 : typeof value === 'boolean' ? false : '');
-      
+
       // Reset both runtime memory and persistent storage
       window.memoryStore[key] = defaultValue;
-      
+
       // Always clear localStorage for this variable (regardless of persist flag)
       try {
         localStorage.removeItem(`nodelogic_memory_${key}`);
       } catch (e) {
         // Ignore localStorage errors
       }
-      
+
       // If variable should persist, set it to default value in localStorage
       if (window.memoryPersistFlags[key]) {
         try {
@@ -2393,15 +2474,15 @@
           // Ignore localStorage errors
         }
       }
-      
+
       return defaultValue;
     }
-    
+
     // Normal memory write logic
     // Only write to memory if we're in active event flow OR if reset parameter is undefined/false (backward compatibility)
     if (window.activeEventFlow || reset === false || reset === undefined) {
       window.memoryStore[key] = value;
-      
+
       // Check if this variable should persist
       if (window.memoryPersistFlags[key]) {
         try {
@@ -2411,8 +2492,94 @@
         }
       }
     }
-    
+
     return value;
+  }
+
+  function __nodeMemoryHas(varName, scope, blockScope) {
+    const rawKey = toSafeString(varName).trim();
+    if (!rawKey) return false;
+    const key = __nodeMemoryResolveKey(rawKey, scope, blockScope);
+    if (window.memoryStore[key] !== undefined) return true;
+    if (window.memoryPersistFlags[key]) {
+      try {
+        return localStorage.getItem(`nodelogic_memory_${key}`) !== null;
+      } catch (e) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // Increment / array-append / array-remove / delete all MUTATE the store, so
+  // (unlike a plain read or a "Set Value" write, which are meant to reapply
+  // their current input on every recalculation pass) they must not fire on
+  // every pass -- a graph recalculates on any relevant page change, not just
+  // on the user's intended trigger, and "add 1 every recalculation" is not
+  // an increment. Gated the same way __nodeMemorySet's reset already is: an
+  // Event/Action-Event value wired into the node only fires the mutation on
+  // a genuinely NEW occurrence (eventKey + triggeredCount vs. a per-operation
+  // consumed count, namespaced so increment/append/remove/delete never share
+  // -- and never collide with -- reset's own consumption tracking). Leaving
+  // the trigger pin unwired keeps the simpler "apply every evaluation"
+  // behavior, matching plain memory-write nodes.
+  function __nodeMemoryConsumeTrigger(trigger, namespaceKey) {
+    if (trigger === undefined || trigger === null || trigger === false) return trigger !== false;
+    if (trigger === true) return true;
+    if (typeof trigger === 'object' && trigger.eventKey) {
+      const consumedKey = `${namespaceKey}::${trigger.eventKey}`;
+      const currentCount = trigger.triggeredCount || 0;
+      const consumedCount = window.eventProcessorConsumed[consumedKey] || 0;
+      if (currentCount > consumedCount) {
+        window.eventProcessorConsumed[consumedKey] = currentCount;
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function __nodeMemoryDelete(varName, trigger, scope, blockScope) {
+    const rawKey = toSafeString(varName).trim();
+    if (!rawKey) return true;
+    if (!__nodeMemoryConsumeTrigger(trigger, `memDelete::${rawKey}`)) return __nodeMemoryHas(varName, scope, blockScope);
+    const key = __nodeMemoryResolveKey(rawKey, scope, blockScope);
+    delete window.memoryStore[key];
+    if (window.memoryDefaults) delete window.memoryDefaults[key];
+    delete window.memoryPersistFlags[key];
+    try {
+      localStorage.removeItem(`nodelogic_memory_${key}`);
+    } catch (e) {
+      // Ignore localStorage errors
+    }
+    return true;
+  }
+
+  function __nodeMemoryIncrement(varName, step, trigger, persist, scope, blockScope) {
+    const current = Number(__nodeMemoryGet(varName, 0, persist, scope, blockScope));
+    if (!__nodeMemoryConsumeTrigger(trigger, `memInc::${toSafeString(varName).trim()}`)) {
+      return Number.isFinite(current) ? current : 0;
+    }
+    const stepAmount = Number.isFinite(Number(step)) ? Number(step) : 1;
+    const next = (Number.isFinite(current) ? current : 0) + stepAmount;
+    return __nodeMemorySet(varName, next, undefined, scope, blockScope);
+  }
+
+  function __nodeMemoryArrayAppend(varName, item, trigger, persist, scope, blockScope) {
+    const current = __nodeMemoryGet(varName, [], persist, scope, blockScope);
+    const currentArray = Array.isArray(current) ? current : [];
+    if (!__nodeMemoryConsumeTrigger(trigger, `memAppend::${toSafeString(varName).trim()}`)) return currentArray;
+    const nextArray = currentArray.slice();
+    nextArray.push(item);
+    return __nodeMemorySet(varName, nextArray, undefined, scope, blockScope);
+  }
+
+  function __nodeMemoryArrayRemove(varName, item, trigger, persist, scope, blockScope) {
+    const current = __nodeMemoryGet(varName, [], persist, scope, blockScope);
+    const currentArray = Array.isArray(current) ? current : [];
+    if (!__nodeMemoryConsumeTrigger(trigger, `memRemove::${toSafeString(varName).trim()}`)) return currentArray;
+    const nextArray = currentArray.filter((entry) => !__nodeCaseEquals(entry, item));
+    return __nodeMemorySet(varName, nextArray, undefined, scope, blockScope);
   }
 
   function readControlValue(input) {
@@ -3520,6 +3687,7 @@
       __nodeLoopItem: extraContext.__nodeLoopItem,
       __nodeLoopIndex: extraContext.__nodeLoopIndex,
       __nodeApiRequest,
+      __nodeApiStatus,
       __nodeApiListMapper,
       __nodeImageFromLink,
       __nodeImageFromElement,
@@ -3529,13 +3697,29 @@
       __nodeGetChildAt,
       __nodeGetChildrenSubset,
       __nodeToBase,
+      __nodeParseRadix,
       __nodeCountTrue,
       __nodeGradient,
       __nodeUnzip,
       __nodeCaseEquals,
       __nodeGetPath,
-      __nodeMemoryGet,
-      __nodeMemorySet,
+      // Bound per-evaluation so the compiled call's own `scope` literal
+      // ('widget' | 'page') combines with the runtime blockScope of the
+      // logic block actually running this formula -- see __nodeMemoryResolveKey.
+      __nodeMemoryGet: (varName, defaultValue, persist, scope) =>
+        __nodeMemoryGet(varName, defaultValue, persist, scope, extraContext.__nodeBlockScope),
+      __nodeMemorySet: (varName, value, reset, scope) =>
+        __nodeMemorySet(varName, value, reset, scope, extraContext.__nodeBlockScope),
+      __nodeMemoryHas: (varName, scope) =>
+        __nodeMemoryHas(varName, scope, extraContext.__nodeBlockScope),
+      __nodeMemoryDelete: (varName, trigger, scope) =>
+        __nodeMemoryDelete(varName, trigger, scope, extraContext.__nodeBlockScope),
+      __nodeMemoryIncrement: (varName, step, trigger, persist, scope) =>
+        __nodeMemoryIncrement(varName, step, trigger, persist, scope, extraContext.__nodeBlockScope),
+      __nodeMemoryArrayAppend: (varName, item, trigger, persist, scope) =>
+        __nodeMemoryArrayAppend(varName, item, trigger, persist, scope, extraContext.__nodeBlockScope),
+      __nodeMemoryArrayRemove: (varName, item, trigger, persist, scope) =>
+        __nodeMemoryArrayRemove(varName, item, trigger, persist, scope, extraContext.__nodeBlockScope),
       __nodeEvent,
       __nodeHoverEvent,
       __nodePageLoadEvent,
@@ -3781,14 +3965,14 @@
     }
   }
 
-  function evaluateFormulaExpression(formula, values) {
+  function evaluateFormulaExpression(formula, values, extraContext) {
     if (!isFormulaString(formula)) {
       return { valid: false, value: NaN, useGrosze: false, prepared: "" };
     }
 
     const useGrosze = parseFormulaVariables(formula).some(v => v.id === "cost");
     const prepared = prepareFormulaForEval(formula, values);
-    const rawResult = safeEvaluateExpression(prepared);
+    const rawResult = safeEvaluateExpression(prepared, extraContext);
 
     if (!rawResult.valid) {
       return { valid: false, value: NaN, useGrosze, prepared };
@@ -5256,7 +5440,13 @@
       } catch {
         valuesSignature = "";
       }
-      const evaluationKey = `${formula}\u0000${valuesSignature}\u0000${eventStoreSignature}`;
+      // blockScope is folded into the cache key too: a formula that reads
+      // block-scoped memory (__nodeMemoryGet/Set with the default 'widget'
+      // scope) produces a DIFFERENT result per logic block even when the
+      // formula string, dynamic values, and event signature are otherwise
+      // identical (two duplicated widgets). Without this, one block's fresh
+      // evaluation would be cached and silently replayed for the other.
+      const evaluationKey = `${formula}\u0000${valuesSignature}\u0000${eventStoreSignature}\u0000${blockScope}`;
       let evaluation = formulaEvaluationCache.get(evaluationKey);
       // A cache HIT reuses an evaluation computed for a PRIOR pass (including,
       // e.g., a __nodeEventProcessor-gated "true" from whichever pass first
@@ -5267,7 +5457,7 @@
       // are (re-)applied below; see isFreshEvaluation.
       const isFreshEvaluation = !evaluation;
       if (!evaluation) {
-        evaluation = evaluateFormulaExpression(formula, values);
+        evaluation = evaluateFormulaExpression(formula, values, { __nodeBlockScope: blockScope });
         // An Output "Element" pin resolves to a live DOM node inside the result
         // (raw.__element). That node can be replaced between recalculations, so
         // its evaluation must NOT be cached — a stale entry would hand a
@@ -5298,7 +5488,16 @@
         // Detected once per formula text; this has no effect within a single
         // pass, where evaluateFormulaExpression is called exactly once.
         const readsLiveElementProperty = formula.indexOf("__nodeGetElementProp") !== -1;
-        if (evaluation.valid && !holdsLiveElement && !readsLiveElementProperty) {
+        // Same staleness hazard as __nodeGetElementProp above, for a
+        // different reason: __nodeApiRequest / __nodeApiStatus resolve
+        // ASYNCHRONOUSLY. The pass that first evaluates this formula sees
+        // "no value yet" (null / loading) and scheduleRecalculation() fires
+        // once the response lands -- but the cache key (formula + tracked
+        // state) doesn't change between those two passes, so caching the
+        // FIRST (pending) evaluation would permanently freeze the node on
+        // "loading", the response's own arrival notwithstanding.
+        const readsAsyncApi = formula.indexOf("__nodeApiRequest") !== -1 || formula.indexOf("__nodeApiStatus") !== -1;
+        if (evaluation.valid && !holdsLiveElement && !readsLiveElementProperty && !readsAsyncApi) {
           if (formulaEvaluationCache.size > 100) {
             formulaEvaluationCache.delete(formulaEvaluationCache.keys().next().value);
           }

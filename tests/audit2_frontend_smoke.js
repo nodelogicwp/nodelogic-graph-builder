@@ -70,29 +70,44 @@ function harness(bodyHtml, exposeExtra) {
   })());
 }
 
-/* ---- D) api-request guarded withCredentials --------------------------- */
-{
-  // Simulate a browser that throws on sync-XHR withCredentials.
-  const dom = new JSDOM('<body>', { runScripts: 'dangerously', url: 'https://site.test/' });
+/* ---- D) api-request guarded withCredentials (real async XHR) ---------- */
+async function runD() {
+  // Simulate a strict browser that throws on the withCredentials setter.
+  // __nodeApiRequest is a real async XHR now (was synchronous) -- the mock
+  // resolves on a later macrotask via onload, like a real browser XHR.
+  const dom = new JSDOM('<body>', { runScripts: 'dangerously', url: 'https://site.test/', pretendToBeVisual: true });
   dom.window.eval(CSSP);
+  let rafId = 1;
+  dom.window.requestAnimationFrame = (cb) => { const id = rafId++; setTimeout(() => cb(dom.window.performance.now()), 0); return id; };
+  dom.window.cancelAnimationFrame = () => {};
   // monkeypatch XHR before frontend loads
   dom.window.eval(`
     (function(){
-      var RealXHR = window.XMLHttpRequest;
       function FakeXHR(){ this._h={}; }
-      FakeXHR.prototype.open=function(m,u,async){ this._sync = async===false; };
-      Object.defineProperty(FakeXHR.prototype,'withCredentials',{ set:function(v){ if(this._sync) throw new Error('InvalidAccessError'); }, get:function(){return false;} });
+      FakeXHR.prototype.open=function(m,u,async){ this._async = async!==false; };
+      Object.defineProperty(FakeXHR.prototype,'withCredentials',{ set:function(v){ throw new Error('InvalidAccessError'); }, get:function(){return false;} });
       FakeXHR.prototype.setRequestHeader=function(k,v){ this._h[k]=v; };
-      FakeXHR.prototype.send=function(){ this.status=200; this.responseText='{"ok":true}'; };
+      FakeXHR.prototype.send=function(){
+        var self = this;
+        setTimeout(function(){
+          self.status=200; self.statusText='OK'; self.responseText='{"ok":true}';
+          if (self.onload) self.onload();
+        }, 0);
+      };
       window.XMLHttpRequest = FakeXHR;
     })();
   `);
   let src = FRONT; const m='\n})();'; const i=src.lastIndexOf(m);
   src = src.slice(0,i)+'\n;window.__A={__nodeApiRequest:__nodeApiRequest};'+src.slice(i);
   const s = dom.window.document.createElement('script'); s.textContent = src; dom.window.document.body.appendChild(s);
+  const first = dom.window.__A.__nodeApiRequest('https://site.test/api/x', 'GET');
+  ok('D: first (in-flight) call does not throw and returns null (async, not fake-sync)', first === null, JSON.stringify(first));
+  await new Promise((r) => setTimeout(r, 30));
   const r = dom.window.__A.__nodeApiRequest('https://site.test/api/x', 'GET');
   ok('D: api-request returns parsed body despite throwing withCredentials setter', r && r.ok === true, JSON.stringify(r));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+runD().then(() => {
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail === 0 ? 0 : 1);
+});

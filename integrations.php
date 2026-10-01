@@ -115,6 +115,29 @@ add_action('elementor/init', function () {
                     ]
                 );
 
+                // Graph history – previous saved versions of graph_state
+                // (newest first), written by the editor's Save Graph in the
+                // same settings command as graph_state. Editor-only: never
+                // rendered on the frontend.
+                $this->add_control(
+                    'graph_history',
+                    [
+                        'label'   => 'Graph History',
+                        'type'    => \Elementor\Controls_Manager::HIDDEN,
+                        'default' => '[]',
+                    ]
+                );
+
+                // How many previous versions Save Graph keeps (0-10).
+                $this->add_control(
+                    'graph_history_limit',
+                    [
+                        'label'   => 'Graph History Limit',
+                        'type'    => \Elementor\Controls_Manager::HIDDEN,
+                        'default' => '5',
+                    ]
+                );
+
                 // Formula – tekstowa formuła logiki
                 $this->add_control(
                     'formula',
@@ -187,6 +210,7 @@ add_action('elementor/init', function () {
                     data-graph-state="<?php echo esc_attr($graph_state); ?>"
                     data-formula="<?php echo esc_attr($formula); ?>"
                     data-output-configs="<?php echo esc_attr($output_configs); ?>"
+                    data-post-id="<?php echo esc_attr((string) (get_the_ID() ?: 0)); ?>"
                     style="display:none;"
                 ></div>
 

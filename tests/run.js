@@ -24,7 +24,7 @@ const filter = process.argv[2] || '';
 // 1. Build the pure-model CJS shims the model suites require (via the esbuild
 //    JS API — the .bin/.cmd shim is unreliable through execFileSync on Windows).
 const esbuild = require(path.join(ROOT, 'node_modules', 'esbuild'));
-const models = ['getChildrenModel', 'elementPropertyModel', 'previewResolver'];
+const models = ['getChildrenModel', 'elementPropertyModel', 'previewResolver', 'rawHtmlModel', 'graphStore'];
 for (const m of models) {
     const src = path.join(ROOT, 'src', 'components', 'graphEditor', `${m}.ts`);
     const out = path.join(__dirname, `${m}.cjs`);

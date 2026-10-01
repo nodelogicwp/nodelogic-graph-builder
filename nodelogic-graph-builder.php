@@ -3,7 +3,7 @@
  * Plugin Name: NodeLogic Graph Builder
  * Description: Visual no-code calculator and workflow builder for Gutenberg blocks with conditional logic, dynamic content, and reusable presets.
  * Plugin URI: https://nodelogicwp.com
- * Version: 1.5.3
+ * Version: 1.5.4
  * Author: Volodymyr Diadiunov
  * Author URI: https://nodelogicwp.com
  * License: GPL-2.0-or-later
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('NODELOGIC_VERSION')) {
-    define('NODELOGIC_VERSION', '1.5.3');
+    define('NODELOGIC_VERSION', '1.5.4');
 }
 
 if (!function_exists('nodelogic_graph_builder_block_comment')) {
@@ -390,6 +390,14 @@ add_action('wp_enqueue_scripts', function () {
         filemtime(__DIR__ . '/frontend.js'),
         true
     );
+    // Debug nodes show their output only to people who can edit content
+    // (unless a node is set to "Everyone"). A page cached for visitors
+    // carries false -- the safe direction.
+    wp_add_inline_script(
+        'nodelogic-frontend',
+        'window.nodelogicFrontendDebug = ' . wp_json_encode(['canDebug' => is_user_logged_in() && current_user_can('edit_posts')]) . ';',
+        'before'
+    );
 
     wp_enqueue_style(
         'nodelogic-frontend-style',
@@ -404,6 +412,19 @@ require_once __DIR__ . '/integrations.php';
 
 // 2. DOPIERO TERAZ enqueue panelu
 add_action('elementor/editor/before_enqueue_scripts', function () {
+    // PRO (if active) hooks its own callback on this same action to localize
+    // window.calcgraphProEditorConfig. Deliberately NOT declared as a WP
+    // script dependency here: this bundle's GraphEditor reads that global
+    // lazily inside a useEffect and also listens for the
+    // 'nodelogic-graph-builder-config-updated' DOM event PRO's config script
+    // dispatches, so exact <script> print order between the two plugins'
+    // independent enqueue calls never mattered functionally. A prior attempt
+    // to list PRO's script handle as an explicit dependency of this one
+    // caused this script to stop being enqueued entirely on sites where the
+    // PRO handle's own registration wasn't resolved in time by WordPress'
+    // dependency graph -- breaking the Elementor Logic Editor outright
+    // (window.mountElementorLogicEditor never defined). MAIN must not
+    // hard-depend on a PRO-owned script handle across plugin boundaries.
     wp_enqueue_script(
         'nodelogic-elementor-react',
         plugins_url('/dist/build/elementor.js', __FILE__),

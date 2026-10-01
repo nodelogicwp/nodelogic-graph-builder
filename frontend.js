@@ -152,10 +152,14 @@
 
   function isPreparedExpressionSafe(expr) {
     if (typeof expr !== "string") return false;
-    if (expr.length === 0 || expr.length > 12000) return false;
+    // Hard ceiling on the whole formula; the 12000 limit below applies to the
+    // CODE part only. String literal content (e.g. a Raw HTML node's markup)
+    // is a single token for the parser, so it can't inflate AST work.
+    if (expr.length === 0 || expr.length > 262144) return false;
 
     // Strip string literals first, then check for injection vectors outside strings
     const stripped = stripStringLiterals(expr);
+    if (stripped.length > 12000) return false;
 
     // Block obvious statement/function injection vectors (outside string literals).
     if (/[;`]/.test(stripped)) return false;
@@ -223,6 +227,7 @@
       "__nodeUnzip",
       "__nodeCaseEquals",
       "__nodeGetPath",
+      "__nodeJsonParse",
       "__nodeMemoryGet",
       "__nodeMemorySet",
       "__nodeMemoryHas",
@@ -235,8 +240,42 @@
       "__nodePageLoadEvent",
       "__nodeTimerEvent",
       "__nodeCustomEvent",
+      "__nodeEventOr",
+      "__nodeEventAnd",
+      "__nodeFallbackEvent",
       "__nodeEventProcessor",
       "__nodeFallback",
+      "__nodeFormData",
+      "__nodeSendEmail",
+      // Send Email event outputs: (expr).sendingEvent / .sentEvent / .failedEvent
+      "sendingEvent",
+      "sentEvent",
+      "failedEvent",
+      "__nodeDbChain",
+      "__nodeDbSelect",
+      "__nodeDbWrite",
+      "__nodeRawHtml",
+      "__nodeSetParent",
+      "__nodeCloneElement",
+      "__nodeElementsByClass",
+      "__nodeDebug",
+      // Members of __nodeCloneElement's result: (expr).clone / (expr).clones
+      "clone",
+      "clones",
+      // Members read off __nodeDbSelect's result ((expr).rows / .firstRow /
+      // .count / .status) -- same member-vs-identifier limitation as below.
+      "rows",
+      "firstRow",
+      "count",
+      "status",
+      // Property names read via MemberExpression off __nodeFormData's result
+      // ((expr).data / (expr).event / (expr).data.values[...]) -- this
+      // regex-based scan can't tell a member-access property from a bare
+      // context identifier, so all three must be whitelisted here even
+      // though none of them is ever resolved against createFormulaEvalContext.
+      "data",
+      "event",
+      "values",
       "value",
       "label",
       "background",
@@ -755,24 +794,43 @@
     });
   }
 
+  // Runs `run()` with nlActiveLoopItemElement set to `item` (when it's a live
+  // element) for the duration of the call, restoring the previous value
+  // afterward (correct for nested maps/filters too, via plain save/restore --
+  // each call is synchronous). See nlApplySelfWriteBaseline above for why.
+  // Also records the loop index path (nested loops -> "2.0") so stateful DOM
+  // nodes inside a For Each body keep one instance per item.
+  function nlWithActiveLoopItem(item, run, index) {
+    const prev = nlActiveLoopItemElement;
+    const prevPath = nlActiveLoopPath;
+    nlActiveLoopItemElement = (item && typeof item === "object" && item.nodeType === 1) ? item : null;
+    nlActiveLoopPath = prevPath.concat([Number.isInteger(index) ? index : 0]);
+    try {
+      return run();
+    } finally {
+      nlActiveLoopItemElement = prev;
+      nlActiveLoopPath = prevPath;
+    }
+  }
+
   function __nodeArrayMapGraph(arrayValue, bodyExpression) {
     const list = Array.isArray(arrayValue) ? arrayValue : [];
     const expression = toSafeString(bodyExpression).trim();
     if (!expression) return list.slice();
-    return list.map((item, index) => {
+    return list.map((item, index) => nlWithActiveLoopItem(item, () => {
       const result = safeEvaluateExpression(expression, { __nodeLoopItem: item, __nodeLoopIndex: index });
       return result.valid ? result.value : undefined;
-    });
+    }, index));
   }
 
   function __nodeArrayFilterGraph(arrayValue, predicateExpression) {
     const list = Array.isArray(arrayValue) ? arrayValue : [];
     const expression = toSafeString(predicateExpression).trim();
     if (!expression) return list.slice();
-    return list.filter((item, index) => {
+    return list.filter((item, index) => nlWithActiveLoopItem(item, () => {
       const result = safeEvaluateExpression(expression, { __nodeLoopItem: item, __nodeLoopIndex: index });
       return result.valid && Boolean(result.value);
-    });
+    }, index));
   }
 
   function tryParseJsonValue(value) {
@@ -913,6 +971,698 @@
     const entry = __nodeApiFetch(requestUrl, requestMethod, data, headersJson, timeout);
     if (!entry) return { ok: false, status: 0, statusText: "", error: "", loading: true };
     return { ok: !!entry.ok, status: entry.status || 0, statusText: entry.statusText || "", error: entry.error || "", loading: false };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Form Data / Send Email (PRO) runtime.
+  //
+  // Both are gated on window.calcgraphProFrontendConfig -- PRO's own
+  // wp_enqueue_scripts hook localizes this onto the SAME 'nodelogic-frontend'
+  // script handle this file is registered under (see nodelogic-graph-
+  // builder.php's enqueue). Without PRO active, that global is simply never
+  // set, so __nodeFormData never attaches a submit listener / never resumes
+  // anything, and __nodeSendEmail never has a URL to call -- the feature is
+  // inert by construction, not by a separate license flag this file would
+  // have to check itself.
+  //
+  // Reload-survival design (submit -> capture -> reload -> resume):
+  //   1. A 'submit' listener is attached (once) to the form the Form node
+  //      points at. On fire, it captures the submitted fields via FormData
+  //      and persists them BEFORE the browser's own navigation completes --
+  //      NOT during it, since no JS runs once the new document starts
+  //      loading. preventDefault() is never called: the site's own form
+  //      action / reload proceeds exactly as it would without this plugin.
+  //   2. The captured payload is written to localStorage synchronously
+  //      (network-independent -- this is what makes resume work even when
+  //      the page navigates before any request could complete) AND
+  //      best-effort mirrored to a short-lived server-side transient via
+  //      sendBeacon (falling back to a synchronous XHR if the browser
+  //      refuses to queue the beacon -- sendBeacon's return value only means
+  //      "queued", never "delivered", so neither path is treated as a
+  //      guarantee; see nlSendFormCapture).
+  //   3. On the next page load, __nodeFormData reads back whichever copy is
+  //      available (local first; the server copy only matters when the
+  //      local payload was too large to embed or localStorage was
+  //      unavailable) and hands it to the graph as the Form node's output.
+  //      The localStorage entry is deleted on first read (single-use), and
+  //      the server transient is single-use + short-TTL + keyed by an
+  //      unguessable per-submission id -- a stale or replayed marker can
+  //      never resume a second time.
+  //   4. Nothing here re-runs the CAPTURE step on the new page -- there is
+  //      no synthetic 'submit' dispatch anywhere in this file. The old
+  //      page's capture and the new page's resume are two disjoint code
+  //      paths that never both execute in the same page load, so whatever
+  //      logically belonged to "before submit" cannot re-fire after reload.
+  //   5. A genuinely NEW, unrelated submission on the same form always
+  //      overwrites the one pending marker for that form (last-submit-wins);
+  //      a rapid double-submit on the SAME click/Enter is suppressed by a
+  //      per-element lock set synchronously before any capture work runs.
+
+  const NL_FORM_RESUME_MAX_AGE_MS = 30 * 60 * 1000; // stale marker cutoff
+  const NL_FORM_LOCAL_EMBED_LIMIT = 8000; // bytes, roughly -- keep the sync localStorage write cheap
+  const NL_FORM_VALUE_MAX_LENGTH = 4000; // per-field cap, defends against a pathological huge field
+
+  window.nodelogicFormResumeStore = window.nodelogicFormResumeStore || {};
+  window.nodelogicFormResumeFetchState = window.nodelogicFormResumeFetchState || {};
+  window.nodelogicFormCaptureAttached = window.nodelogicFormCaptureAttached || new WeakMap();
+  window.nodelogicEmailStatusStore = window.nodelogicEmailStatusStore || {};
+  window.nodelogicEmailInFlight = window.nodelogicEmailInFlight || new Set();
+
+  function nlGenerateSubmissionId() {
+    // Never itself relied on as a security boundary against a same-origin
+    // attacker with arbitrary JS execution (nothing client-side can defend
+    // against that) -- this only needs to be unguessable to a REMOTE party
+    // trying to fetch someone else's pending submission from the server
+    // transient it is used to key (see the REST /form-resume endpoint).
+    try {
+      const bytes = new Uint8Array(16);
+      (window.crypto || window.msCrypto).getRandomValues(bytes);
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+      return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    }
+  }
+
+  function nlSanitizeFormValue(v) {
+    // Length-capped only. XSS-safety is each DOWNSTREAM consumer's own
+    // responsibility (a DOM write escapes on its own side; the send-email
+    // endpoint sanitizes independently server-side) -- this purely guards
+    // against a pathological field size bloating the captured payload.
+    return toSafeString(v).slice(0, NL_FORM_VALUE_MAX_LENGTH);
+  }
+
+  function nlResolveFormElement(element) {
+    if (!element || element.nodeType !== 1) return null;
+    if (element.tagName === "FORM") return element;
+    if (element.form && element.form.tagName === "FORM") return element.form; // a control inside a form
+    return typeof element.querySelector === "function" ? element.querySelector("form") : null;
+  }
+
+  function nlCaptureFormData(form) {
+    const fd = new FormData(form);
+    const values = {};
+    const seen = new Set();
+    for (const key of fd.keys()) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const all = fd.getAll(key).map((v) => (v instanceof File ? "" : nlSanitizeFormValue(v)));
+      values[key] = all.length > 1 ? all : (all[0] ?? "");
+    }
+    try {
+      // FormData omits an unchecked checkbox/radio entirely -- include every
+      // named control that exists in the form so downstream Validate sees a
+      // stable key set regardless of what the visitor left unchecked, not
+      // only whatever happened to be submitted.
+      form.querySelectorAll("input[name], select[name], textarea[name]").forEach((el) => {
+        const name = el.name;
+        if (!name || seen.has(name)) return;
+        if (el.type === "checkbox" || el.type === "radio") {
+          values[name] = false;
+          seen.add(name);
+        }
+      });
+      // A plain boolean-style checkbox (no meaningful value attribute, the
+      // single control for its name -- not a same-named checkbox GROUP where
+      // several can be checked at once and the array-of-values shape above
+      // is what's wanted) submits its value as the string "on" when checked.
+      // Coerced to a real boolean here so a graph author can write
+      // `values.agree === true` instead of comparing against the string
+      // "on" -- a checkbox with its OWN meaningful value (e.g. value="yes",
+      // used to distinguish options in a group) keeps that value untouched.
+      const checkboxNames = {};
+      form.querySelectorAll('input[type="checkbox"][name]').forEach((el) => {
+        checkboxNames[el.name] = (checkboxNames[el.name] || 0) + 1;
+      });
+      Object.keys(checkboxNames).forEach((name) => {
+        if (checkboxNames[name] !== 1) return; // a real group: leave the array-of-checked-values shape alone
+        const el = form.querySelector(`input[type="checkbox"][name="${name.replace(/"/g, '\\"')}"]`);
+        if (!el) return;
+        const hasCustomValue = el.hasAttribute("value") && el.getAttribute("value") !== "on" && el.getAttribute("value") !== "";
+        if (!el.checked) {
+          values[name] = false;
+        } else if (!hasCustomValue) {
+          values[name] = true;
+        }
+      });
+    } catch {
+      // Non-fatal -- the FormData-derived values above are still usable.
+    }
+    return values;
+  }
+
+  function nlSendFormCapture(submissionId, formKey, values, capturedAt) {
+    const config = window.calcgraphProFrontendConfig;
+    if (!config || !config.restUrl) return; // PRO not active -- local-only resume still works.
+    const url = `${config.restUrl}form-resume`;
+    let body;
+    try {
+      body = JSON.stringify({ submissionId, formKey, values, capturedAt, nonce: config.formResumeNonce || "" });
+    } catch {
+      return;
+    }
+    let queued = false;
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      try {
+        queued = navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+      } catch {
+        queued = false;
+      }
+    }
+    if (queued) return;
+    // sendBeacon() reports only whether the browser QUEUED the request, never
+    // whether it reached the server -- and it can refuse to queue at all
+    // (oversized payload, API disabled). A synchronous XHR briefly blocks the
+    // page, acceptable here because navigation is already underway, and is
+    // the only remaining way to make a best-effort attempt to finish the
+    // request before the document unloads. Its own failure is still only
+    // ever best-effort: the local-storage copy (see nlPersistCapturedSubmission)
+    // is what resume actually depends on in the common case.
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url, false);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.send(body);
+    } catch {
+      // Best-effort only.
+    }
+  }
+
+  function nlPersistCapturedSubmission(formKey, values) {
+    const submissionId = nlGenerateSubmissionId();
+    const capturedAt = Date.now();
+    const localStorageKey = `nodelogic_pending_submit_${formKey}`;
+    let embedded = false;
+    try {
+      const payloadJson = JSON.stringify(values);
+      if (payloadJson.length <= NL_FORM_LOCAL_EMBED_LIMIT) {
+        localStorage.setItem(localStorageKey, JSON.stringify({ submissionId, capturedAt, values }));
+        embedded = true;
+      }
+    } catch {
+      embedded = false;
+    }
+    // Always also best-effort persist server-side: the backstop for when the
+    // local embed above was skipped (oversized / localStorage unavailable),
+    // never treated as a delivery guarantee -- see nlSendFormCapture.
+    nlSendFormCapture(submissionId, formKey, values, capturedAt);
+    if (!embedded) {
+      try {
+        localStorage.setItem(localStorageKey, JSON.stringify({ submissionId, capturedAt }));
+      } catch {
+        // localStorage entirely unavailable: resume cannot be detected
+        // client-side for this submission. Inherent limit of any client-
+        // coordinated reload-resume approach (no browser API guarantees
+        // delivery across an unload), not specific to this design -- the
+        // graph simply behaves as a fresh, un-submitted page on reload.
+      }
+    }
+    return { submissionId, capturedAt };
+  }
+
+  // A submission that does NOT unload this page -- the page's own code
+  // called preventDefault() (Elementor Form and most WordPress form plugins
+  // submit over AJAX), or the form posts into another window/frame -- must
+  // run the graph right here: there is no reload to resume on. Its resume
+  // marker is dropped so a later visit can never replay it.
+  function nlRunSubmissionOnThisPage(formKey, submission, values) {
+    try {
+      localStorage.removeItem(`nodelogic_pending_submit_${formKey}`);
+    } catch {
+      // Nothing to clean up.
+    }
+    const previous = window.nodelogicFormResumeStore[formKey];
+    window.nodelogicFormResumeStore[formKey] = {
+      submissionId: submission.submissionId,
+      capturedAt: submission.capturedAt,
+      values,
+      ready: true,
+      // Each same-page submission is a NEW firing of the Submitted event.
+      sequence: ((previous && previous.sequence) || 0) + 1,
+    };
+    scheduleRecalculation();
+  }
+
+  function nlSubmitStaysOnPage(form, event) {
+    if (event.defaultPrevented) return true;
+    const submitter = event.submitter;
+    const target = String((submitter && submitter.getAttribute && submitter.getAttribute("formtarget")) || form.getAttribute("target") || "").trim().toLowerCase();
+    return target !== "" && target !== "_self" && target !== "_top" && target !== "_parent";
+  }
+
+  function nlAttachFormSubmitCapture(form, formKey) {
+    if (window.nodelogicFormCaptureAttached.has(form)) return;
+    window.nodelogicFormCaptureAttached.set(form, true);
+    form.addEventListener(
+      "submit",
+      (event) => {
+        // Rapid double-submit / double-click guard: the second of two
+        // near-simultaneous submit events on the SAME element is a no-op for
+        // OUR bookkeeping (no duplicate beacon, no clobbered localStorage
+        // write) -- the browser's own native handling of the double
+        // submission itself is unaffected either way, since preventDefault()
+        // is never called here. The lock is released shortly after, not left
+        // set forever: if the page's OWN validation blocks navigation (calls
+        // preventDefault elsewhere), the visitor stays on the same loaded
+        // page and can legitimately fix + resubmit -- a permanent lock would
+        // silently swallow that second, genuine submission.
+        if (form.dataset.nlSubmitLock === "1") return;
+        form.dataset.nlSubmitLock = "1";
+        setTimeout(() => { delete form.dataset.nlSubmitLock; }, 800);
+        try {
+          const values = nlCaptureFormData(form);
+          const submission = nlPersistCapturedSubmission(formKey, values);
+          // This listener runs in the CAPTURE phase, before the page's own
+          // submit handlers; only after the whole dispatch is it known
+          // whether one of them took over (preventDefault) and the page stays.
+          setTimeout(() => {
+            if (nlSubmitStaysOnPage(form, event)) {
+              nlRunSubmissionOnThisPage(formKey, submission, values);
+            }
+          }, 0);
+        } catch (e) {
+          console.warn("[NodeLogic Runtime] form capture failed", e);
+        }
+      },
+      true
+    );
+  }
+
+  function nlReadFormResumeMarker(formKey) {
+    const localStorageKey = `nodelogic_pending_submit_${formKey}`;
+    let raw = null;
+    try {
+      raw = localStorage.getItem(localStorageKey);
+    } catch {
+      raw = null;
+    }
+    if (raw === null) return null;
+    try {
+      localStorage.removeItem(localStorageKey); // single-use at the storage level
+    } catch {
+      // Non-fatal -- still safe to proceed using the value already read.
+    }
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object" || !parsed.submissionId) return null;
+    if (typeof parsed.capturedAt !== "number" || Date.now() - parsed.capturedAt > NL_FORM_RESUME_MAX_AGE_MS) {
+      return null; // stale (e.g. an abandoned submission that never actually navigated)
+    }
+    return parsed;
+  }
+
+  function nlFetchFormResumeFromServer(formKey, submissionId) {
+    if (window.nodelogicFormResumeFetchState[formKey]) return;
+    window.nodelogicFormResumeFetchState[formKey] = true;
+    const entry = window.nodelogicFormResumeStore[formKey];
+    const config = window.calcgraphProFrontendConfig;
+    const resolveEmpty = () => {
+      if (window.nodelogicFormResumeStore[formKey]) {
+        window.nodelogicFormResumeStore[formKey].values = {};
+        window.nodelogicFormResumeStore[formKey].ready = true;
+      }
+      scheduleRecalculation();
+    };
+    if (!config || !config.restUrl || !entry) {
+      resolveEmpty();
+      return;
+    }
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", `${config.restUrl}form-resume/${encodeURIComponent(submissionId)}`, true);
+      // Same nonce action as the capture POST (calcgraph_form_resume), not
+      // the general 'wp_rest' one Send Email uses -- both ends of the form
+      // capture/resume round trip are verified against one dedicated action.
+      try { xhr.setRequestHeader("X-WP-Nonce", config.formResumeNonce || ""); } catch { /* ignore */ }
+      xhr.timeout = 10000;
+      xhr.onload = () => {
+        let values = {};
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const parsed = JSON.parse(xhr.responseText || "{}");
+            if (parsed && parsed.values && typeof parsed.values === "object") values = parsed.values;
+          } catch {
+            // Fall through to empty.
+          }
+        }
+        if (window.nodelogicFormResumeStore[formKey]) {
+          window.nodelogicFormResumeStore[formKey].values = values;
+          window.nodelogicFormResumeStore[formKey].ready = true;
+        }
+        scheduleRecalculation();
+      };
+      xhr.onerror = resolveEmpty;
+      xhr.ontimeout = resolveEmpty;
+      xhr.send();
+    } catch {
+      resolveEmpty();
+    }
+  }
+
+  function __nodeFormData(elementIdOrRef, formNodeId, blockScope) {
+    const empty = { data: { values: {}, submissionId: null, capturedAt: null }, event: null };
+    if (!window.calcgraphProFrontendConfig) return empty; // PRO not active: feature is inert.
+
+    const element = nlIsElement(elementIdOrRef) ? elementIdOrRef : resolveNodeElement(elementIdOrRef);
+    if (!element) return empty;
+    // The configured ID often belongs to a WRAPPER, not the <form> itself:
+    // Elementor puts a Form widget's CSS ID on the widget's outer div. The
+    // editor's field detection already looked inside it, so the runtime must
+    // too -- `new FormData(div)` throws, which silently lost every submission.
+    const form = nlResolveFormElement(element);
+    if (!form) return empty;
+
+    // Folds in blockScope for the same reason __nodeMemoryGet/Set do (see
+    // their comments): two duplicated widgets built from the same template
+    // share the same graph-node id, so the resume marker's key must be
+    // disambiguated per rendered block instance, not just per Form node.
+    // Keyed by the element the user configured (stable across reloads).
+    const formKey = `${toSafeString(blockScope) || "noscope"}::${nlEnsureElementId(element)}`;
+    nlAttachFormSubmitCapture(form, formKey);
+
+    if (!window.nodelogicFormResumeStore[formKey]) {
+      const marker = nlReadFormResumeMarker(formKey);
+      if (!marker) {
+        window.nodelogicFormResumeStore[formKey] = null;
+      } else {
+        window.nodelogicFormResumeStore[formKey] = {
+          submissionId: marker.submissionId,
+          capturedAt: marker.capturedAt,
+          values: marker.values || null,
+          ready: !!marker.values,
+        };
+        if (!marker.values) nlFetchFormResumeFromServer(formKey, marker.submissionId);
+      }
+    }
+
+    const entry = window.nodelogicFormResumeStore[formKey];
+    if (!entry) return empty;
+    if (!entry.ready) {
+      // Id/timestamp known, values not yet back from the server fallback --
+      // withheld until ready so Validate/Calculate never see a momentarily
+      // empty `values` for a submission that is NOT actually empty, and so
+      // Send Email's trigger never fires on incomplete data.
+      return { data: { values: {}, submissionId: entry.submissionId, capturedAt: entry.capturedAt }, event: null };
+    }
+    return {
+      data: { values: entry.values || {}, submissionId: entry.submissionId, capturedAt: entry.capturedAt },
+      // One stable key per Form node (per block); the count grows with every
+      // same-page submission, so each one is a new firing for consumers that
+      // track "fired since I last looked" (nlConsumeEventOnce, Event
+      // Processor). A resumed submission after a reload is firing #1.
+      event: { eventKey: `form::${toSafeString(blockScope) || "noscope"}::${formNodeId}`, triggeredCount: entry.sequence || 1 },
+    };
+  }
+
+  function nlConsumeEventOnce(trigger, consumedKey) {
+    // Deliberately UNLIKE __nodeMemoryConsumeTrigger (which treats an
+    // unwired trigger as "always apply", matching plain memory-write
+    // semantics): a side-effecting action like sending an email must default
+    // to NEVER firing when nothing is wired to Trigger at all -- forgetting
+    // to wire it should mean "nothing happens", not "an email on every
+    // recalculation".
+    if (!trigger || typeof trigger !== "object" || !trigger.eventKey) return false;
+    const currentCount = trigger.triggeredCount || 0;
+    const consumedCount = window.eventProcessorConsumed[consumedKey] || 0;
+    if (currentCount > consumedCount) {
+      window.eventProcessorConsumed[consumedKey] = currentCount;
+      return true;
+    }
+    return false;
+  }
+
+  // Per Send Email node: the current status plus how many times it has
+  // started / succeeded / failed -- the counts back its Sending / Sent /
+  // Failed event outputs (a new count = a new firing of that event).
+  function nlEmailState(statusKey) {
+    const store = window.nodelogicEmailStatusStore;
+    if (!store[statusKey]) {
+      store[statusKey] = { sending: false, ok: false, error: "", sendingCount: 0, sentCount: 0, failedCount: 0 };
+    }
+    return store[statusKey];
+  }
+
+  function nlEmailFinish(statusKey, ok, error) {
+    const state = nlEmailState(statusKey);
+    state.sending = false;
+    state.ok = !!ok;
+    state.error = ok ? "" : toSafeString(error || "Send failed");
+    if (ok) state.sentCount += 1; else state.failedCount += 1;
+  }
+
+  function nlSendEmailRequest(statusKey, payload) {
+    if (window.nodelogicEmailInFlight.has(statusKey)) return;
+    window.nodelogicEmailInFlight.add(statusKey);
+    const finish = (ok, error) => {
+      window.nodelogicEmailInFlight.delete(statusKey);
+      nlEmailFinish(statusKey, ok, error);
+      scheduleRecalculation();
+    };
+    const config = window.calcgraphProFrontendConfig;
+    if (!config || !config.restUrl) {
+      finish(false, "NodeLogic Pro is not active");
+      return;
+    }
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${config.restUrl}send-email`, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      try { xhr.setRequestHeader("X-WP-Nonce", config.nonce || ""); } catch { /* ignore */ }
+      xhr.timeout = 20000;
+      xhr.onload = () => {
+        let parsed = null;
+        try { parsed = JSON.parse(xhr.responseText || "{}"); } catch { parsed = null; }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          // Keep the server's own reason (no license, not allowed for
+          // anonymous visitors, page not published, expired nonce...) --
+          // it is what tells the site owner WHY nothing was sent.
+          finish(false, (parsed && parsed.message) || `HTTP ${xhr.status}`);
+          return;
+        }
+        if (!parsed || typeof parsed !== "object") {
+          finish(false, "Malformed response");
+          return;
+        }
+        finish(!!parsed.ok, parsed.ok ? "" : (parsed.error || "Send failed"));
+      };
+      xhr.onerror = () => finish(false, "Network error");
+      xhr.ontimeout = () => finish(false, "Timeout");
+      xhr.send(JSON.stringify(payload));
+    } catch {
+      finish(false, "Request failed");
+    }
+  }
+
+  function __nodeSendEmail(recipient, subject, message, trigger, sendNodeId, blockScope, editorId, postId) {
+    const consumedKey = `sendEmail::${toSafeString(blockScope) || "noscope"}::${toSafeString(sendNodeId)}`;
+    const shouldFire = nlConsumeEventOnce(trigger, consumedKey);
+    const state = nlEmailState(consumedKey);
+
+    if (shouldFire) {
+      if (!window.calcgraphProFrontendConfig) {
+        nlEmailFinish(consumedKey, false, "NodeLogic Pro is not active");
+      } else {
+        const to = toSafeString(recipient).trim();
+        if (!to) {
+          nlEmailFinish(consumedKey, false, "Missing recipient");
+        } else if (!window.nodelogicEmailInFlight.has(consumedKey)) {
+          state.sending = true;
+          state.ok = false;
+          state.error = "";
+          state.sendingCount += 1;
+          nlSendEmailRequest(consumedKey, {
+            to,
+            subject: toSafeString(subject),
+            message: toSafeString(message),
+            postId: toSafeString(postId),
+            blockEditorId: toSafeString(editorId),
+            nodeId: toSafeString(sendNodeId),
+          });
+        }
+      }
+    }
+
+    // A fresh object every evaluation, so downstream nodes always see the
+    // current values (never a stale reference compared by identity).
+    return {
+      sending: state.sending,
+      ok: state.ok,
+      error: state.error,
+      sendingEvent: { eventKey: `${consumedKey}::sending`, triggeredCount: state.sendingCount },
+      sentEvent: { eventKey: `${consumedKey}::sent`, triggeredCount: state.sentCount },
+      failedEvent: { eventKey: `${consumedKey}::failed`, triggeredCount: state.failedCount },
+    };
+  }
+
+  // ---- PRO Database nodes (runtime) ----
+  //
+  // The browser never describes a query: DB Table / Fields / Join / Filter /
+  // Sort nodes only carry RUNTIME VALUES (a wired filter's current value)
+  // along the Query chain. The server re-derives the whole query shape from
+  // the SAVED graph, verifies the administrator's signature on it, and binds
+  // these values as SQL parameters -- see the PRO plugin's db-spec.php. Like
+  // Send Email, the whole feature is inert without window.calcgraphProFrontendConfig.
+  window.nodelogicDbSelectStore = window.nodelogicDbSelectStore || new Map();
+  window.nodelogicDbWriteStatus = window.nodelogicDbWriteStatus || {};
+  window.nodelogicDbWriteInFlight = window.nodelogicDbWriteInFlight || new Set();
+  const NL_DB_SELECT_CACHE_MAX = 200;
+
+  function nlDbPlainValue(value, depth = 0) {
+    if (value === null || value === undefined) return null;
+    const type = typeof value;
+    if (type === "string" || type === "boolean") return value;
+    if (type === "number") return Number.isFinite(value) ? value : null;
+    if (depth > 2) return null;
+    if (Array.isArray(value)) return value.slice(0, 100).map((item) => nlDbPlainValue(item, depth + 1));
+    if (value && value.nodeType === 1) {
+      // A DOM element feeding a filter means "its value".
+      return "value" in value ? toSafeString(value.value) : toSafeString(value.textContent);
+    }
+    if (type === "object") {
+      try { return JSON.parse(JSON.stringify(value)); } catch { return null; }
+    }
+    return null;
+  }
+
+  function __nodeDbChain(nodeId, upstream, value) {
+    const base = upstream && typeof upstream === "object" && upstream.__nlDbQuery ? upstream : null;
+    const filters = Object.assign({}, base ? base.filters : {});
+    if (value !== undefined) {
+      filters[toSafeString(nodeId)] = nlDbPlainValue(value);
+    }
+    return { __nlDbQuery: 1, filters };
+  }
+
+  function nlDbRequest(payload, onDone) {
+    const config = window.calcgraphProFrontendConfig;
+    if (!config || !config.restUrl) {
+      onDone({ ok: false, error: "NodeLogic Pro is not active" });
+      return;
+    }
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${config.restUrl}db/execute`, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      try { xhr.setRequestHeader("X-WP-Nonce", config.nonce || ""); } catch { /* ignore */ }
+      xhr.timeout = 20000;
+      xhr.onload = () => {
+        let parsed = null;
+        try { parsed = JSON.parse(xhr.responseText || "{}"); } catch { parsed = null; }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          onDone({ ok: false, error: toSafeString((parsed && parsed.message) || `HTTP ${xhr.status}`) });
+          return;
+        }
+        onDone(parsed && typeof parsed === "object" ? parsed : { ok: false, error: "Malformed response" });
+      };
+      xhr.onerror = () => onDone({ ok: false, error: "Network error" });
+      xhr.ontimeout = () => onDone({ ok: false, error: "Timeout" });
+      xhr.send(JSON.stringify(payload));
+    } catch {
+      onDone({ ok: false, error: "Request failed" });
+    }
+  }
+
+  function nlDbEmptySelect(status) {
+    return { rows: [], firstRow: {}, count: 0, status };
+  }
+
+  function __nodeDbSelect(opNodeId, query, limit, offset, blockScope, editorId, postId) {
+    const filters = query && typeof query === "object" && query.__nlDbQuery ? query.filters : {};
+    const payload = {
+      postId: toSafeString(postId),
+      blockEditorId: toSafeString(editorId),
+      nodeId: toSafeString(opNodeId),
+      filters,
+      limit: Number.isFinite(Number(limit)) ? Number(limit) : null,
+      offset: Number.isFinite(Number(offset)) ? Number(offset) : null,
+    };
+    const key = `${toSafeString(blockScope)}::${JSON.stringify(payload)}`;
+    const opKey = `${toSafeString(blockScope)}::${toSafeString(opNodeId)}`;
+    const store = window.nodelogicDbSelectStore;
+    const entry = store.get(key);
+    if (entry && entry.done) {
+      return entry.result;
+    }
+
+    // While a request is pending, keep showing this node's last result
+    // (stale-while-revalidate) instead of flashing empty.
+    const previous = store.get(`last::${opKey}`);
+    const pending = previous
+      ? { ...previous, status: { ...previous.status, loading: true } }
+      : nlDbEmptySelect({ ok: false, loading: true, error: "", count: 0 });
+
+    if (!entry) {
+      if (!window.calcgraphProFrontendConfig) {
+        const inactive = nlDbEmptySelect({ ok: false, loading: false, error: "NodeLogic Pro is not active", count: 0 });
+        store.set(key, { done: true, result: inactive });
+        return inactive;
+      }
+      store.set(key, { done: false });
+      if (store.size > NL_DB_SELECT_CACHE_MAX) {
+        store.delete(store.keys().next().value);
+      }
+      nlDbRequest(payload, (response) => {
+        let result;
+        if (response && response.ok) {
+          const rows = Array.isArray(response.rows) ? response.rows : [];
+          result = {
+            rows,
+            firstRow: rows[0] && typeof rows[0] === "object" ? rows[0] : {},
+            count: rows.length,
+            status: { ok: true, loading: false, error: "", count: rows.length },
+          };
+        } else {
+          result = nlDbEmptySelect({ ok: false, loading: false, error: toSafeString(response && response.error) || "Query failed", count: 0 });
+        }
+        store.set(key, { done: true, result });
+        store.set(`last::${opKey}`, result);
+        scheduleRecalculation();
+      });
+    }
+    return pending;
+  }
+
+  // A successful write can change what any SELECT on the page would return.
+  function nlDbInvalidateSelects() {
+    const store = window.nodelogicDbSelectStore;
+    Array.from(store.keys()).forEach((key) => {
+      if (!key.startsWith("last::")) store.delete(key);
+    });
+  }
+
+  function __nodeDbWrite(opNodeId, query, values, trigger, blockScope, editorId, postId) {
+    const statusKey = `dbWrite::${toSafeString(blockScope) || "noscope"}::${toSafeString(opNodeId)}`;
+    const idle = { sending: false, ok: false, error: "", affectedRows: 0, insertId: 0 };
+
+    // Writes run ONLY on a genuinely new firing of the wired Trigger event
+    // (nothing wired = never), exactly like Send Email.
+    if (nlConsumeEventOnce(trigger, statusKey)) {
+      if (!window.calcgraphProFrontendConfig) {
+        window.nodelogicDbWriteStatus[statusKey] = { ...idle, error: "NodeLogic Pro is not active" };
+      } else if (!window.nodelogicDbWriteInFlight.has(statusKey)) {
+        window.nodelogicDbWriteInFlight.add(statusKey);
+        window.nodelogicDbWriteStatus[statusKey] = { ...idle, sending: true };
+        nlDbRequest({
+          postId: toSafeString(postId),
+          blockEditorId: toSafeString(editorId),
+          nodeId: toSafeString(opNodeId),
+          filters: query && typeof query === "object" && query.__nlDbQuery ? query.filters : {},
+          values: Array.isArray(values) ? values.map((value) => nlDbPlainValue(value)) : [],
+        }, (response) => {
+          window.nodelogicDbWriteInFlight.delete(statusKey);
+          window.nodelogicDbWriteStatus[statusKey] = response && response.ok
+            ? { ...idle, ok: true, affectedRows: Number(response.affectedRows) || 0, insertId: Number(response.insertId) || 0 }
+            : { ...idle, error: toSafeString(response && response.error) || "Operation failed" };
+          if (response && response.ok) nlDbInvalidateSelects();
+          scheduleRecalculation();
+        });
+      }
+    }
+
+    return window.nodelogicDbWriteStatus[statusKey] || idle;
   }
 
   function isApiScalarType(type) {
@@ -1355,6 +2105,71 @@
     return nlIsElement(el) ? el : null;
   }
 
+  // An Output node's "value" write can land on the exact same element +
+  // property that a For Each item read via __nodeGetElementProp(__nodeLoopItem, ...)
+  // used to compute that very value (e.g. classify a child by its own
+  // textContent, then write the classification back onto that same child).
+  // Recalculation re-evaluates the whole formula from scratch on every
+  // trigger (any event, action, or async completion elsewhere in the SAME
+  // logic block -- not just something touching this element), so the NEXT
+  // pass reads back its own previous per-item output instead of the item's
+  // real content, permanently corrupting the classification even though
+  // nothing about that item or its intended inputs ever changed.
+  //
+  // This is deliberately scoped to ONLY the active __nodeArrayMapGraph /
+  // __nodeArrayFilterGraph loop item (see nlActiveLoopItemElement below), not
+  // to element reads in general: a plain Get Element Property -> Calculation
+  // -> Set chain reading and writing the same element (e.g. a counter that
+  // increments its own displayed value across executions) is an intentional,
+  // already-tested accumulator pattern (see
+  // get_element_property_freshness_smoke.js) and must keep reading the live,
+  // just-written value -- only a per-item map/filter classification is
+  // expected to be a pure function of that item's own content.
+  const nlSelfWriteTracker = new WeakMap(); // Element -> Map<canonicalKey, {baseline, lastWritten}>
+  const NL_SELF_WRITE_TRACKED_PROPS = new Set(["value", "textContent"]);
+  let nlActiveLoopItemElement = null;
+
+  function nlRecordSelfWrite(el, canonicalKey, value) {
+    if (!el || typeof el !== "object" || !NL_SELF_WRITE_TRACKED_PROPS.has(canonicalKey)) return;
+    let byProp = nlSelfWriteTracker.get(el);
+    if (!byProp) {
+      byProp = new Map();
+      nlSelfWriteTracker.set(el, byProp);
+    }
+    const existing = byProp.get(canonicalKey);
+    byProp.set(canonicalKey, { baseline: existing ? existing.baseline : value, lastWritten: value });
+  }
+
+  function nlApplySelfWriteBaseline(el, canonicalKey, liveValue) {
+    if (
+      !el ||
+      typeof el !== "object" ||
+      el !== nlActiveLoopItemElement ||
+      !NL_SELF_WRITE_TRACKED_PROPS.has(canonicalKey)
+    ) {
+      return liveValue;
+    }
+    let byProp = nlSelfWriteTracker.get(el);
+    if (!byProp) {
+      byProp = new Map();
+      nlSelfWriteTracker.set(el, byProp);
+    }
+    const rec = byProp.get(canonicalKey);
+    if (!rec) {
+      byProp.set(canonicalKey, { baseline: liveValue, lastWritten: undefined });
+      return liveValue;
+    }
+    if (rec.lastWritten !== undefined && liveValue === rec.lastWritten) {
+      // Live DOM still holds exactly what we last wrote here -- nothing
+      // external touched it since, so this read would just be our own echo.
+      return rec.baseline;
+    }
+    // Never written by us, or genuinely changed by something external since
+    // our last write -- this is the new real baseline going forward.
+    rec.baseline = liveValue;
+    return liveValue;
+  }
+
   // Reads a single property / attribute from an element reference.
   // Returns only string | number | boolean | null (never undefined, never an
   // object / DOM node / function).
@@ -1406,7 +2221,7 @@
         }
         const sv = el.value;
         if (sv === null || sv === undefined) return null;
-        if (typeof sv === "string") return sv;
+        if (typeof sv === "string") return nlApplySelfWriteBaseline(el, "value", sv);
         if (typeof sv === "number") return Number.isFinite(sv) ? String(sv) : null;
         if (typeof sv === "boolean") return String(sv);
         return null;
@@ -1429,7 +2244,7 @@
               const num = Number(raw);
               return Number.isFinite(num) ? num : null;
             }
-            return raw;
+            return canonical === "textContent" ? nlApplySelfWriteBaseline(el, "textContent", raw) : raw;
           }
           // Non-primitive property value (e.g. SVGAnimatedString) -> attr fallback.
         }
@@ -1513,6 +2328,27 @@
     return out;
   }
 
+  // Descends through a chain of single-element-child wrappers to the
+  // innermost element that actually holds content -- e.g. an Elementor
+  // Heading/Text widget's real tag lives two levels below the id'd
+  // `.elementor-element` div (`.elementor-widget-container` > the real
+  // <h2>/<p>), and Elementor commonly gives that inner tag its own explicit
+  // color/typography, which blocks CSS inheritance from anything set on an
+  // ancestor. Stops as soon as an element has zero or 2+ rendered element
+  // children (a fork, or a text leaf), so a multi-paragraph text block still
+  // gets styled at its shared container rather than picking one paragraph
+  // arbitrarily. Bounded; a no-op when the target already IS the content
+  // element (the common Gutenberg case).
+  function nlDescendSingleChildContent(node) {
+    let cur = node;
+    for (let hop = 0; hop < 6; hop++) {
+      const kids = nlRenderedChildElements(cur);
+      if (kids.length !== 1) return cur;
+      cur = kids[0];
+    }
+    return cur;
+  }
+
   // Returns the direct child DOM Elements of an element reference, as they will
   // exist in the rendered frontend, in DOM order. Text nodes, nested
   // descendants and Elementor editor-only helper/handle elements are never
@@ -1576,6 +2412,634 @@
     } catch {
       return [];
     }
+  }
+
+  // =====================
+  // DOM NODES: Raw HTML, Set Parent, Clone Element, Elements by Class
+  // =====================
+  // Allowlist HTML sanitizer -- the SAME rules as the editor's
+  // src/components/graphEditor/rawHtmlModel.ts (parity tested). Used by the
+  // Raw HTML node and the Set HTML action. Approved policy: scripts, event
+  // handlers, javascript:/non-image data: URLs, <style>, plugins and SVG
+  // animation are removed; <iframe> only for https YouTube/Vimeo/Google Maps.
+  const NL_HTML_DROP_TAGS = new Set([
+    "script", "style", "template", "noscript", "object", "embed", "applet", "frame", "frameset",
+    "base", "link", "meta", "title", "head", "math", "portal", "foreignobject", "animate",
+    "animatemotion", "animatetransform", "set", "discard", "handler", "listener", "xml", "param",
+  ]);
+  const NL_HTML_ALLOWED_TAGS = new Set([
+    "a", "abbr", "address", "article", "aside", "audio", "b", "bdi", "bdo", "blockquote", "br", "button",
+    "caption", "cite", "code", "col", "colgroup", "data", "dd", "del", "details", "dfn", "div", "dl", "dt",
+    "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hgroup", "hr", "i", "iframe", "img", "input", "ins", "kbd", "label", "legend", "li", "main",
+    "mark", "meter", "nav", "ol", "optgroup", "option", "output", "p", "picture", "pre", "progress", "q",
+    "s", "samp", "section", "select", "small", "source", "span", "strong", "sub", "summary", "sup",
+    "table", "tbody", "td", "textarea", "tfoot", "th", "thead", "time", "tr", "track", "u", "ul", "var",
+    "video", "wbr",
+    "svg", "g", "path", "circle", "ellipse", "line", "polyline", "polygon", "rect", "text", "tspan",
+    "defs", "lineargradient", "radialgradient", "stop", "use", "symbol", "clippath", "mask", "pattern",
+    "desc", "image", "marker",
+  ]);
+  const NL_HTML_ALLOWED_ATTRS = new Set([
+    "id", "class", "style", "title", "lang", "dir", "role", "hidden", "tabindex", "translate", "draggable",
+    "href", "target", "rel", "download", "hreflang", "src", "srcset", "sizes", "alt", "width", "height",
+    "loading", "decoding", "poster", "controls", "autoplay", "muted", "loop", "playsinline", "preload",
+    "kind", "srclang", "label", "default", "media", "type", "cite", "datetime",
+    "name", "value", "placeholder", "checked", "disabled", "readonly", "required", "min", "max", "step",
+    "minlength", "maxlength", "pattern", "multiple", "size", "autocomplete", "list", "for", "selected",
+    "rows", "cols", "wrap", "action", "method", "enctype", "novalidate", "form", "formaction",
+    "colspan", "rowspan", "headers", "scope", "span", "start", "reversed", "open", "low", "high", "optimum",
+    "allow", "allowfullscreen", "frameborder", "referrerpolicy",
+    "viewbox", "xmlns", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+    "stroke-dasharray", "stroke-dashoffset", "d", "cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2",
+    "y2", "points", "transform", "opacity", "fill-opacity", "stroke-opacity", "offset", "stop-color",
+    "stop-opacity", "gradientunits", "gradienttransform", "preserveaspectratio", "text-anchor",
+    "font-size", "font-family", "font-weight", "dominant-baseline", "clip-path", "mask", "fill-rule",
+    "clip-rule", "xlink:href", "patternunits", "markerwidth", "markerheight", "refx", "refy", "orient",
+  ]);
+  const NL_HTML_URL_ATTRS = new Set(["href", "src", "action", "formaction", "poster", "cite", "xlink:href"]);
+  const NL_HTML_BOOLEAN_ATTRS = new Set([
+    "checked", "disabled", "selected", "readonly", "required", "hidden", "multiple", "open", "autoplay",
+    "muted", "loop", "controls", "playsinline", "reversed", "default", "allowfullscreen", "novalidate",
+  ]);
+  const NL_IFRAME_HOSTS = new Set([
+    "www.youtube.com", "youtube.com", "www.youtube-nocookie.com", "youtube-nocookie.com",
+    "player.vimeo.com", "www.google.com", "maps.google.com",
+  ]);
+  const NL_VOID_TAGS = new Set(["img", "input", "br", "hr", "wbr", "source", "track", "col", "iframe", "area", "embed"]);
+
+  function nlIsReservedAttr(name) {
+    return name.indexOf("data-nodelogic") === 0 || name === "data-editor-id" || name === "data-formula" || name === "data-slider-id";
+  }
+
+  function nlIsSafeHtmlUrl(value, attr, tag) {
+    const compact = String(value).replace(/[\u0000- \u007f-\u009f]/g, "");
+    if (attr === "xlink:href" || (attr === "href" && (tag === "use" || tag === "image"))) {
+      if (compact.charAt(0) === "#") return true;
+      if (tag !== "image") return false;
+    }
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(compact);
+    if (!scheme) return true;
+    const name = scheme[1].toLowerCase();
+    if (name === "http" || name === "https") return true;
+    if ((name === "mailto" || name === "tel") && attr === "href") return true;
+    if (name === "data" && attr === "src" && (tag === "img" || tag === "source" || tag === "image")) {
+      return /^data:image\/(png|jpe?g|gif|webp|avif|bmp);/i.test(compact);
+    }
+    return false;
+  }
+
+  function nlIsSafeSrcset(value, tag) {
+    return String(value).split(",").every((candidate) => {
+      const url = candidate.trim().split(/\s+/)[0] || "";
+      return url === "" || nlIsSafeHtmlUrl(url, "src", tag);
+    });
+  }
+
+  function nlIsAllowedIframeSrc(value) {
+    try {
+      const url = new URL(String(value).trim());
+      const host = url.hostname.toLowerCase();
+      if (url.protocol !== "https:" || !NL_IFRAME_HOSTS.has(host)) return false;
+      if (host.slice(-10) === "google.com") return url.pathname.indexOf("/maps/embed") === 0;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function nlIsUnsafeStyle(value) {
+    return /expression\s*\(|javascript\s*:|vbscript\s*:|-moz-binding|behavior\s*:|@import/i.test(String(value).replace(/\\/g, ""));
+  }
+
+  // Sanitizes an INERT subtree (a <template>'s content) in place.
+  function nlSanitizeHtmlTree(root) {
+    const walk = (parent) => {
+      Array.from(parent.childNodes).forEach((node) => {
+        if (node.nodeType === 8) {
+          if (node.parentNode) node.parentNode.removeChild(node);
+          return;
+        }
+        if (node.nodeType !== 1) return;
+        const el = node;
+        const tag = String(el.localName || "").toLowerCase();
+        if (NL_HTML_DROP_TAGS.has(tag)) {
+          el.remove();
+          return;
+        }
+        if (!NL_HTML_ALLOWED_TAGS.has(tag)) {
+          walk(el);
+          while (el.firstChild) el.parentNode.insertBefore(el.firstChild, el);
+          el.remove();
+          return;
+        }
+        if (tag === "iframe" && !nlIsAllowedIframeSrc(el.getAttribute("src") || "")) {
+          el.remove();
+          return;
+        }
+        Array.from(el.attributes).forEach((attr) => {
+          const name = attr.name.toLowerCase();
+          let drop = false;
+          if (name.indexOf("on") === 0) drop = true;
+          else if (nlIsReservedAttr(name)) drop = true;
+          else if (name.indexOf("aria-") === 0 || name.indexOf("data-") === 0) drop = false;
+          else if (!NL_HTML_ALLOWED_ATTRS.has(name)) drop = true;
+          else if (NL_HTML_URL_ATTRS.has(name) && !nlIsSafeHtmlUrl(attr.value, name, tag)) drop = true;
+          else if (name === "srcset" && !nlIsSafeSrcset(attr.value, tag)) drop = true;
+          else if (name === "style" && nlIsUnsafeStyle(attr.value)) drop = true;
+          if (drop) el.removeAttribute(attr.name);
+        });
+        if (tag === "a" && String(el.getAttribute("target") || "").toLowerCase() === "_blank") {
+          el.setAttribute("rel", "noopener noreferrer");
+        }
+        walk(el);
+      });
+    };
+    walk(root);
+    return root;
+  }
+
+  // Parses + sanitizes an HTML string into an inert fragment (a <template>
+  // never runs scripts or loads resources while its content is sanitized).
+  function nlSanitizeHtmlFragment(html) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = String(html == null ? "" : html);
+    nlSanitizeHtmlTree(tpl.content);
+    return tpl.content;
+  }
+
+  // Sanitized HTML as a string (Set HTML action).
+  function nlSanitizeHtmlString(html) {
+    const holder = document.createElement("div");
+    holder.appendChild(nlSanitizeHtmlFragment(html));
+    return holder.innerHTML;
+  }
+
+  // Same root rule as rawHtmlRootFrom (rawHtmlModel.ts).
+  function nlRawHtmlRoot(fragment) {
+    const nodes = Array.from(fragment.childNodes).filter((node) =>
+      node.nodeType === 1 || (node.nodeType === 3 && String(node.textContent || "").trim() !== ""));
+    if (nodes.length === 1 && nodes[0].nodeType === 1) return document.importNode(nodes[0], true);
+    const wrapper = document.createElement("div");
+    wrapper.appendChild(document.importNode(fragment, true));
+    return wrapper;
+  }
+
+  // Per-instance state for the stateful DOM nodes. Keys:
+  // "<blockScope>::<nodeId>" plus, inside a For Each body, "@<loop path>" so
+  // every iteration owns its own element / clone.
+  const nlDomInstances = new Map();
+  const nlDomPassByScope = new Map();
+  let nlEvaluatingBlockScope = "";
+  let nlActiveLoopPath = [];
+  let nlStructuralChange = false;
+
+  function nlDomInstanceKey(blockScope, nodeId) {
+    const base = `${toSafeString(blockScope) || "noscope"}::${toSafeString(nodeId)}`;
+    return nlActiveLoopPath.length ? `${base}@${nlActiveLoopPath.join(".")}` : base;
+  }
+
+  function nlTouchDomInstance(key, blockScope, create) {
+    let inst = nlDomInstances.get(key);
+    if (!inst) {
+      inst = create();
+      inst.scope = toSafeString(blockScope) || "noscope";
+      inst.loopKeyed = key.indexOf("@") !== -1;
+      nlDomInstances.set(key, inst);
+    }
+    inst.pass = nlDomPassByScope.get(inst.scope) || 0;
+    return inst;
+  }
+
+  function nlBeginDomPass(blockScope) {
+    const scope = toSafeString(blockScope) || "noscope";
+    nlDomPassByScope.set(scope, (nlDomPassByScope.get(scope) || 0) + 1);
+  }
+
+  // After a fresh evaluation of a block: per-ITEM instances (inside a For
+  // Each) that this pass didn't touch belong to items that no longer exist --
+  // remove their elements. Instances outside loops persist.
+  function nlSweepDomInstances(blockScope) {
+    const scope = toSafeString(blockScope) || "noscope";
+    const pass = nlDomPassByScope.get(scope) || 0;
+    nlDomInstances.forEach((inst, key) => {
+      if (inst.scope !== scope || !inst.loopKeyed || inst.pass >= pass) return;
+      const owned = [];
+      if (inst.el) owned.push(inst.el);
+      if (inst.clone) owned.push(inst.clone);
+      (inst.clones || []).forEach((c) => owned.push(c));
+      owned.forEach((el) => {
+        if (el && el.parentNode) {
+          el.parentNode.removeChild(el);
+          nlStructuralChange = true;
+        }
+      });
+      nlDomInstances.delete(key);
+    });
+  }
+
+  function nlResolveSlotTarget(root, path) {
+    let node = root;
+    const parts = String(path || "").split(".").filter((p) => p !== "");
+    for (let i = 0; i < parts.length; i++) {
+      const index = Number(parts[i]);
+      if (!node || !node.children || !Number.isInteger(index) || index < 0 || index >= node.children.length) return null;
+      node = node.children[index];
+    }
+    return node;
+  }
+
+  function nlApplyRawHtmlSlot(target, kind, name, value) {
+    const tag = String(target.localName || "").toLowerCase();
+    if (kind === "text") {
+      const text = value === null || value === undefined ? "" : toSafeString(value);
+      if (target.children.length === 0) {
+        if (target.textContent !== text) target.textContent = text;
+        if (tag === "textarea" && target.value !== text) target.value = text;
+      }
+      return;
+    }
+    if (kind === "style") {
+      if (!/^-?[a-z][a-z0-9-]*$/i.test(name)) return;
+      const css = value === null || value === undefined ? "" : toSafeString(value).trim();
+      if (css === "") { target.style.removeProperty(name); return; }
+      if (nlIsUnsafeStyle(css)) return;
+      target.style.setProperty(name, css);
+      return;
+    }
+    // attribute: same allowlist + URL rules as the sanitizer
+    const attr = String(name || "").toLowerCase();
+    if (!attr || attr.indexOf("on") === 0 || nlIsReservedAttr(attr) || attr === "style") return;
+    if (!NL_HTML_ALLOWED_ATTRS.has(attr) && attr.indexOf("aria-") !== 0 && attr.indexOf("data-") !== 0) return;
+    if (NL_HTML_BOOLEAN_ATTRS.has(attr)) {
+      const on = value === true || value === "true" || value === 1 || value === "1" || (typeof value === "string" && value !== "" && value !== "false" && value !== "0");
+      if (on) target.setAttribute(attr, ""); else target.removeAttribute(attr);
+      if (attr in target && typeof target[attr] === "boolean") target[attr] = on;
+      return;
+    }
+    const text = value === null || value === undefined ? "" : toSafeString(value);
+    if (NL_HTML_URL_ATTRS.has(attr) && !nlIsSafeHtmlUrl(text, attr, tag)) return;
+    if (attr === "srcset" && !nlIsSafeSrcset(text, tag)) return;
+    if (tag === "iframe" && attr === "src" && !nlIsAllowedIframeSrc(text)) return;
+    if (target.getAttribute(attr) !== text) target.setAttribute(attr, text);
+    if (attr === "value" && (tag === "input" || tag === "select" || tag === "textarea") && target.value !== text) target.value = text;
+  }
+
+  // Raw HTML node. `slots` = [[path, kind, name], ...] (checked in the
+  // editor), `values` = the matching wired values (undefined = pin unwired:
+  // keep what the HTML says). Returns ONE stable element per node instance --
+  // re-evaluations update it in place, never re-create it.
+  function __nodeRawHtml(nodeId, html, slots, values, blockScope) {
+    try {
+      const source = toSafeString(html);
+      const key = nlDomInstanceKey(blockScope, nodeId);
+      const inst = nlTouchDomInstance(key, blockScope, () => ({ html: null, el: null, originals: {} }));
+      if (inst.html !== source || !inst.el) {
+        if (inst.el && inst.el.parentNode) {
+          // The node's HTML changed (editor preview): swap in place.
+          const next = nlRawHtmlRoot(nlSanitizeHtmlFragment(source));
+          inst.el.parentNode.replaceChild(next, inst.el);
+          inst.el = next;
+          nlStructuralChange = true;
+        } else {
+          inst.el = source.trim() ? nlRawHtmlRoot(nlSanitizeHtmlFragment(source)) : null;
+        }
+        inst.html = source;
+        inst.originals = {};
+      }
+      if (!inst.el) return null;
+      const list = Array.isArray(slots) ? slots : [];
+      const vals = Array.isArray(values) ? values : [];
+      for (let i = 0; i < list.length; i++) {
+        const spec = Array.isArray(list[i]) ? list[i] : [];
+        const kind = spec[1] === "attr" || spec[1] === "style" ? spec[1] : "text";
+        const name = toSafeString(spec[2]);
+        const target = nlResolveSlotTarget(inst.el, spec[0]);
+        if (!nlIsElement(target)) continue;
+        const slotKey = `${spec[0]}|${kind}:${name}`;
+        if (!(slotKey in inst.originals)) {
+          inst.originals[slotKey] = kind === "text"
+            ? target.textContent
+            : kind === "style" ? target.style.getPropertyValue(name) : target.getAttribute(name);
+        }
+        let value = vals[i];
+        if (value === undefined) value = inst.originals[slotKey];
+        if (value && typeof value === "object" && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, "value")) value = value.value;
+        nlApplyRawHtmlSlot(target, kind, name, value);
+      }
+      return inst.el;
+    } catch {
+      return null;
+    }
+  }
+
+  function nlCanReceiveChildren(el) {
+    if (!nlIsElement(el)) return false;
+    return !NL_VOID_TAGS.has(String(el.localName || "").toLowerCase());
+  }
+
+  function nlIsDocumentLevelElement(el) {
+    const tag = String(el && el.localName || "").toLowerCase();
+    return tag === "html" || tag === "head" || tag === "body";
+  }
+
+  function nlPlaceInParent(el, parent, position) {
+    if (position === "start") parent.insertBefore(el, parent.firstChild);
+    else parent.appendChild(el);
+    nlStructuralChange = true;
+  }
+
+  // Set Parent: moves `element` into `parent`. Without a Trigger it keeps the
+  // element there (moves only while it has a different parent -- idempotent);
+  // with a Trigger it moves once per event.
+  function __nodeSetParent(nodeId, element, parent, position, trigger, hasTrigger, blockScope) {
+    try {
+      const el = nlResolveElementRef(element);
+      const par = nlResolveElementRef(parent);
+      if (!el || !par) return el || null;
+      if (el === par || el.contains(par) || nlIsDocumentLevelElement(el) || !nlCanReceiveChildren(par)) return el;
+      const pos = position === "start" ? "start" : "end";
+      if (hasTrigger) {
+        const key = nlDomInstanceKey(blockScope, nodeId);
+        if (nlConsumeEventOnce(trigger, `${key}::setParent`)) nlPlaceInParent(el, par, pos);
+      } else if (el.parentNode !== par) {
+        nlPlaceInParent(el, par, pos);
+      }
+      return el;
+    } catch {
+      return null;
+    }
+  }
+
+  let nlCloneSeq = 0;
+  const NL_ID_REF_ATTRS = ["for", "aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "list", "form"];
+
+  // Duplicate ids break id lookups (Output targets, labels): every id in the
+  // copy gets a unique suffix, and references inside the copy follow it.
+  function nlRenameClonedIds(root) {
+    const seq = ++nlCloneSeq;
+    const renamed = {};
+    const all = [root].concat(Array.from(root.querySelectorAll("[id]")));
+    all.forEach((el) => {
+      const id = el.getAttribute && el.getAttribute("id");
+      if (!id) return;
+      renamed[id] = `${id}-nlcopy${seq}`;
+      el.setAttribute("id", renamed[id]);
+    });
+    if (!Object.keys(renamed).length) return;
+    [root].concat(Array.from(root.querySelectorAll("*"))).forEach((el) => {
+      NL_ID_REF_ATTRS.forEach((attr) => {
+        const value = el.getAttribute(attr);
+        if (!value) return;
+        const next = value.split(/\s+/).map((part) => renamed[part] || part).join(" ");
+        if (next !== value) el.setAttribute(attr, next);
+      });
+      const href = el.getAttribute("href");
+      if (href && href.charAt(0) === "#" && renamed[href.slice(1)]) el.setAttribute("href", `#${renamed[href.slice(1)]}`);
+    });
+  }
+
+  function nlIsCloneable(el) {
+    if (!nlIsElement(el) || nlIsDocumentLevelElement(el)) return false;
+    // A copied logic block would run its graph twice.
+    if (el.matches && el.matches("[data-nodelogic-logic]")) return false;
+    if (el.querySelector && el.querySelector("[data-nodelogic-logic]")) return false;
+    return true;
+  }
+
+  // Clone Element. Without a Trigger: exactly ONE copy per node instance
+  // (re-created only if the source element itself changes). With a Trigger:
+  // one new copy per event; `clone` is the newest, `clones` all of them.
+  // placement: "after" (next to the source / previous copy) or "detached"
+  // (for Set Parent / an Output to place).
+  function __nodeCloneElement(nodeId, element, placement, trigger, hasTrigger, blockScope) {
+    const empty = { clone: null, clones: [] };
+    try {
+      const key = nlDomInstanceKey(blockScope, nodeId);
+      const inst = nlTouchDomInstance(key, blockScope, () => ({ source: null, clone: null, clones: [] }));
+      const src = nlResolveElementRef(element);
+      const place = (copy, after) => {
+        if (placement === "detached" || !after || !after.parentNode) return;
+        after.parentNode.insertBefore(copy, after.nextSibling);
+        nlStructuralChange = true;
+      };
+      const makeCopy = () => {
+        const copy = src.cloneNode(true);
+        nlRenameClonedIds(copy);
+        return copy;
+      };
+      if (hasTrigger) {
+        if (src && nlIsCloneable(src) && nlConsumeEventOnce(trigger, `${key}::clone`)) {
+          const copy = makeCopy();
+          const previous = inst.clones.length ? inst.clones[inst.clones.length - 1] : null;
+          place(copy, previous && previous.parentNode ? previous : src);
+          inst.clones.push(copy);
+        }
+        return { clone: inst.clones.length ? inst.clones[inst.clones.length - 1] : null, clones: inst.clones.slice() };
+      }
+      if (!src || !nlIsCloneable(src)) return inst.clone ? { clone: inst.clone, clones: [inst.clone] } : empty;
+      if (inst.source !== src || !inst.clone) {
+        if (inst.clone && inst.clone.parentNode) {
+          inst.clone.parentNode.removeChild(inst.clone);
+          nlStructuralChange = true;
+        }
+        inst.source = src;
+        inst.clone = makeCopy();
+        place(inst.clone, src);
+      }
+      return { clone: inst.clone, clones: [inst.clone] };
+    } catch {
+      return empty;
+    }
+  }
+
+  function nlCssEscape(value) {
+    if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") return CSS.escape(value);
+    return String(value).replace(/[^A-Za-z0-9_-]/g, (ch) => `\\${ch}`);
+  }
+
+  // Elements by Class: every element carrying ALL the given classes
+  // (space-separated), inside `scope` (an element) or the whole document.
+  // Re-queried on every evaluation, so copies / new elements are included.
+  function __nodeElementsByClass(classNames, scope) {
+    try {
+      const tokens = toSafeString(classNames).trim().split(/\s+/).filter(Boolean).slice(0, 10);
+      if (!tokens.length || tokens.some((t) => t.length > 100)) return [];
+      const selector = tokens.map((t) => `.${nlCssEscape(t)}`).join("");
+      const root = scope === undefined || scope === null ? document : nlResolveElementRef(scope);
+      if (!root) return [];
+      return Array.from(root.querySelectorAll(selector))
+        .filter((el) => !nlIsElementorEditorChrome(el))
+        .slice(0, 2000);
+    } catch {
+      return [];
+    }
+  }
+
+  // Structural changes (a clone / move / mount) re-run the graph ONCE more so
+  // readers like Elements by Class see them. Bounded: at most 2 follow-up
+  // passes in a row; an outside trigger resets the budget. Guards against
+  // ping-pong graphs (two nodes moving one element back and forth).
+  let nlStructuralFollowUps = 0;
+  let nlInStructuralFollowUp = false;
+  function nlAfterRecalculation() {
+    const changed = nlStructuralChange;
+    nlStructuralChange = false;
+    if (!nlInStructuralFollowUp) nlStructuralFollowUps = 0;
+    nlInStructuralFollowUp = false;
+    if (!changed || nlStructuralFollowUps >= 2) return;
+    nlStructuralFollowUps += 1;
+    nlInStructuralFollowUp = true;
+    scheduleRecalculation();
+  }
+
+  // =====================
+  // DEBUG NODES: Console Log / Console Warning / Message Log / Message Warning
+  // =====================
+  // Show whatever reaches them (with its structure) and pass it through.
+  // No Trigger: shown whenever the value changes (never on an identical
+  // re-evaluation). With Trigger: once per event. Visible only to logged-in
+  // content editors unless the node is set to "Everyone".
+  const nlDebugLast = new Map();
+  const nlDebugBurst = new Map();
+  const NL_DEBUG_BURST_LIMIT = 20;
+  const NL_DEBUG_BURST_WINDOW_MS = 10000;
+
+  function nlDebugElementSummary(el) {
+    const tag = String(el.localName || el.nodeName || "element").toLowerCase();
+    const id = el.id ? `#${el.id}` : "";
+    const classes = el.classList && el.classList.length ? `.${Array.from(el.classList).slice(0, 3).join(".")}` : "";
+    const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+    return `<${tag}${id}${classes}>${text ? ` "${text.length > 60 ? `${text.slice(0, 60)}…` : text}"` : ""}`;
+  }
+
+  // Readable, depth/size-limited structure of any graph value.
+  function nlDebugFormat(value, depth, seen) {
+    const level = depth || 0;
+    const visited = seen || new WeakSet();
+    const pad = "  ".repeat(level + 1);
+    const closePad = "  ".repeat(level);
+    if (value === undefined) return "undefined";
+    if (value === null) return "null";
+    if (typeof value === "string") return JSON.stringify(value.length > 1000 ? `${value.slice(0, 1000)}…` : value);
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (typeof value === "function") return "[function]";
+    if (typeof value !== "object") return String(value);
+    if (nlIsElement(value)) return nlDebugElementSummary(value);
+    if (visited.has(value)) return "[circular]";
+    if (level >= 5) return Array.isArray(value) ? `Array(${value.length}) […]` : "{…}";
+    visited.add(value);
+    if (Array.isArray(value)) {
+      if (!value.length) return "[]";
+      const shown = value.slice(0, 50).map((item, index) => `${pad}${index}: ${nlDebugFormat(item, level + 1, visited)}`);
+      if (value.length > 50) shown.push(`${pad}… ${value.length - 50} more`);
+      return `Array(${value.length}) [\n${shown.join(",\n")}\n${closePad}]`;
+    }
+    const keys = Object.keys(value);
+    if (!keys.length) return "{}";
+    const shown = keys.slice(0, 50).map((key) => `${pad}${key}: ${nlDebugFormat(value[key], level + 1, visited)}`);
+    if (keys.length > 50) shown.push(`${pad}… ${keys.length - 50} more keys`);
+    return `{\n${shown.join(",\n")}\n${closePad}}`;
+  }
+
+  // Change detection: like the formatted text, but an element is identified
+  // by WHICH element it is, not by how it currently looks.
+  function nlDebugSignature(value) {
+    try {
+      const seen = new WeakSet();
+      return JSON.stringify(value === undefined ? "__undefined__" : value, (key, item) => {
+        if (nlIsElement(item)) return `__el:${nlEnsureElementId(item)}`;
+        if (item && typeof item === "object") {
+          if (seen.has(item)) return "__circular__";
+          seen.add(item);
+        }
+        if (typeof item === "function") return "__fn__";
+        return item;
+      });
+    } catch {
+      return nlDebugFormat(value);
+    }
+  }
+
+  function nlDebugCanShow(everyone) {
+    if (everyone) return true;
+    const config = window.nodelogicFrontendDebug;
+    return !!(config && config.canDebug === true);
+  }
+
+  function nlDebugMessageHost() {
+    let host = document.getElementById("nodelogic-debug-messages");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "nodelogic-debug-messages";
+      host.setAttribute("role", "log");
+      host.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483000;display:flex;flex-direction:column;gap:8px;max-width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;font:12px/1.4 ui-monospace,Consolas,monospace;";
+      document.body.appendChild(host);
+    }
+    return host;
+  }
+
+  // A closable message box. Text only (textContent) -- a debugged value can
+  // never inject markup.
+  function nlDebugShowMessage(label, text, warning) {
+    const host = nlDebugMessageHost();
+    const box = document.createElement("div");
+    box.className = `nodelogic-debug-message${warning ? " nodelogic-debug-message--warning" : ""}`;
+    box.style.cssText = `position:relative;padding:10px 32px 10px 12px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.3);border:1px solid ${warning ? "#f59e0b" : "#60a5fa"};background:${warning ? "#451a03" : "#0f172a"};color:${warning ? "#fde68a" : "#e2e8f0"};`;
+    const title = document.createElement("div");
+    title.style.cssText = "font-weight:700;margin-bottom:4px;font-family:system-ui,sans-serif;";
+    title.textContent = `${warning ? "⚠ " : ""}${label}`;
+    const body = document.createElement("pre");
+    body.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;";
+    body.textContent = text;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.textContent = "×";
+    close.style.cssText = "position:absolute;top:4px;right:6px;background:none;border:none;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;";
+    close.addEventListener("click", () => box.remove());
+    box.appendChild(title);
+    box.appendChild(body);
+    box.appendChild(close);
+    host.appendChild(box);
+    while (host.children.length > 6) host.removeChild(host.firstChild);
+  }
+
+  function __nodeDebug(nodeId, kind, label, value, trigger, hasTrigger, everyone, blockScope) {
+    try {
+      if (!nlDebugCanShow(everyone === true)) return value;
+      const key = nlDomInstanceKey(blockScope, nodeId);
+      if (hasTrigger) {
+        if (!nlConsumeEventOnce(trigger, `${key}::debug`)) return value;
+      } else {
+        const signature = nlDebugSignature(value);
+        if (nlDebugLast.get(key) === signature) return value;
+        nlDebugLast.set(key, signature);
+      }
+      // Burst guard: a value that changes on every pass must not flood.
+      const now = Date.now();
+      const burst = nlDebugBurst.get(key) || { times: [], noted: false };
+      burst.times = burst.times.filter((t) => now - t < NL_DEBUG_BURST_WINDOW_MS);
+      if (!burst.times.length) burst.noted = false;
+      nlDebugBurst.set(key, burst);
+      const title = toSafeString(label) || "Debug";
+      if (burst.times.length >= NL_DEBUG_BURST_LIMIT) {
+        if (!burst.noted) {
+          burst.noted = true;
+          console.warn(`[NodeLogic] ${title}: more than ${NL_DEBUG_BURST_LIMIT} outputs in ${NL_DEBUG_BURST_WINDOW_MS / 1000}s -- further ones are skipped for now.`);
+        }
+        return value;
+      }
+      burst.times.push(now);
+      const text = nlDebugFormat(value);
+      if (kind === "warn") console.warn(`[NodeLogic] ${title}:`, value, `\n${text}`);
+      else if (kind === "message") nlDebugShowMessage(title, text, false);
+      else if (kind === "message-warn") nlDebugShowMessage(title, text, true);
+      else console.log(`[NodeLogic] ${title}:`, value, `\n${text}`);
+    } catch {
+      // debugging must never break the graph
+    }
+    return value;
   }
 
   function resolveImageSourceFromElement(element) {
@@ -1854,6 +3318,127 @@
     return window.eventStore[key];
   }
 
+  function nlEventTriggeredCount(eventValue) {
+    return (eventValue && typeof eventValue === "object" && typeof eventValue.triggeredCount === "number")
+      ? eventValue.triggeredCount
+      : 0;
+  }
+
+  // Event OR: fires (its own triggeredCount increments) whenever EITHER
+  // input event's triggeredCount has increased since this node last saw it.
+  // State is per-node (keyed by the graph node's own id) so two Event OR
+  // nodes never share bookkeeping.
+  window.eventCombinerState = window.eventCombinerState || {};
+  function __nodeEventOr(nodeId, eventA, eventB) {
+    const key = `nlEventOr:${toSafeString(nodeId)}`;
+    let state = window.eventCombinerState[key];
+    if (!state) state = window.eventCombinerState[key] = { lastA: 0, lastB: 0, count: 0 };
+
+    const curA = nlEventTriggeredCount(eventA);
+    const curB = nlEventTriggeredCount(eventB);
+    let fired = false;
+    if (curA > state.lastA) { fired = true; state.lastA = curA; }
+    if (curB > state.lastB) { fired = true; state.lastB = curB; }
+    if (fired) state.count++;
+
+    return { eventKey: key, triggeredCount: state.count };
+  }
+
+  // Fallback Event: shows Main for `holdMs` from the moment it APPEARS, then
+  // the Fallback. "Appears" = Main goes from absent (undefined / null / NaN)
+  // to present, or a present Main changes value -- so a gated Event
+  // Processor payload (present only on the pass its event fired) restarts
+  // the window on every firing, while a plain constant appears exactly once
+  // (on load), is held for the window, and after that stays expired for
+  // good. Unlike the plain Fallback node, the value no longer flickers back
+  // to the fallback on the very next recalculation after an event.
+  window.nodelogicFallbackEventState = window.nodelogicFallbackEventState || {};
+
+  function nlFallbackPresent(value) {
+    return !(value === undefined || value === null || (typeof value === "number" && Number.isNaN(value)));
+  }
+
+  function nlFallbackSignature(value) {
+    try {
+      return typeof value === "object" ? `o:${JSON.stringify(value)}` : `${typeof value}:${String(value)}`;
+    } catch {
+      return `x:${String(value)}`;
+    }
+  }
+
+  function __nodeFallbackEvent(nodeId, main, fallback, holdMs, blockScope) {
+    const key = `${toSafeString(blockScope) || "noscope"}::${toSafeString(nodeId)}`;
+    const store = window.nodelogicFallbackEventState;
+    let state = store[key];
+    if (!state) state = store[key] = { present: false, signature: "", held: undefined, until: 0, timer: null };
+
+    const now = Date.now();
+    const hold = Math.max(0, Number(holdMs) || 0);
+    const present = nlFallbackPresent(main);
+    if (present) {
+      const signature = nlFallbackSignature(main);
+      if (!state.present || signature !== state.signature) {
+        state.held = main;
+        state.signature = signature;
+        state.until = now + hold;
+        if (state.timer) clearTimeout(state.timer);
+        state.timer = null;
+        if (hold > 0) {
+          // Re-evaluate once the window ends so the Fallback shows up even
+          // if nothing else triggers a recalculation.
+          state.timer = setTimeout(() => {
+            state.timer = null;
+            scheduleRecalculation();
+          }, hold + 20);
+        }
+      }
+    }
+    state.present = present;
+    return now < state.until ? state.held : fallback;
+  }
+
+  // Event AND: fires only when BOTH input events occur within `windowMs` of
+  // each other. Whichever fires first becomes "pending"; if the other one
+  // fires before the window elapses, the combined event fires and the
+  // pending state clears. If the window elapses first (checked on the next
+  // evaluation that observes a new firing), that pending firing is dropped --
+  // a later firing of either side starts a fresh window instead of ever
+  // silently carrying a stale "half fired" state forward.
+  function __nodeEventAnd(nodeId, eventA, eventB, windowMs) {
+    const key = `nlEventAnd:${toSafeString(nodeId)}`;
+    let state = window.eventCombinerState[key];
+    if (!state) state = window.eventCombinerState[key] = { lastA: 0, lastB: 0, pendingSide: null, pendingAt: 0, count: 0 };
+
+    const curA = nlEventTriggeredCount(eventA);
+    const curB = nlEventTriggeredCount(eventB);
+    const aFired = curA > state.lastA;
+    const bFired = curB > state.lastB;
+    if (aFired) state.lastA = curA;
+    if (bFired) state.lastB = curB;
+
+    const now = Date.now();
+    const win = Math.max(0, Number(windowMs) || 0);
+    if (state.pendingSide && (now - state.pendingAt) > win) {
+      state.pendingSide = null;
+    }
+
+    let fired = false;
+    if (aFired && bFired) {
+      // Both fired in the same evaluation pass: always within window.
+      fired = true;
+      state.pendingSide = null;
+    } else if (aFired) {
+      if (state.pendingSide === "b") { fired = true; state.pendingSide = null; }
+      else { state.pendingSide = "a"; state.pendingAt = now; }
+    } else if (bFired) {
+      if (state.pendingSide === "a") { fired = true; state.pendingSide = null; }
+      else { state.pendingSide = "b"; state.pendingAt = now; }
+    }
+
+    if (fired) state.count++;
+    return { eventKey: key, triggeredCount: state.count };
+  }
+
   // Track which events have been consumed in current evaluation cycle
   window.eventProcessorConsumed = window.eventProcessorConsumed || {};
   // Track if we're currently in an active event flow
@@ -1896,6 +3481,15 @@
       const inner = target.querySelector("input, select, textarea");
       if (inner) {
         return inner;
+      }
+      // No form control inside: this is a content container (an Elementor
+      // widget's outer `.elementor-element` div, a Gutenberg group block,
+      // ...). Descend to the actual text-bearing element so style/text
+      // actions land where the page visually reads them from, not on a
+      // structural ancestor.
+      const content = nlDescendSingleChildContent(target);
+      if (content && content !== target) {
+        return content;
       }
     }
 
@@ -2089,9 +3683,22 @@
     if (actionType === "setText" || actionType === "setHtml" || actionType === "setValue") {
       const value = actionNode.value === undefined ? "" : actionNode.value;
       applyBoth((node) => {
-        if (actionType === "setHtml") node.innerHTML = toSafeString(value);
+        // Sanitized with the Raw HTML allowlist: a form / API value must not
+        // be able to inject a script or event handler.
+        if (actionType === "setHtml") node.innerHTML = nlSanitizeHtmlString(toSafeString(value));
         else if (actionType === "setText") node.textContent = toSafeString(value);
-        else setControlValue(node, Array.isArray(value) ? JSON.stringify(value) : toSafeString(value));
+        else {
+          // Parity with the legacy Output "Value" pin's application logic
+          // (isLabelEl, below): setControlValue only knows how to write a
+          // REAL form control's .value/.checked -- on a plain label-type
+          // element (a <div>/<span> target, no input/select/textarea) it's
+          // a silent no-op DOM-expando write. Match textContent for those,
+          // same as the legacy pin already did.
+          const nextValue = Array.isArray(value) ? JSON.stringify(value) : toSafeString(value);
+          const isFormControl = typeof node.matches === "function" && node.matches("input, select, textarea");
+          if (isFormControl) setControlValue(node, nextValue);
+          else node.textContent = nextValue;
+        }
       });
       return;
     }
@@ -2104,7 +3711,31 @@
 
     if (actionType === "setStyle") {
       const property = toSafeString(actionNode.property).trim();
-      if (property) applyBoth((node) => { node.style[property] = toSafeString(actionNode.value ?? ""); });
+      const rawValue = toSafeString(actionNode.value ?? "");
+      // A wired value can itself be a full "name: value; name2: value2"
+      // declaration list -- e.g. from CSS Join combining a color and a
+      // display value into one string -- rather than a single opaque value
+      // for the one named `property` above. Assigning that whole string to
+      // a single property (the old behavior) is invalid CSS and silently
+      // does nothing. Detect real "name: value" segments and apply each via
+      // setProperty instead; a value with no such segment (the common case:
+      // a bare "#rrggbb", "block", a gradient, ...) still goes through the
+      // single-property path unchanged.
+      const declarations = rawValue.split(";").map((s) => s.trim()).filter(Boolean)
+        .map((s) => {
+          const i = s.indexOf(":");
+          return i > 0 ? [s.slice(0, i).trim(), s.slice(i + 1).trim()] : null;
+        })
+        .filter((pair) => pair && pair[0] && pair[1]);
+      if (declarations.length > 1 || (declarations.length === 1 && !property)) {
+        applyBoth((node) => {
+          declarations.forEach(([name, val]) => {
+            try { node.style.setProperty(name, val); } catch { /* ignore an invalid property name */ }
+          });
+        });
+        return;
+      }
+      if (property) applyBoth((node) => { node.style[property] = rawValue; });
       return;
     }
 
@@ -2250,6 +3881,17 @@
       if (actionType === "actionIf") {
         const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
         registerActionListeners(target, inputEl, Array.isArray(branch) ? branch : [], targetId, bindingState);
+        return;
+      }
+
+      if (actionType === "eventGate") {
+        // The gate's own firing is driven by an Event VALUE re-evaluated
+        // every recalculation pass (applyLeafActionNodes below), not a DOM
+        // listener -- but a nested Action->Event still needs its listener
+        // registered regardless of whether the gate has fired yet, same as
+        // actionIf recurses into its picked branch unconditionally.
+        const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
+        registerActionListeners(target, inputEl, nestedActions, targetId, bindingState);
       }
     });
   }
@@ -2284,6 +3926,12 @@
       if (actionType === "actionIf") {
         const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
         collectActionEventKeys(Array.isArray(branch) ? branch : [], into);
+        return;
+      }
+
+      if (actionType === "eventGate") {
+        const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
+        collectActionEventKeys(nestedActions, into);
       }
     });
 
@@ -2320,6 +3968,21 @@
         if (actionType === "actionIf") {
           const branch = actionNode.condition ? actionNode.trueActions : actionNode.falseActions;
           applyLeafActionNodes(target, inputEl, Array.isArray(branch) ? branch : []);
+          return;
+        }
+
+        if (actionType === "eventGate") {
+          // Re-evaluated every pass (like actionIf's condition), but gated
+          // on a genuinely NEW firing of the trigger event -- nlConsumeEventOnce
+          // is the same "increments only once per new triggeredCount"
+          // primitive Send Email's own Trigger pin already relies on, so an
+          // event that already fired earlier never re-applies these leaf
+          // actions on a later, unrelated recalculation.
+          const nestedActions = Array.isArray(actionNode.actions) ? actionNode.actions : [];
+          const consumedKey = `eventGate::${toSafeString(actionNode.__nodeId)}`;
+          if (nlConsumeEventOnce(actionNode.trigger, consumedKey)) {
+            applyLeafActionNodes(target, inputEl, nestedActions);
+          }
           return;
         }
 
@@ -2365,6 +4028,24 @@
     }
 
     return current === undefined || current === null ? fallback : current;
+  }
+
+  // JSON Body node: parses user-typed/pasted JSON text into the graph's
+  // ordinary structured value (a real object/array/string/number/boolean/
+  // null -- native JSON.parse output, not a wrapped/tagged type). Invalid or
+  // empty JSON safely returns null rather than throwing -- __nodeApiRequest's
+  // own body serialization (__nodeApiSerializeBody) already turns a null/
+  // undefined body into "{}" via its existing `data ?? {}` fallback, so a
+  // bad JSON Body node degrades to an empty request body instead of ever
+  // reaching an uncaught exception.
+  function __nodeJsonParse(text) {
+    if (typeof text !== "string" || text.trim() === "") return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed === undefined ? null : parsed;
+    } catch (e) {
+      return null;
+    }
   }
 
   // Memory functions
@@ -3703,6 +5384,7 @@
       __nodeUnzip,
       __nodeCaseEquals,
       __nodeGetPath,
+      __nodeJsonParse,
       // Bound per-evaluation so the compiled call's own `scope` literal
       // ('widget' | 'page') combines with the runtime blockScope of the
       // logic block actually running this formula -- see __nodeMemoryResolveKey.
@@ -3725,8 +5407,39 @@
       __nodePageLoadEvent,
       __nodeTimerEvent,
       __nodeCustomEvent,
+      __nodeEventOr,
+      __nodeEventAnd,
+      __nodeFallbackEvent: (nodeId, main, fallback, holdMs) =>
+        __nodeFallbackEvent(nodeId, main, fallback, holdMs, extraContext.__nodeBlockScope),
       __nodeEventProcessor,
-      __nodeFallback
+      __nodeFallback,
+      // Bound per-evaluation the same way the memory functions above are --
+      // the compiled call's own literal args combine with the runtime
+      // blockScope (duplicated-widget disambiguation) and, for Send Email,
+      // the editor/post id the server needs to re-derive its own
+      // authorization from the SAVED graph definition rather than trust
+      // anything this client-side call could claim.
+      __nodeFormData: (elementIdOrRef, formNodeId) =>
+        __nodeFormData(elementIdOrRef, formNodeId, extraContext.__nodeBlockScope),
+      __nodeSendEmail: (recipient, subject, message, trigger, sendNodeId) =>
+        __nodeSendEmail(recipient, subject, message, trigger, sendNodeId, extraContext.__nodeBlockScope, extraContext.__nodeEditorId, extraContext.__nodePostId),
+      __nodeDbChain,
+      // DOM nodes: per-instance state is keyed by the block scope (and, in a
+      // For Each body -- evaluated without extraContext -- by the scope of the
+      // block currently being evaluated).
+      __nodeRawHtml: (nodeId, html, slots, values) =>
+        __nodeRawHtml(nodeId, html, slots, values, extraContext.__nodeBlockScope || nlEvaluatingBlockScope),
+      __nodeSetParent: (nodeId, element, parent, position, trigger, hasTrigger) =>
+        __nodeSetParent(nodeId, element, parent, position, trigger, hasTrigger, extraContext.__nodeBlockScope || nlEvaluatingBlockScope),
+      __nodeCloneElement: (nodeId, element, placement, trigger, hasTrigger) =>
+        __nodeCloneElement(nodeId, element, placement, trigger, hasTrigger, extraContext.__nodeBlockScope || nlEvaluatingBlockScope),
+      __nodeElementsByClass,
+      __nodeDebug: (nodeId, kind, label, value, trigger, hasTrigger, everyone) =>
+        __nodeDebug(nodeId, kind, label, value, trigger, hasTrigger, everyone, extraContext.__nodeBlockScope || nlEvaluatingBlockScope),
+      __nodeDbSelect: (opNodeId, query, limit, offset) =>
+        __nodeDbSelect(opNodeId, query, limit, offset, extraContext.__nodeBlockScope, extraContext.__nodeEditorId, extraContext.__nodePostId),
+      __nodeDbWrite: (opNodeId, query, values, trigger) =>
+        __nodeDbWrite(opNodeId, query, values, trigger, extraContext.__nodeBlockScope, extraContext.__nodeEditorId, extraContext.__nodePostId)
     };
   }
 
@@ -3947,6 +5660,28 @@
     }
   }
 
+  // A logic block's formula is ONE object of independent entries (one per
+  // Output / side-effect node). A single failing entry used to make the whole
+  // evaluation invalid -- every Output of the block stopped working, with
+  // nothing in the console. Each root entry is now evaluated on its own: a
+  // failing one is skipped and reported (once per entry + message), the rest
+  // still apply. Only the block ROOT is split (it is the one evaluation that
+  // carries __nodeBlockScope); loop bodies and nested objects keep their
+  // all-or-nothing semantics, so a half-built per-item payload is never used.
+  const nlReportedEntryFailures = new Set();
+  function nlReportEntryFailure(key, error) {
+    const message = (error && error.message) || String(error);
+    const signature = `${key}\u0000${message}`;
+    if (nlReportedEntryFailures.has(signature)) return;
+    if (nlReportedEntryFailures.size > 200) nlReportedEntryFailures.clear();
+    nlReportedEntryFailures.add(signature);
+    try {
+      console.warn(`NodeLogic: part of a logic graph could not be evaluated and was skipped (${String(key).trim()}): ${message}`);
+    } catch (e) {
+      // console unavailable: nothing else to do
+    }
+  }
+
   function safeEvaluateExpression(expr, extraContext = {}) {
     try {
       if (!isPreparedExpressionSafe(expr)) {
@@ -3958,7 +5693,23 @@
         return { valid: false, value: undefined };
       }
 
-      const value = evalFormulaNode(ast, createFormulaEvalContext(extraContext), 0);
+      const context = createFormulaEvalContext(extraContext);
+      const isBlockRoot = Boolean(extraContext) && Object.prototype.hasOwnProperty.call(extraContext, "__nodeBlockScope");
+      if (isBlockRoot && ast.type === "ObjectExpression") {
+        const out = {};
+        for (const prop of ast.properties || []) {
+          let key = "";
+          try {
+            key = normalizeFormulaMemberKey(prop.key);
+            out[key] = evalFormulaNode(prop.value, context, 1);
+          } catch (error) {
+            nlReportEntryFailure(key, error);
+          }
+        }
+        return { valid: true, value: out };
+      }
+
+      const value = evalFormulaNode(ast, context, 0);
       return { valid: true, value };
     } catch (e) {
       return { valid: false, value: undefined };
@@ -5457,7 +7208,20 @@
       // are (re-)applied below; see isFreshEvaluation.
       const isFreshEvaluation = !evaluation;
       if (!evaluation) {
-        evaluation = evaluateFormulaExpression(formula, values, { __nodeBlockScope: blockScope });
+        const usesDomInstances = formula.indexOf("__nodeRawHtml") !== -1 || formula.indexOf("__nodeCloneElement") !== -1;
+        if (usesDomInstances) nlBeginDomPass(blockScope);
+        const prevEvaluatingScope = nlEvaluatingBlockScope;
+        nlEvaluatingBlockScope = blockScope;
+        try {
+          evaluation = evaluateFormulaExpression(formula, values, {
+            __nodeBlockScope: blockScope,
+            __nodeEditorId: String(block.dataset.editorId || ""),
+            __nodePostId: String(block.dataset.postId || ""),
+          });
+        } finally {
+          nlEvaluatingBlockScope = prevEvaluatingScope;
+        }
+        if (usesDomInstances && evaluation.valid) nlSweepDomInstances(blockScope);
         // An Output "Element" pin resolves to a live DOM node inside the result
         // (raw.__element). That node can be replaced between recalculations, so
         // its evaluation must NOT be cached — a stale entry would hand a
@@ -5497,7 +7261,26 @@
         // FIRST (pending) evaluation would permanently freeze the node on
         // "loading", the response's own arrival notwithstanding.
         const readsAsyncApi = formula.indexOf("__nodeApiRequest") !== -1 || formula.indexOf("__nodeApiStatus") !== -1;
-        if (evaluation.valid && !holdsLiveElement && !readsLiveElementProperty && !readsAsyncApi) {
+        // Same staleness hazard as the async-API case above: __nodeFormData's
+        // resume value can flip from "nothing pending" to real captured data
+        // (or, once fetched from the server fallback, from "id known, values
+        // empty" to fully populated) between two passes with an otherwise
+        // identical cache key -- and __nodeSendEmail's returned status object
+        // changes from "sending" to "sent/failed" the same way. Never cached,
+        // exactly like __nodeGetElementProp / the async API nodes.
+        const readsFormOrEmail = formula.indexOf("__nodeFormData") !== -1 || formula.indexOf("__nodeSendEmail") !== -1;
+        // DB Select resolves asynchronously and DB writes return a changing
+        // status object -- same staleness hazard as the async API nodes.
+        const readsDatabase = formula.indexOf("__nodeDbSelect") !== -1 || formula.indexOf("__nodeDbWrite") !== -1;
+        // Fallback Event depends on the clock (its hold window), not only on
+        // the cache key's inputs.
+        const readsClock = formula.indexOf("__nodeFallbackEvent") !== -1;
+        // DOM nodes create / move / query live elements: never cached.
+        const touchesDom = formula.indexOf("__nodeRawHtml") !== -1
+          || formula.indexOf("__nodeSetParent") !== -1
+          || formula.indexOf("__nodeCloneElement") !== -1
+          || formula.indexOf("__nodeElementsByClass") !== -1;
+        if (evaluation.valid && !holdsLiveElement && !readsLiveElementProperty && !readsAsyncApi && !readsFormOrEmail && !readsDatabase && !readsClock && !touchesDom) {
           if (formulaEvaluationCache.size > 100) {
             formulaEvaluationCache.delete(formulaEvaluationCache.keys().next().value);
           }
@@ -5526,6 +7309,9 @@
       });
       outputEntries.forEach(([entryKey, raw]) => {
         if (!raw || typeof raw !== "object") return;
+        // Side-effect root (Send Email / DB write): evaluating the formula
+        // already ran it; there is no DOM target to apply anything to.
+        if (raw.__nlSideEffect === true) return;
 
         // The Output node's "Element" input pin, when connected, provides the
         // target as a live element instance (raw.__element) instead of an id.
@@ -5567,6 +7353,22 @@
         }
 
         const payload = normalizeFormulaPayload(raw);
+        // An element as the VALUE (e.g. from Raw HTML / Clone Element) is
+        // mounted inside the target, replacing its content -- only when it
+        // isn't already the target's sole content (idempotent), never into
+        // itself / its own descendant, never into a NodeLogic block.
+        const valueIsElement = nlIsElement(payload.value);
+        if (valueIsElement) {
+          const mounted = payload.value;
+          const host = inputEl.matches("input, select, textarea, img") ? target : inputEl;
+          const blocked = mounted === host || mounted.contains(host) || nlIsDocumentLevelElement(mounted)
+            || !nlCanReceiveChildren(host)
+            || host.matches("[data-nodelogic-chart='1'], .nodelogic-chart, [data-nodelogic-custom-element='1'], .nodelogic-custom-element, [data-nodelogic-array-list='1'], .nodelogic-array-list");
+          if (!blocked && !(host.childNodes.length === 1 && host.firstChild === mounted)) {
+            host.replaceChildren(mounted);
+            nlStructuralChange = true;
+          }
+        }
         // The Element-pin payload carries meta keys (__element/__executeOnLoad),
         // so its "raw" object is never a structured chart/zip payload — use the
         // extracted value. (Structured targets are NodeLogic blocks addressed by id.)
@@ -5723,7 +7525,7 @@
             + (overflow > 0 ? `<div class="nodelogic-array-list__item nodelogic-array-list__item--overflow">+${overflow} more</div>` : "");
         }
 
-        if (imageEl && structuredValue !== undefined) {
+        if (imageEl && structuredValue !== undefined && !valueIsElement) {
           const resolvedImage = Array.isArray(structuredValue)
             ? JSON.stringify(structuredValue)
             : (structuredValue === null || structuredValue === undefined ? "" : String(structuredValue));
@@ -5734,18 +7536,25 @@
         const isLabelEl = !inputEl.matches("input, select, textarea") && !arrayListRoot && !imageEl;
 
         // --- value ---
-        if (payload.value !== undefined && !arrayListRoot && !imageEl) {
+        if (payload.value !== undefined && !arrayListRoot && !imageEl && !valueIsElement) {
           const resolvedValue = payload.value;
           const nextValue = Array.isArray(resolvedValue)
             ? JSON.stringify(resolvedValue)
             : (resolvedValue === null || resolvedValue === undefined ? "" : String(resolvedValue));
           if (isLabelEl) {
             if (inputEl.textContent !== nextValue) inputEl.textContent = nextValue;
+            // Track our own write so a LATER recalculation's
+            // __nodeGetElementProp(el, "textContent") read of this same
+            // element doesn't corrupt its result by reading back this
+            // formula's own prior output instead of the element's real
+            // content (see nlApplySelfWriteBaseline above).
+            nlRecordSelfWrite(inputEl, "textContent", nextValue);
           } else {
             const formatted = typeof resolvedValue === "number" && Number.isFinite(resolvedValue)
               ? (inputEl.type === "range" || inputEl.type === "number" ? formatValueForInput(inputEl, resolvedValue) : nextValue)
               : nextValue;
             setControlValue(inputEl, formatted);
+            nlRecordSelfWrite(inputEl, "value", inputEl.value);
           }
         }
 
@@ -5939,6 +7748,8 @@
     if (isFirstExecution) {
       isFirstExecution = false;
     }
+
+    nlAfterRecalculation();
   }
 
   function scheduleRecalculation() {

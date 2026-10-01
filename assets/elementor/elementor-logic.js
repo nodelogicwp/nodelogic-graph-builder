@@ -9,6 +9,12 @@
     let modalRoot = null;
     let reactRoot = null;
 
+    /*
+     * True while the open GraphEditor holds changes that are not saved to the
+     * widget (its working copy). Closing then asks first.
+     */
+    let hasUnpublishedChanges = false;
+
 
     /*
      * =========================================================
@@ -277,6 +283,38 @@
             settings.get('formula') || '';
 
 
+        /*
+         * Previous published versions (newest first) + how many to keep.
+         * Stored next to graph_state, never rendered on the frontend.
+         */
+
+        const graphHistory =
+            parseJSON(
+                settings.get('graph_history'),
+                []
+            );
+
+        const historyLimitSetting =
+            settings.get('graph_history_limit');
+
+        /*
+         * Missing / empty means "default", not 0 (Number('') === 0 would
+         * silently turn version history off).
+         */
+
+        const historyLimitRaw =
+            historyLimitSetting === '' ||
+            historyLimitSetting === null ||
+            typeof historyLimitSetting === 'undefined'
+                ? NaN
+                : Number(historyLimitSetting);
+
+        const historyLimit =
+            Number.isFinite(historyLimitRaw)
+                ? historyLimitRaw
+                : 5;
+
+
         const outputConfigs =
             parseJSON(
                 settings.get('output_configs'),
@@ -298,6 +336,8 @@
         return {
             editorId,
             graphState,
+            graphHistory: Array.isArray(graphHistory) ? graphHistory : [],
+            historyLimit,
             formula,
             outputConfigs
         };
@@ -504,6 +544,47 @@
      * =========================================================
      */
 
+    /*
+     * Save Graph: MAIN (graph_state + formula + output configs) and its
+     * version history go to Elementor as ONE settings command, then are read
+     * back. Returns false unless every value is verifiably in the widget, so
+     * the editor can report a failed save instead of assuming success.
+     */
+
+    function publishToElementor(
+        container,
+        values
+    ) {
+
+        if (!container) {
+            return false;
+        }
+
+        updateElementorSettings(
+            container,
+            values
+        );
+
+        try {
+
+            return Object.keys(values).every(
+                function (key) {
+                    return container.settings.get(key) === values[key];
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                'NodeLogic: could not verify the saved graph.',
+                error
+            );
+
+            return false;
+        }
+    }
+
+
     function extractOutputConfigs(state) {
 
         const outputConfigs = {};
@@ -568,6 +649,22 @@
          * Unmount React.
          */
 
+        /*
+         * Unmounting runs the editor's cleanup, which stores its working copy
+         * and removes its window listeners.
+         */
+
+        if (!reactRoot && modalRoot) {
+
+            const mountPoint =
+                modalRoot.querySelector('.nodelogic-modal-content');
+
+            reactRoot =
+                mountPoint && mountPoint.__nodelogicReactRoot
+                    ? mountPoint.__nodelogicReactRoot
+                    : null;
+        }
+
         if (reactRoot) {
 
             try {
@@ -604,6 +701,26 @@
 
 
         currentContainer = null;
+
+        hasUnpublishedChanges = false;
+    }
+
+
+    function requestCloseModal() {
+
+        if (
+            hasUnpublishedChanges &&
+            !window.confirm(
+                'Close the graph editor?\n\n' +
+                'Your changes are not saved to the widget yet. They stay in this browser\'s working copy ' +
+                'and reopen the next time you edit this graph, but the page keeps using the last saved graph ' +
+                'until you click "Save Graph" (and update the page).'
+            )
+        ) {
+            return;
+        }
+
+        closeModal();
     }
 
 
@@ -702,7 +819,7 @@
                 event.preventDefault();
                 event.stopPropagation();
 
-                closeModal();
+                requestCloseModal();
             }
         );
 
@@ -827,7 +944,7 @@
 
         try {
 
-            window.mountElementorLogicEditor(
+            const mountedRoot = window.mountElementorLogicEditor(
                 content,
                 {
 
@@ -837,6 +954,98 @@
 
                     graphState:
                         graphData.graphState,
+
+
+                    graphHistory:
+                        graphData.graphHistory,
+
+
+                    historyLimit:
+                        graphData.historyLimit,
+
+
+                    /*
+                     * -------------------------------------------------
+                     * SAVE GRAPH (publish): graph + history, one command,
+                     * verified by reading the settings back.
+                     * -------------------------------------------------
+                     */
+
+                    onPublish:
+                        function (payload) {
+
+                            if (!currentContainer || !payload || !payload.state) {
+
+                                console.warn(
+                                    'NodeLogic: cannot save - no current widget.'
+                                );
+
+                                return false;
+                            }
+
+                            return publishToElementor(
+                                currentContainer,
+                                {
+
+                                    graph_state:
+                                        JSON.stringify(
+                                            payload.state
+                                        ),
+
+
+                                    formula:
+                                        payload.state.formula || '',
+
+
+                                    output_configs:
+                                        JSON.stringify(
+                                            extractOutputConfigs(
+                                                payload.state
+                                            )
+                                        ),
+
+
+                                    graph_history:
+                                        JSON.stringify(
+                                            Array.isArray(payload.history)
+                                                ? payload.history
+                                                : []
+                                        ),
+
+
+                                    graph_history_limit:
+                                        String(
+                                            payload.historyLimit
+                                        )
+
+                                }
+                            );
+                        },
+
+
+                    onHistoryLimitChange:
+                        function (limit) {
+
+                            if (!currentContainer) {
+                                return;
+                            }
+
+                            updateElementorSettings(
+                                currentContainer,
+                                {
+                                    graph_history_limit:
+                                        String(limit)
+                                }
+                            );
+                        },
+
+
+                    onUnsavedChange:
+                        function (hasUnpublished) {
+
+                            hasUnpublishedChanges =
+                                Boolean(hasUnpublished);
+                        },
 
 
                     /*
@@ -937,6 +1146,12 @@
 
                 }
             );
+
+
+            reactRoot =
+                mountedRoot ||
+                content.__nodelogicReactRoot ||
+                null;
 
 
             console.log(

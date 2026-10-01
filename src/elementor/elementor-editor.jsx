@@ -7,8 +7,13 @@ export function mountElementorLogicEditor(
     {
         editorId,
         graphState,
+        graphHistory,
+        historyLimit,
         onStateChange,
+        onPublish,
+        onHistoryLimitChange,
         onFormulaChange,
+        onUnsavedChange,
     }
 ) {
 
@@ -19,18 +24,25 @@ export function mountElementorLogicEditor(
         <GraphEditor
             editorId={editorId}
             initialState={graphState}
+            initialHistory={graphHistory}
+            historyLimit={historyLimit}
             forceInitialState
             liveStateSync={false}
             showTemplateTools={true}
             mainElementType="logic"
             onStateChange={onStateChange}
+            onPublish={onPublish}
+            onHistoryLimitChange={onHistoryLimitChange}
             onFormulaChange={onFormulaChange}
+            onUnsavedChange={onUnsavedChange}
         />
     );
 
 
     element.__nodelogicReactRoot =
         root;
+
+    return root;
 }
 
 

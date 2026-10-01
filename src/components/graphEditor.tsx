@@ -6,10 +6,55 @@ import { TREE_DATA } from './graphEditor/treeData';
 import {
     normalizeSnapshot,
     normalizeCustomNodeUiState,
-    resolveInitialSnapshot,
     type CustomNodeUiSharedVariable,
     type CustomNodeUiState,
 } from './graphEditor/persistence';
+import {
+    GRAPH_FORMAT_VERSION,
+    HISTORY_LIMIT_DEFAULT,
+    buildExportDocument,
+    buildStoredRecord,
+    canonicalGraphString,
+    clampHistoryLimit,
+    createGraphStorage,
+    createPersistenceLog,
+    createWorkSaveCoordinator,
+    decideStartup,
+    diffGraphs,
+    evaluateRecoveryCandidates,
+    isEffectivelyEmptyGraph,
+    legacyDraftCandidate,
+    normalizeHistory,
+    parseImportText,
+    pickGraphContent,
+    preparePublish,
+    readMainMeta,
+    semanticHash,
+    serializeExportDocument,
+    summarizeDiff,
+    validateGraphContent,
+    type BackupEntry,
+    type ExportSourceKind,
+    type GraphContent,
+    type GraphDiff,
+    type GraphStorage,
+    type MainHistoryEntry,
+    type MainMeta,
+    type RecoveryDecision,
+    type StartupDecision,
+    type StorageLike,
+    type StoredGraphRecord,
+    type WorkSaveCoordinator,
+} from './graphEditor/graphStore';
+import {
+    PersistenceDialogFrame,
+    GraphVersionPreview,
+    DiffSummaryList,
+    VersionsPanel,
+    dialogButtonStyle,
+    formatTimestamp,
+    type VersionRef,
+} from './graphEditor/persistenceUi';
 import {
     migrateElementPropertyNodeData,
     isInternalResolutionAttr,
@@ -23,10 +68,13 @@ import {
 import {
     detectElementProperties,
     detectElementChildren,
+    getPreviewDocuments,
+    detectFormFields,
     getPreviewChildAt,
     observePreviewDomChanges,
     resolvePreviewElement,
     type DetectedChild,
+    type DetectedFormField,
 } from './graphEditor/previewResolver';
 import {
     migrateGetChildrenNodeData,
@@ -40,6 +88,20 @@ import {
     type GetChildrenMode,
     type GetChildrenReturnAs,
 } from './graphEditor/getChildrenModel';
+import {
+    DB_NODE_TYPES,
+    DB_OP_TYPES,
+    computeDbSignFingerprint,
+    dbApiFetch,
+    dbColumnsCacheKey,
+    dbTablesCacheKey,
+    getDbApiConfig,
+    resolveDbChain,
+    resolveEditorPostId,
+    type DbColumnInfo,
+    type DbEditorConnection,
+} from './graphEditor/dbEditorApi';
+import { analyzeRawHtmlCached, selectedRawHtmlSlots } from './graphEditor/rawHtmlModel';
 
 interface PinStyle extends React.CSSProperties {
     '--pin-gradient'?: string;
@@ -79,6 +141,14 @@ interface TreeItem {
         | 'element-ref'
         | 'element-property'
         | 'get-children'
+        | 'raw-html'
+        | 'set-parent'
+        | 'debug-console-log'
+        | 'debug-console-warn'
+        | 'debug-message-log'
+        | 'debug-message-warn'
+        | 'clone-element'
+        | 'elements-by-class'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -120,6 +190,7 @@ interface TreeItem {
         | 'memory-increment'
         | 'memory-array-append'
         | 'memory-array-remove'
+        | 'memory-array-read'
         | 'css-unit'
         | 'css-display'
         | 'css-color'
@@ -176,6 +247,11 @@ interface TreeItem {
         | 'event-page-load'
         | 'event-timer'
         | 'event-custom'
+        // Event combinators + their matching Action trigger
+        | 'event-or'
+        | 'event-and'
+        | 'fallback-event'
+        | 'action-event-gate'
         // New array nodes
         | 'array-map'
         | 'array-filter'
@@ -186,7 +262,21 @@ interface TreeItem {
         | 'array-contains'
         | 'array-length'
         | 'array-merge'
-        | 'array-unique';
+        | 'array-unique'
+        // Forms & Email (PRO palette; runtime lives here like api-request)
+        | 'form-data'
+        | 'send-email'
+        // Database (PRO palette; execution is server-side, admin-signed)
+        | 'db-connect'
+        | 'db-table'
+        | 'db-fields'
+        | 'db-join'
+        | 'db-filter'
+        | 'db-sort'
+        | 'db-select'
+        | 'db-insert'
+        | 'db-update'
+        | 'db-delete';
     customNodeId?: string;
     children?: TreeItem[];
 }
@@ -201,6 +291,14 @@ interface CanvasElement {
         | 'element-ref'
         | 'element-property'
         | 'get-children'
+        | 'raw-html'
+        | 'set-parent'
+        | 'debug-console-log'
+        | 'debug-console-warn'
+        | 'debug-message-log'
+        | 'debug-message-warn'
+        | 'clone-element'
+        | 'elements-by-class'
         | 'number'
         | 'constant-boolean'
         | 'constant-string'
@@ -246,6 +344,8 @@ interface CanvasElement {
         | 'number-parse'
         | 'number-to-base'
         | 'multi-concat'
+        | 'object-build'
+        | 'json-body'
         | 'css-unit'
         | 'css-display'
         | 'css-color'
@@ -296,6 +396,7 @@ interface CanvasElement {
         | 'memory-increment'
         | 'memory-array-append'
         | 'memory-array-remove'
+        | 'memory-array-read'
         | 'event-element'
         | 'event-id'
         | 'event-processor'
@@ -320,6 +421,11 @@ interface CanvasElement {
         | 'event-page-load'
         | 'event-timer'
         | 'event-custom'
+        // Event combinators + their matching Action trigger
+        | 'event-or'
+        | 'event-and'
+        | 'fallback-event'
+        | 'action-event-gate'
         // New array nodes
         | 'array-map'
         | 'array-filter'
@@ -330,7 +436,21 @@ interface CanvasElement {
         | 'array-contains'
         | 'array-length'
         | 'array-merge'
-        | 'array-unique';
+        | 'array-unique'
+        // Forms & Email (PRO palette; runtime lives here like api-request)
+        | 'form-data'
+        | 'send-email'
+        // Database (PRO palette; execution is server-side, admin-signed)
+        | 'db-connect'
+        | 'db-table'
+        | 'db-fields'
+        | 'db-join'
+        | 'db-filter'
+        | 'db-sort'
+        | 'db-select'
+        | 'db-insert'
+        | 'db-update'
+        | 'db-delete';
     x: number;
     y: number;
     data?: {
@@ -405,6 +525,22 @@ interface CanvasElement {
         executeOnLoad?: boolean;
         // For main-block (Zip Output) in customNodeMode: editable output labels
         zipOutputLabels?: string[];
+        // For object-build: the JSON key name for each input pin (index-aligned)
+        objectKeys?: string[];
+        // For css-join: an optional CSS property name per input pin
+        // (index-aligned). When set for a slot, that slot's value is joined
+        // as "name: value" instead of the bare value -- lets e.g. CSS Color
+        // + a Display value be combined into one real "color: X; display: Y"
+        // declaration list, instead of joining two bare, property-less
+        // values into meaningless text. Left blank, a slot behaves exactly
+        // as before (a bare, already-complete string is joined verbatim).
+        cssJoinPropertyNames?: string[];
+        // For unzip: last live-detected field layout of its source (Form Data
+        // fields / DB Select First Row columns), used whenever live detection
+        // is momentarily unavailable so pins, wires and the formula survive.
+        unzipSchemaSnapshot?: { sourceId: string; sourceOutputIndex: number; fields: ArrayItemSchemaField[]; nestedUnder?: string };
+        // For json-body: the raw JSON text typed/pasted by the user
+        jsonBodyText?: string;
         // For Element ID node
         elementId?: string;
         elementProperty?: string;
@@ -527,6 +663,13 @@ interface CanvasElement {
         eventTimerMode?: 'interval' | 'timeout';
         eventCustomName?: string;
         eventHoverMode?: 'enter' | 'leave' | 'both';
+        // event-and: how long, in ms, the first of the two events stays
+        // "pending" waiting for the other one before the window expires
+        eventAndWindowMs?: number;
+        // fallback-event: literal Fallback value / hold time used when the
+        // matching pin (input1 / input2) is not wired
+        fallbackEventValue?: string;
+        fallbackEventDurationMs?: number;
         // For-each / collect loop
         forEachArraySchemaItem?: ArrayItemSchemaField[];
         // array-reduce
@@ -536,15 +679,58 @@ interface CanvasElement {
         arraySearchField?: string;
         // array-merge
         arrayMergeMode?: 'concat' | 'union';
+        // send-email: static fallbacks used only when the matching input pin
+        // is left unwired (same convention as api-request's apiUrl).
+        sendEmailRecipient?: string;
+        sendEmailSubject?: string;
+        sendEmailMessage?: string;
+        // Defaults to false: a side-effecting, potentially abusable action
+        // (sending mail) must be opt-in per node for anonymous/logged-out
+        // visitors, never on by default.
+        sendEmailAllowAnonymous?: boolean;
+        // Database nodes. Column references in filter/sort/join-left are
+        // "table.column". The server re-derives the whole query from these
+        // SAVED fields and verifies dbSignature (an admin-only HMAC over
+        // them); nothing here is ever trusted from a runtime request.
+        dbConnectionId?: string;
+        dbDatabase?: string;
+        // Debug nodes
+        debugLabel?: string;
+        debugAudience?: 'editors' | 'everyone';
+        // DOM nodes (Free)
+        rawHtml?: string;
+        rawHtmlSlots?: string[];
+        setParentPosition?: 'start' | 'end';
+        clonePlacement?: 'after' | 'detached';
+        classNames?: string;
+        dbTable?: string;
+        dbFields?: string[];
+        dbJoinType?: 'inner' | 'left' | 'right';
+        dbJoinTable?: string;
+        dbJoinLeftColumn?: string;
+        dbJoinRightColumn?: string;
+        dbJoinFields?: string[];
+        dbFilterColumn?: string;
+        dbFilterOperator?: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'starts' | 'ends' | 'empty' | 'notempty' | 'in';
+        dbFilterValue?: string;
+        dbSortColumn?: string;
+        dbSortDirection?: 'asc' | 'desc';
+        dbLimit?: number;
+        dbOffset?: number;
+        dbColumns?: string[];
+        dbMaxRows?: number;
+        dbExecutePolicy?: 'editors' | 'logged-in' | 'anyone';
+        dbSignature?: string;
+        dbSignatureError?: string;
     };
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn';
     connections?: Connection[];
 }
 
 const MEMORY_NODE_TYPES = new Set<CanvasElement['type']>([
     'memory-read-number', 'memory-read-string', 'memory-read-boolean',
     'memory-write-number', 'memory-write-string', 'memory-write-boolean',
-    'memory-has', 'memory-delete', 'memory-increment', 'memory-array-append', 'memory-array-remove',
+    'memory-has', 'memory-delete', 'memory-increment', 'memory-array-append', 'memory-array-remove', 'memory-array-read',
 ]);
 const isMemoryNodeType = (type: CanvasElement['type']): boolean => MEMORY_NODE_TYPES.has(type);
 
@@ -555,7 +741,7 @@ interface Connection {
     toId: string;
     toInput: string;
     operation?: '+' | '-' | '*' | '/' | '**' | '%' | '===' | '!==' | '>' | '<' | '>=' | '<=';
-    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element';
+    valueType?: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn';
     connectionType?: 'normal' | 'case'; // New type for case connections
 }
 
@@ -584,6 +770,12 @@ interface SavedState {
     eventFormulas?: Record<string, string>;
     customNodeUi?: CustomNodeUiState | null;
     updatedAt?: number;
+    // MAIN metadata (format 2+). Metadata only: never used to decide whether
+    // two graphs differ -- see graphStore.semanticEqual.
+    formatVersion?: number;
+    revision?: number;
+    publishedAt?: number;
+    contentHash?: string;
 }
 
 interface GraphTemplateItem {
@@ -938,11 +1130,60 @@ const TreeNode: React.FC<{
     );
 });
 
+// Recorded in WORK / recovery / export metadata (diagnostics only).
+const PERSISTENCE_APP_VERSION = 'nodelogic-editor/2';
+
+type ReplaceWorkReason = 'restore-version' | 'restore-backup' | 'import' | 'template' | 'discard' | 'recovery';
+
+type PersistenceDialogState =
+    | {
+        kind: 'view';
+        title: string;
+        subtitle: string;
+        content: GraphContent;
+        exportRef: VersionRef;
+        restorable: boolean;
+    }
+    | {
+        kind: 'confirm-replace';
+        title: string;
+        reason: ReplaceWorkReason;
+        label: string;
+        content: GraphContent;
+        notes: string[];
+        confirmLabel: string;
+        /** Runs after the working copy was replaced and saved. */
+        onDone?: () => void;
+    }
+    | { kind: 'message'; tone: 'error' | 'info'; title: string; lines: string[] };
+
+interface GraphPublishPayload {
+    /** The new MAIN (graphState). */
+    state: SavedState;
+    /** Previous MAIN versions, newest first, already pruned to historyLimit. */
+    history: MainHistoryEntry[];
+    historyLimit: number;
+}
+
 interface GraphEditorProps {
     editorId: string;
     onFormulaChange?: (formula: string) => void;
+    /** MAIN: the graph currently committed to the block / widget. */
     initialState?: SavedState | null;
+    /** MAIN history stored by the host next to graphState (newest first). */
+    initialHistory?: unknown;
+    /** How many previous MAIN versions to keep (0-10). */
+    historyLimit?: number;
+    /**
+     * Publish WORK -> MAIN. The host must apply state + history in ONE update
+     * (so a failure can never leave a new MAIN with a stale history or the
+     * reverse). Return false if it could not be applied.
+     */
+    onPublish?: (payload: GraphPublishPayload) => boolean | void;
+    onHistoryLimitChange?: (limit: number) => void;
+    /** Legacy publish callback (state only, no history). */
     onStateChange?: (state: SavedState) => void;
+    /** WORK differs from MAIN (unpublished changes). */
     onUnsavedChange?: (hasUnsaved: boolean) => void;
     forceInitialState?: boolean;
     templateMode?: boolean;
@@ -979,7 +1220,50 @@ const PIN_TYPE_COLORS: Record<string, string> = {
     event: '#dc2626',
     element: '#38bdf8',
     'chart-data': '#f59e0b',
+    query: '#eab308',
+    dbconn: '#f97316',
 };
+
+// PRO Database nodes: filter operators (values mirror the server's
+// calcgraph_db_operators()) and the column-checklist geometry shared by the
+// config UI and its height formula.
+const DB_OPERATOR_OPTIONS: Array<[string, string]> = [
+    ['eq', '='],
+    ['neq', '!='],
+    ['gt', '>'],
+    ['gte', '>='],
+    ['lt', '<'],
+    ['lte', '<='],
+    ['contains', 'contains'],
+    ['starts', 'starts with'],
+    ['ends', 'ends with'],
+    ['empty', 'is empty'],
+    ['notempty', 'is not empty'],
+    ['in', 'in list (a,b,c)'],
+];
+// Nodes whose job is a side effect (not a value): always compiled as their
+// own formula root, whether or not anything reads their Status output.
+const SIDE_EFFECT_NODE_TYPES: ReadonlySet<string> = new Set(['send-email', 'db-insert', 'db-update', 'db-delete', 'set-parent', 'clone-element', 'debug-console-log', 'debug-console-warn', 'debug-message-log', 'debug-message-warn']);
+// Free DOM nodes (create / move / copy / find elements). They use the special
+// (labels | config | outputs) layout with renderDomNodeControls.
+const DOM_NODE_TYPES: ReadonlySet<string> = new Set(['raw-html', 'set-parent', 'clone-element', 'elements-by-class']);
+// Debug folder: show whatever reaches them in the console / a closable message.
+const DEBUG_NODE_TYPES: ReadonlySet<string> = new Set(['debug-console-log', 'debug-console-warn', 'debug-message-log', 'debug-message-warn']);
+const DEBUG_KIND_BY_TYPE: Record<string, string> = {
+    'debug-console-log': 'log',
+    'debug-console-warn': 'warn',
+    'debug-message-log': 'message',
+    'debug-message-warn': 'message-warn',
+};
+// Nodes drawn with the special layout + renderDomNodeControls.
+const PANEL_NODE_TYPES: ReadonlySet<string> = new Set([...DOM_NODE_TYPES, ...DEBUG_NODE_TYPES]);
+const RAW_HTML_BUTTON_H = 26;
+const DB_CHECK_ROW_H = 20;
+const DB_CHECKLIST_MAX_H = 120;
+const DB_SMALL_BUTTON_H = 24;
+const dbSmallButtonStyle: React.CSSProperties = { height: `${DB_SMALL_BUTTON_H}px`, padding: '0 8px', fontSize: '11px', borderRadius: '6px', border: '1px solid rgba(148,163,184,0.35)', background: 'rgba(15,23,42,0.6)', color: '#e2e8f0', cursor: 'pointer' };
+// information_schema DATA_TYPE values the server casts to JSON numbers.
+const DB_NUMERIC_COLUMN_TYPES = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint', 'decimal', 'numeric', 'float', 'double', 'real', 'year']);
 
 const outputPropertyNames = ['value', 'background', 'color', 'disabled', 'custom-css'];
 const outputInputLabels = ['Value', 'Background', 'Color', 'Disabled', 'CSS'];
@@ -1002,10 +1286,24 @@ const buildPinStyle = (types: string[]): PinStyle => {
 
 const getPinStyleByTypes = (types: string[]): PinStyle => buildPinStyle(types);
 
+// Shared label for a node config control, matching the existing sidebar
+// field-label style (e.g. "Variable Key", "Default Value"). Use this instead
+// of a placeholder for any control whose purpose isn't obvious from context —
+// placeholders disappear once a field has a non-empty default value, which is
+// how several controls (API timeout, number-to-base pad width, css-join
+// count) ended up effectively unlabeled.
+const ConfigFieldLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>{children}</div>
+);
+
 const GraphEditor: React.FC<GraphEditorProps> = ({
     editorId,
     onFormulaChange,
     initialState = null,
+    initialHistory = null,
+    historyLimit: historyLimitProp,
+    onPublish,
+    onHistoryLimitChange,
     onStateChange,
     onUnsavedChange,
     forceInitialState = false,
@@ -1016,13 +1314,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     liveStateSync = true,
     mainElementType = 'info',
 }) => {
+    // Pre-v2 storage keys: read once (as legacy recovery candidates), never written.
     const SAVE_KEY = `formulaEditor.save.${editorId}`;
     const AUTOSAVE_KEY = `formulaEditor.autosave.${editorId}`;
+    // MAIN / WORK / RECOVERY persistence is for the page graph editors only;
+    // the template / custom-node editors keep their host-managed state.
+    const persistenceEnabled = !templateMode && !customNodeMode;
 
-    const [savedState, setSavedState] = useState<SavedState | null>(null);
-    const [autosaveState, setAutosaveState] = useState<SavedState | null>(null);
-    const autosaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [isStateLoaded, setIsStateLoaded] = useState(false);
+    const [workStatus, setWorkStatus] = useState<{ state: 'clean' | 'dirty' | 'error' | 'conflict'; message: string; savedAt: number }>({ state: 'clean', message: '', savedAt: 0 });
+    const [mainInfo, setMainInfo] = useState<{ revision: number; publishedAt: number }>({ revision: 0, publishedAt: 0 });
+    const [historyEntries, setHistoryEntries] = useState<MainHistoryEntry[]>([]);
+    const [historyLimit, setHistoryLimitState] = useState<number>(() => clampHistoryLimit(historyLimitProp ?? HISTORY_LIMIT_DEFAULT));
+    const [backupEntries, setBackupEntries] = useState<BackupEntry[]>([]);
+    const [startupConflict, setStartupConflict] = useState<{ decision: StartupDecision; work: StoredGraphRecord; diff: GraphDiff } | null>(null);
+    const [recoveryQueue, setRecoveryQueue] = useState<RecoveryDecision[]>([]);
+    const [persistenceDialog, setPersistenceDialog] = useState<PersistenceDialogState | null>(null);
+    const [undoRedoVersion, setUndoRedoVersion] = useState(0);
     const [runtimeConfigState, setRuntimeConfigState] = useState<NonNullable<GraphEditorRuntimeWindow['nodelogicGraphBuilderConfig']>>({});
 
     const [unsavedChanges, setUnsavedChanges] = useState(false);
@@ -1333,58 +1641,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         data: { formula: '' },
         connections: []
     });
-    const [elements, setElements] = useState<CanvasElement[]>(() => (
+    // Render projection of the working graph. Never call these directly:
+    // every mutation goes through setElements / setConnections (user) or
+    // setElementsSystem / setConnectionsSystem (derived bookkeeping), defined
+    // below next to the undo/redo transaction logic.
+    const [elements, setElementsState] = useState<CanvasElement[]>(() => (
         shouldRenderMainBlock ? [createDefaultMainBlock()] : []
     ));
-
-    // ── Undo / Redo ────────────────────────────────────────────────────────────
-    type HistoryEntry = { elements: CanvasElement[]; connections: Connection[] };
-    const undoStackRef = useRef<HistoryEntry[]>([]);
-    const redoStackRef = useRef<HistoryEntry[]>([]);
-    const MAX_HISTORY = 50;
-
-    const pushHistory = (els: CanvasElement[], conns: Connection[]) => {
-        undoStackRef.current = [
-            ...undoStackRef.current.slice(-MAX_HISTORY + 1),
-            { elements: JSON.parse(JSON.stringify(els)), connections: JSON.parse(JSON.stringify(conns)) },
-        ];
-        redoStackRef.current = [];
-    };
-
-    const handleUndo = () => {
-        if (undoStackRef.current.length === 0) return;
-        const current: HistoryEntry = {
-            elements: JSON.parse(JSON.stringify(elementsRef.current)),
-            connections: JSON.parse(JSON.stringify(connectionsRef.current)),
-        };
-        redoStackRef.current = [...redoStackRef.current, current];
-        const prev = undoStackRef.current[undoStackRef.current.length - 1];
-        undoStackRef.current = undoStackRef.current.slice(0, -1);
-        const restored = updateElementValueTypes(prev.elements, prev.connections);
-        setElements(restored);
-        elementsRef.current = restored;
-        setConnections(prev.connections);
-        connectionsRef.current = prev.connections;
-        markGraphDirty();
-    };
-
-    const handleRedo = () => {
-        if (redoStackRef.current.length === 0) return;
-        const current: HistoryEntry = {
-            elements: JSON.parse(JSON.stringify(elementsRef.current)),
-            connections: JSON.parse(JSON.stringify(connectionsRef.current)),
-        };
-        undoStackRef.current = [...undoStackRef.current, current];
-        const next = redoStackRef.current[redoStackRef.current.length - 1];
-        redoStackRef.current = redoStackRef.current.slice(0, -1);
-        const restored = updateElementValueTypes(next.elements, next.connections);
-        setElements(restored);
-        elementsRef.current = restored;
-        setConnections(next.connections);
-        connectionsRef.current = next.connections;
-        markGraphDirty();
-    };
-    // ───────────────────────────────────────────────────────────────────────────
     const [selected, setSelected] = useState<string | null>(shouldRenderMainBlock ? 'main-block' : null);
     const [draggedItem, setDraggedItem] = useState<TreeItem | null>(null);
     const [isPanning, setIsPanning] = useState(false);
@@ -1396,7 +1659,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [isConnecting, setIsConnecting] = useState(false);
     const [connectionStart, setConnectionStart] = useState<{elementId: string, type: 'input' | 'output', index: number} | null>(null);
     const [detectedElements, setDetectedElements] = useState<DetectedElement[]>([]);
-    const [connections, setConnections] = useState<Connection[]>([]);
+    // The "-- Element --" dropdown (detectedElements) is populated exclusively
+    // from wp.data's core/block-editor store (see the effect below) -- a
+    // Gutenberg-only API. In Elementor this store is never present, so that
+    // dropdown is permanently empty there and the Manual-ID toggle is a
+    // switch with only one working position -- confusing dead UI, not a
+    // real choice. Every shared Element-ID control skips straight to manual
+    // ID entry (no dropdown, no toggle) outside a real Gutenberg host.
+    const isGutenbergHost = typeof window !== 'undefined'
+        && typeof (window as any).wp?.data?.select === 'function'
+        && !!(window as any).wp.data.select('core/block-editor')?.getBlocks;
+    const [connections, setConnectionsState] = useState<Connection[]>([]);
     const [connectionInProgress, setConnectionInProgress] = useState<{
         elementId: string;
         pinType: 'input' | 'output';
@@ -1416,14 +1689,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [formula, setFormula] = useState<string>("");
     const [customNodeUi, setCustomNodeUi] = useState<CustomNodeUiState | null>(null);
     const [cssEditorNodeId, setCssEditorNodeId] = useState<string | null>(null);
+    // Raw HTML editor modal: the draft is applied on Done / closing, not per
+    // keystroke -- half-typed HTML would change the detected structure and
+    // drop wires mid-edit.
+    const [rawHtmlEditor, setRawHtmlEditor] = useState<{ nodeId: string; draft: string } | null>(null);
     const [templates, setTemplates] = useState<GraphTemplateItem[]>([]);
     const [selectedTemplateId, setSelectedTemplateId] = useState('');
     const [templateInfo, setTemplateInfo] = useState('');
     const [floatingNotice, setFloatingNotice] = useState('');
     const [isTemplateBusy, setIsTemplateBusy] = useState(false);
-    const [recoverableDraftState, setRecoverableDraftState] = useState<SavedState | null>(null);
-    const [pendingDraftRecovery, setPendingDraftRecovery] = useState<SavedState | null>(null);
-    const [showDraftRecoveryNotice, setShowDraftRecoveryNotice] = useState(false);
     const [calcFlowByNode, setCalcFlowByNode] = useState<Record<string, CalcFlowSegment[]>>({});
     // Element Property: live-detected properties per element-property node id.
     // Serializable only (no DOM refs). Populated by an effect from previewResolver.
@@ -1436,8 +1710,128 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [customPropertyDraft, setCustomPropertyDraft] = useState<Record<string, string>>({});
     // Get Children: live-detected direct children per get-children node id.
     const [elementChildrenDetections, setElementChildrenDetections] = useState<Record<string, DetectedChild[]>>({});
+    const [formFieldDetections, setFormFieldDetections] = useState<Record<string, DetectedFormField[]>>({});
+    // PRO Database nodes: admin-only schema (connections -> enabled tables ->
+    // columns), loaded lazily once a DB node is on the canvas.
+    const [dbConnections, setDbConnections] = useState<DbEditorConnection[] | null>(null);
+    const [dbConnectionsError, setDbConnectionsError] = useState('');
+    // Send Email "Send test email" diagnostic results, per node.
+    const [emailTests, setEmailTests] = useState<Record<string, { sending: boolean; ok?: boolean; text: string }>>({});
+    const [dbColumns, setDbColumns] = useState<Record<string, DbColumnInfo[] | 'loading' | 'error'>>({});
+    // Usable tables per "connection|database" (DB Table dropdown).
+    const [dbTables, setDbTables] = useState<Record<string, string[] | 'loading' | 'error'>>({});
+    const dbColumnsRef = useRef<Record<string, DbColumnInfo[] | 'loading' | 'error'>>({});
+    dbColumnsRef.current = dbColumns;
+    // Declared here, next to their state: node-height math (dbConfigContentHeight)
+    // calls them during render, long before the DB effects further down.
+    const getDbColumnsFor = (connectionId: string, database: string, table: string): DbColumnInfo[] => {
+        const entry = dbColumns[dbColumnsCacheKey(connectionId, database, table)];
+        return Array.isArray(entry) ? entry : [];
+    };
+
+    const getDbTablesFor = (connectionId: string, database: string): string[] | 'loading' | 'error' => {
+        const entry = dbTables[dbTablesCacheKey(connectionId, database)];
+        return entry === undefined ? 'loading' : entry;
+    };
+    // DB Connect "Refresh": re-reads connections, databases, tables and
+    // columns from the server, bypassing its schema cache (a database created
+    // in the hosting panel a moment ago shows up immediately).
+    const dbSchemaRefreshRef = useRef(false);
+    const refreshDbSchema = () => {
+        dbSchemaRefreshRef.current = true;
+        setDbTables({});
+        setDbColumns({});
+        setDbConnectionsError('');
+        setDbConnections(null);
+    };
+
+    // The row shape a DB Select returns, in the server's exact key order:
+    // chosen base columns (or all readable ones), then each join's columns
+    // keyed "table.column" (db-spec.php calcgraph_db_build_query). Unzip pin
+    // counts read it during render, so it must stay declared up here
+    // (tests/render_time_tdz_smoke.js).
+    const getDbSelectSchema = (selectId: string, graphElements: CanvasElement[], graphConnections: Connection[]): ArrayItemSchemaField[] => {
+        const chain = resolveDbChain(selectId, graphElements, graphConnections);
+        if (!chain.table) return [];
+        const columnsOf = (table: string): DbColumnInfo[] => {
+            const entry = dbColumnsRef.current[dbColumnsCacheKey(chain.connectionId, chain.database, table)];
+            return Array.isArray(entry) ? entry : [];
+        };
+        const byId = new Map(graphElements.map((el) => [el.id, el]));
+        const chainNodes = chain.chainIds.map((id) => byId.get(id)).filter((node): node is CanvasElement => Boolean(node));
+        const typeOf = (info: DbColumnInfo | undefined): ArrayItemSchemaField['type'] => (info && DB_NUMERIC_COLUMN_TYPES.has(info.type) ? 'number' : 'string');
+
+        let fields: string[] = [];
+        chainNodes.forEach((node) => {
+            if (node.type === 'db-fields') fields = Array.isArray(node.data?.dbFields) ? node.data.dbFields : [];
+        });
+        const baseColumns = columnsOf(chain.table);
+        const schema: ArrayItemSchemaField[] = (fields.length ? fields : baseColumns.map((column) => column.name)).map((name) => ({
+            id: name,
+            label: name,
+            type: typeOf(baseColumns.find((column) => column.name === name)),
+        }));
+        chainNodes.forEach((node) => {
+            if (node.type !== 'db-join') return;
+            const joinTable = String(node.data?.dbJoinTable || '');
+            const joinColumns = columnsOf(joinTable);
+            (Array.isArray(node.data?.dbJoinFields) ? node.data.dbJoinFields : []).forEach((name) => {
+                schema.push({ id: `${joinTable}.${name}`, label: `${joinTable}.${name}`, type: typeOf(joinColumns.find((column) => column.name === name)) });
+            });
+        });
+        return schema;
+    };
+
+    const dbSignedFingerprintsRef = useRef<Record<string, string>>({});
+    const dbSignTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+    // Op nodes whose signature request hasn't completed yet. While any is
+    // pending, saving is blocked (Elementor: Save Graph; Gutenberg: the post
+    // itself via lockPostSaving) -- otherwise a quick save would persist a
+    // stale signature and the node would be refused on the live page.
+    const dbPendingSignsRef = useRef<Set<string>>(new Set());
+    const [dbPendingSignCount, setDbPendingSignCount] = useState(0);
+    // Fingerprint each op node's signature request last COMPLETED for.
+    const dbCompletedFingerprintsRef = useRef<Record<string, string>>({});
+    // True when any DB op's current query shape hasn't finished being
+    // (re-)authorized yet -- checked against live refs at click time, so a
+    // Save in the very same tick as an edit is caught too.
+    const hasUnsignedDbChanges = (): boolean => {
+        if (!getDbApiConfig()?.canManage) return false;
+        const postId = resolveEditorPostId();
+        const current = elementsRef.current;
+        return current.some((op) => DB_OP_TYPES.has(op.type)
+            && dbCompletedFingerprintsRef.current[op.id] !== computeDbSignFingerprint(op.id, current, connectionsRef.current, postId, editorId));
+    };
+    const setDbSignPending = (opId: string, pending: boolean) => {
+        const set = dbPendingSignsRef.current;
+        if (pending) set.add(opId); else set.delete(opId);
+        setDbPendingSignCount(set.size);
+        try {
+            const dispatch = (window as any).wp?.data?.dispatch?.('core/editor');
+            if (dispatch?.lockPostSaving && dispatch?.unlockPostSaving) {
+                // One lock per logic block, so two blocks on a page never
+                // release each other's lock.
+                const lockName = `nodelogic-db-authorization-${editorId}`;
+                if (set.size > 0) dispatch.lockPostSaving(lockName);
+                else dispatch.unlockPostSaving(lockName);
+            }
+        } catch {
+            // Not the block editor.
+        }
+    };
+    useEffect(() => () => {
+        Object.values(dbSignTimersRef.current).forEach((timer) => clearTimeout(timer));
+        try {
+            (window as any).wp?.data?.dispatch?.('core/editor')?.unlockPostSaving?.(`nodelogic-db-authorization-${editorId}`);
+        } catch {
+            // Not the block editor.
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const canvasRef = useRef<HTMLDivElement>(null);
+    const editorRootRef = useRef<HTMLDivElement | null>(null);
+    const canvasMouseUpRef = useRef<(event: React.MouseEvent<HTMLElement>) => void>(() => {});
     const elementDragRef = useRef<{
         elementId: string;
         startX: number;
@@ -1462,6 +1856,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const customPropertyListExpandedRef = useRef<Set<string>>(customPropertyListExpanded);
     const elementChildrenDetectionsRef = useRef<Record<string, DetectedChild[]>>({});
     const elementChildrenDetectionSignatureRef = useRef('');
+    const formFieldDetectionsRef = useRef<Record<string, DetectedFormField[]>>({});
+    const formFieldDetectionSignatureRef = useRef('');
 
     const buttonStyle = {
         width: '100%',
@@ -1491,9 +1887,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const formulaRef = useRef(formula);
     const customNodeUiRef = useRef(customNodeUi);
     const hasInitializedRef = useRef(false);
+    // Host callbacks, always the latest (a host may pass new closures).
     const onStateChangeRef = useRef<GraphEditorProps['onStateChange']>(onStateChange);
+    onStateChangeRef.current = onStateChange;
+    const onPublishRef = useRef<GraphEditorProps['onPublish']>(onPublish);
+    onPublishRef.current = onPublish;
+    const onUnsavedChangeRef = useRef<GraphEditorProps['onUnsavedChange']>(onUnsavedChange);
+    onUnsavedChangeRef.current = onUnsavedChange;
+    const onFormulaChangeRef = useRef<GraphEditorProps['onFormulaChange']>(onFormulaChange);
+    onFormulaChangeRef.current = onFormulaChange;
+    const onHistoryLimitChangeRef = useRef<GraphEditorProps['onHistoryLimitChange']>(onHistoryLimitChange);
+    onHistoryLimitChangeRef.current = onHistoryLimitChange;
     const isStateLoadedRef = useRef(isStateLoaded);
-    const draftRecoveryCheckedRef = useRef(false);
     const previousElementsCountRef = useRef(elements.length);
     // Previous values for delta calculation
     const prevZoomRef = useRef(zoom);
@@ -1503,6 +1908,184 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const dragElementDeltaRef = useRef<{elementId: string; deltaX: number; deltaY: number} | null>(null);
     const zoomDeltaRef = useRef(1);
     const offsetDeltaRef = useRef({ x: 0, y: 0 });
+
+    // ── Working graph: single source of truth + undo/redo transactions ─────
+    //
+    // elementsRef / connectionsRef always hold the LATEST working graph (WORK);
+    // the React state is only its render projection. Every mutation goes
+    // through one of the setters below, which update the ref eagerly -- so a
+    // second mutation in the same tick, or one landing while another update is
+    // still pending render, never computes from a stale copy -- and classify it:
+    //   user   -> one undo checkpoint per user operation + WORK persistence
+    //   system -> derived bookkeeping (type inference, stale-pin pruning, DB
+    //             signatures, schema snapshots): no undo step, and it never
+    //             turns a clean graph into "unpublished changes" by itself.
+    type ElementsUpdate = CanvasElement[] | ((prev: CanvasElement[]) => CanvasElement[]);
+    type ConnectionsUpdate = Connection[] | ((prev: Connection[]) => Connection[]);
+    type UndoEntry = { elements: CanvasElement[]; connections: Connection[] };
+    const MAX_UNDO = 100;
+    // Repeated edits of the same field(s) within this window are one undo
+    // step (typing "Hello" is one step, not five).
+    const UNDO_COALESCE_MS = 1000;
+    const undoStackRef = useRef<UndoEntry[]>([]);
+    const redoStackRef = useRef<UndoEntry[]>([]);
+    // The open undo transaction. `tick` groups every mutation made by one
+    // synchronous handler (delete = drop wires + drop node) into one step.
+    const undoTxRef = useRef<{ key: string; lastAt: number; tick: number; checkNoop: boolean } | null>(null);
+    const undoTickRef = useRef(0);
+    const undoTickScheduledRef = useRef(false);
+    const changeCounterRef = useRef(0);
+    // A user mutation happened since the graph was last loaded / published.
+    const userTouchedRef = useRef(false);
+    // Assigned further down, once the persistence functions exist. 'soon' =
+    // a discrete structural edit (stored on the next tick); typing is
+    // debounced.
+    const schedulePersistRef = useRef<(origin: 'user' | 'system', pace?: 'soon' | 'debounced') => void>(() => {});
+
+    const cloneUndoEntry = (entry: UndoEntry): UndoEntry => ({
+        elements: JSON.parse(JSON.stringify(entry.elements || [])),
+        connections: JSON.parse(JSON.stringify(entry.connections || [])),
+    });
+
+    const bumpUndoRedoVersion = () => setUndoRedoVersion((version) => version + 1);
+
+    const pushUndoCheckpoint = (entry: UndoEntry) => {
+        undoStackRef.current = [...undoStackRef.current.slice(-(MAX_UNDO - 1)), cloneUndoEntry(entry)];
+        redoStackRef.current = [];
+        bumpUndoRedoVersion();
+    };
+
+    // Identifies WHAT a mutation touched, so repeated edits of the same field
+    // coalesce while anything structural (add/remove/move/wire) is its own step.
+    const describeElementsChange = (prev: CanvasElement[], next: CanvasElement[]): string => {
+        const unique = () => `#${++changeCounterRef.current}`;
+        if (prev.length !== next.length) return `structure${unique()}`;
+        const touched: string[] = [];
+        for (let index = 0; index < next.length; index++) {
+            const before = prev[index];
+            const after = next[index];
+            if (before === after) continue;
+            if (!before || !after || before.id !== after.id) return `structure${unique()}`;
+            if (before.x !== after.x || before.y !== after.y) return `move${unique()}`;
+            const beforeData = (before.data || {}) as Record<string, unknown>;
+            const afterData = (after.data || {}) as Record<string, unknown>;
+            const keys = Array.from(new Set([...Object.keys(beforeData), ...Object.keys(afterData)]))
+                .filter((key) => beforeData[key] !== afterData[key] && JSON.stringify(beforeData[key]) !== JSON.stringify(afterData[key]));
+            if (before.name !== after.name) keys.push('@name');
+            if (before.type !== after.type) keys.push('@type');
+            if (keys.length) touched.push(`${after.id}:${keys.sort().join(',')}`);
+        }
+        // Only derived fields (valueType) changed: not a user decision.
+        return touched.length ? `edit:${touched.join('|')}` : 'derived';
+    };
+
+    const endUndoTick = () => {
+        undoTickScheduledRef.current = false;
+        const tx = undoTxRef.current;
+        if (tx && tx.checkNoop && tx.tick === undoTickRef.current) {
+            tx.checkNoop = false;
+            // An operation that ended where it started (re-selecting the same
+            // option, a wire dragged off and back) leaves no empty undo step.
+            const top = undoStackRef.current[undoStackRef.current.length - 1];
+            if (top && canonicalGraphString(top as unknown as GraphContent) === canonicalGraphString({ elements: elementsRef.current, connections: connectionsRef.current } as unknown as GraphContent)) {
+                undoStackRef.current = undoStackRef.current.slice(0, -1);
+                undoTxRef.current = null;
+                bumpUndoRedoVersion();
+            }
+        }
+        undoTickRef.current += 1;
+    };
+
+    const recordUserMutation = (prevElements: CanvasElement[], prevConnections: Connection[], key: string) => {
+        const now = Date.now();
+        const tick = undoTickRef.current;
+        const tx = undoTxRef.current;
+        const sameOperation = tx !== null && tx.tick === tick;
+        // Re-dragging a wire = detach on mousedown + attach on mouseup: one step.
+        const wireRedrag = tx !== null && Boolean(connectionInProgressRef.current?.reconnectingConnection);
+        const typing = tx !== null && key.startsWith('edit:') && tx.key === key && now - tx.lastAt < UNDO_COALESCE_MS;
+        if (tx && (sameOperation || wireRedrag || typing)) {
+            tx.lastAt = now;
+            if (wireRedrag && tx.tick !== tick) tx.checkNoop = true;
+            tx.tick = tick;
+        } else {
+            pushUndoCheckpoint({ elements: prevElements, connections: prevConnections });
+            undoTxRef.current = { key, lastAt: now, tick, checkNoop: true };
+        }
+        if (!undoTickScheduledRef.current) {
+            undoTickScheduledRef.current = true;
+            Promise.resolve().then(endUndoTick);
+        }
+        userTouchedRef.current = true;
+    };
+
+    const applyElements = (update: ElementsUpdate, origin: 'user' | 'system') => {
+        const prevElements = elementsRef.current;
+        const prevConnections = connectionsRef.current;
+        const next = typeof update === 'function' ? update(prevElements) : update;
+        if (!Array.isArray(next) || next === prevElements) return;
+        let effectiveOrigin = origin;
+        let pace: 'soon' | 'debounced' = 'debounced';
+        if (origin === 'user') {
+            const key = describeElementsChange(prevElements, next);
+            if (key === 'derived') effectiveOrigin = 'system';
+            else recordUserMutation(prevElements, prevConnections, key);
+            if (!key.startsWith('edit:')) pace = 'soon';
+        }
+        elementsRef.current = next;
+        setElementsState(next);
+        schedulePersistRef.current(effectiveOrigin, pace);
+    };
+
+    const applyConnections = (update: ConnectionsUpdate, origin: 'user' | 'system') => {
+        const prevElements = elementsRef.current;
+        // Captured BEFORE the updater runs: a few updaters assign
+        // connectionsRef themselves.
+        const prevConnections = connectionsRef.current;
+        const next = typeof update === 'function' ? update(prevConnections) : update;
+        if (!Array.isArray(next) || next === prevConnections) return;
+        if (origin === 'user') recordUserMutation(prevElements, prevConnections, `structure#${++changeCounterRef.current}`);
+        connectionsRef.current = next;
+        setConnectionsState(next);
+        schedulePersistRef.current(origin, origin === 'user' ? 'soon' : 'debounced');
+    };
+
+    const setElements = (update: ElementsUpdate) => applyElements(update, 'user');
+    const setConnections = (update: ConnectionsUpdate) => applyConnections(update, 'user');
+    const setElementsSystem = (update: ElementsUpdate) => applyElements(update, 'system');
+    const setConnectionsSystem = (update: ConnectionsUpdate) => applyConnections(update, 'system');
+
+    const restoreUndoEntry = (entry: UndoEntry) => {
+        const restored = updateElementValueTypes(entry.elements, entry.connections);
+        setConnectionsSystem(entry.connections);
+        setElementsSystem(restored);
+        undoTxRef.current = null;
+        // Undo/redo are user actions on WORK.
+        userTouchedRef.current = true;
+        schedulePersistRef.current('user', 'soon');
+    };
+
+    const handleUndo = () => {
+        const stack = undoStackRef.current;
+        if (stack.length === 0) return;
+        const current = cloneUndoEntry({ elements: elementsRef.current, connections: connectionsRef.current });
+        const previous = stack[stack.length - 1];
+        undoStackRef.current = stack.slice(0, -1);
+        redoStackRef.current = [...redoStackRef.current, current];
+        restoreUndoEntry(previous);
+        bumpUndoRedoVersion();
+    };
+
+    const handleRedo = () => {
+        const stack = redoStackRef.current;
+        if (stack.length === 0) return;
+        const current = cloneUndoEntry({ elements: elementsRef.current, connections: connectionsRef.current });
+        const next = stack[stack.length - 1];
+        redoStackRef.current = stack.slice(0, -1);
+        undoStackRef.current = [...undoStackRef.current, current];
+        restoreUndoEntry(next);
+        bumpUndoRedoVersion();
+    };
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -1556,16 +2139,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const isNodeLockedForCurrentPlan = (_item: TreeItem) => false;
 
-    const syncConnectionsAndTypes = (nextConnections: Connection[], pushUndo = true) => {
-        if (pushUndo) pushHistory(elementsRef.current, connectionsRef.current);
-        setConnections(nextConnections);
-        connectionsRef.current = nextConnections;
-        setElements((prev) => updateElementValueTypes(prev, nextConnections));
+    const syncConnectionsAndTypes = (nextConnections: Connection[], origin: 'user' | 'system' = 'user') => {
+        if (origin === 'user') setConnections(nextConnections);
+        else setConnectionsSystem(nextConnections);
+        // Re-inferring value types is always derived bookkeeping.
+        setElementsSystem((prev) => updateElementValueTypes(prev, nextConnections));
     };
 
     const arePinTypesCompatible = (
         sourceType: CanvasElement['valueType'] | undefined,
-        targetAcceptedTypes: Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>
+        targetAcceptedTypes: Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'>
     ): boolean => {
         if (!sourceType) {
             return false;
@@ -1612,18 +2195,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         connectionInProgressRef.current = null;
     };
 
-    elementsRef.current = elements;
+    // elementsRef / connectionsRef / customNodeUiRef are written only by their
+    // setters (see "Working graph" above): re-assigning them from the render
+    // value here could roll them back to a stale projection.
     selectedRef.current = selected;
     detectedElementsRef.current = detectedElements;
     elementPropertyDetectionsRef.current = elementPropertyDetections;
+    formFieldDetectionsRef.current = formFieldDetections;
     customPropertyListExpandedRef.current = customPropertyListExpanded;
     elementChildrenDetectionsRef.current = elementChildrenDetections;
     zoomRef.current = zoom;
     offsetXRef.current = offsetX;
     offsetYRef.current = offsetY;
-    connectionsRef.current = connections;
     formulaRef.current = formula;
-    customNodeUiRef.current = customNodeUi;
     draggedItemRef.current = draggedItem;
     isDraggingFromSidebarRef.current = isDraggingFromSidebar;
     isDraggingCanvasElementRef.current = isDraggingCanvasElement;
@@ -1763,18 +2347,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return [];
     };
 
-    const pendingDraftLabel = React.useMemo(() => {
-        const draft = pendingDraftRecovery || recoverableDraftState || autosaveState || savedState;
-        if (!draft?.updatedAt) {
-            return '';
-        }
-        try {
-            return new Date(draft.updatedAt).toLocaleString();
-        } catch {
-            return '';
-        }
-    }, [pendingDraftRecovery, recoverableDraftState, autosaveState, savedState]);
-
     const getInputIndex = (inputName: string): number => {
         const match = /input(\d+)/.exec(String(inputName || ''));
         return match ? Number(match[1]) : -1;
@@ -1857,12 +2429,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const getAcceptedTypesForPin = (
         element: CanvasElement,
         inputIndex: number
-    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'> => {
+    ): Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'> => {
         if (element.type === 'event-processor' && inputIndex === 0) {
             return ['event'];
         }
         if (
-            (element.type === 'event-element' || element.type === 'event-id' || element.type === 'event-hover' || element.type === 'event-scroll')
+            (element.type === 'event-element' || element.type === 'event-id' || element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'form-data')
             && inputIndex === 0
         ) {
             return ['element'];
@@ -1886,9 +2458,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // its own Element ID control -- never conflicts with pin 0, which
             // stays the existing 'action' attach-to-parent slot.
             if (element.type === 'action-event' && inputIndex === 1) return ['element'];
-            if (element.type === 'action-required') return ['boolean'];
+            if (element.type === 'action-required' || element.type === 'action-if') return ['boolean'];
             if (element.type === 'action-min' || element.type === 'action-max' || element.type === 'action-length') return ['number'];
             return ['string'];
+        }
+
+        // Database nodes: input0 is always the Query chain (except DB Table,
+        // which starts it). Insert/Update have one value pin per chosen
+        // column, then the Trigger event last.
+        if (element.type === 'db-table') {
+            return ['dbconn'];
+        }
+        if (element.type === 'db-fields' || element.type === 'db-join' || element.type === 'db-sort') {
+            return ['query'];
+        }
+        if (element.type === 'db-filter') {
+            return inputIndex === 0 ? ['query'] : ['string', 'number', 'boolean', 'element', 'array'];
+        }
+        if (element.type === 'db-select') {
+            return inputIndex === 0 ? ['query'] : ['number'];
+        }
+        if (element.type === 'db-insert' || element.type === 'db-update') {
+            if (inputIndex === 0) return ['query'];
+            const columnCount = Array.isArray(element.data?.dbColumns) ? element.data.dbColumns.length : 0;
+            return inputIndex <= columnCount ? ['string', 'number', 'boolean', 'element'] : ['event'];
+        }
+        if (element.type === 'db-delete') {
+            return inputIndex === 0 ? ['query'] : ['event'];
         }
 
         if (element.type === 'custom-node') {
@@ -1920,7 +2516,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 ['boolean'],
                 ['css', 'string'],
             ];
-            return (outputAccepted[valueIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
+            // An element as the value is mounted inside the target (Raw HTML,
+            // Clone Element...). Not for custom-node label slots.
+            if (!customNodeMode && valueIndex === 0) {
+                return [...outputAccepted[0], 'element'];
+            }
+            return (outputAccepted[valueIndex] || ['number']) as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'>;
         }
 
         if (element.type === 'main') {
@@ -1985,6 +2586,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'api-list-mapper') {
             return ['zip'];
         }
+        if (element.type === 'send-email') {
+            return inputIndex === 3 ? ['event'] : ['string'];
+        }
 
         if (element.type === 'chart-data') {
             return inputIndex === 0 ? ['string'] : ['number'];
@@ -1995,8 +2599,29 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'get-children') {
             return ['element'];
         }
+        if (element.type === 'raw-html') {
+            // One pin per checked slot of the HTML structure.
+            const slot = selectedRawHtmlSlots(analyzeRawHtmlCached(String(element.data?.rawHtml || '')).slots, element.data?.rawHtmlSlots)[inputIndex];
+            if (!slot) return ['string', 'number'];
+            if (slot.type === 'color') return ['color', 'string'];
+            if (slot.type === 'boolean') return ['boolean', 'string', 'number'];
+            return ['string', 'number', 'boolean'];
+        }
+        if (element.type === 'set-parent') {
+            return inputIndex === 2 ? ['event'] : ['element'];
+        }
+        if (element.type === 'clone-element') {
+            return inputIndex === 1 ? ['event'] : ['element'];
+        }
+        if (element.type === 'elements-by-class') {
+            return inputIndex === 0 ? ['string'] : ['element'];
+        }
+        if (DEBUG_NODE_TYPES.has(element.type)) {
+            // Value accepts anything; Trigger is an event.
+            return inputIndex === 1 ? ['event'] : ['number', 'string', 'boolean', 'color', 'zip', 'css', 'css-unit', 'array', 'element', 'event'];
+        }
 
-        const acceptedByIndex: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>>> = {
+        const acceptedByIndex: Record<string, Array<Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'>>> = {
             calculation: [['number']],
             element: [],
             condition: [
@@ -2056,6 +2681,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'number-parse': [['string']],
             'number-to-base': [['number']],
             'multi-concat': [['string']],
+            'object-build': [['number', 'string', 'boolean', 'color', 'zip', 'case', 'array']],
+            'json-body': [],
             'css-unit': [['number', 'string']],
             'css-margin': [['number', 'string'], ['number', 'string'], ['number', 'string'], ['number', 'string']],
             'css-padding': [['number', 'string'], ['number', 'string'], ['number', 'string'], ['number', 'string']],
@@ -2070,6 +2697,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             and: [['boolean'], ['boolean']],
             or: [['boolean'], ['boolean']],
             fallback: [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array']],
+            'fallback-event': [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number']],
             clamp: [['number'], ['number'], ['number']],
             'min-val': [['number'], ['number']],
             'max-val': [['number'], ['number']],
@@ -2088,6 +2716,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'memory-increment': [['boolean']],
             'memory-array-append': [['number', 'string', 'boolean', 'color', 'zip', 'css'], ['boolean']],
             'memory-array-remove': [['number', 'string', 'boolean', 'color', 'zip', 'css'], ['boolean']],
+            'memory-array-read': [],
             'event-element': [],
             'event-id': [],
             'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
@@ -2120,6 +2749,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'event-page-load': [],
             'event-timer': [],
             'event-custom': [],
+            // Event combinators: two Event inputs each
+            'event-or': [['event'], ['event']],
+            'event-and': [['event'], ['event']],
+            // Action -> its trigger is an Event VALUE (a plain event, or an
+            // event-or/event-and combinator), not a DOM eventType + target
+            // like action-event
+            'action-event-gate': [['action'], ['event']],
             'node-branch': [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
             'switch-branch': [['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['case']],
             // New array nodes. `element` is a first-class array item type
@@ -2135,12 +2771,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'array-length': [['array']],
             'array-merge': [['array'], ['array']],
             'array-unique': [['array']],
+            // form-data's only pin (Element, input0) is handled by the
+            // Element-pin special case above, not this table.
+            'send-email': [['string'], ['string'], ['string'], ['event']],
         };
 
         const accepted = acceptedByIndex[element.type] || [];
         const resolved = accepted[inputIndex] || accepted[accepted.length - 1] || ['number'];
-        return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element'>;
+        return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'>;
     };
+
+    // Used by getInputCount, which node-height math calls during render.
+    const isMainInputType = INPUT_MAIN_TYPES.has(mainElementType);
 
     const getInputCount = (element: CanvasElement): number => {
         const incomingConnections = connectionsByTargetElement.get(element.id) || [];
@@ -2152,6 +2794,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'element-ref') return 0;
         if (element.type === 'element-property') return 1;
         if (element.type === 'get-children') return 1;
+        if (element.type === 'raw-html') {
+            return selectedRawHtmlSlots(analyzeRawHtmlCached(String(element.data?.rawHtml || '')).slots, element.data?.rawHtmlSlots).length;
+        }
+        if (element.type === 'set-parent') return 3; // Element, Parent, Trigger
+        if (element.type === 'clone-element') return 2; // Element, Trigger
+        if (element.type === 'elements-by-class') return 2; // Class, Scope
+        if (DEBUG_NODE_TYPES.has(element.type)) return 2; // Value, Trigger
         if (element.type === 'memory-read-number') return 0;
         if (element.type === 'memory-read-string') return 0;
         if (element.type === 'memory-read-boolean') return 0;
@@ -2163,6 +2812,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'memory-increment') return 1; // optional Trigger input pin
         if (element.type === 'memory-array-append') return 2; // Item, optional Trigger
         if (element.type === 'memory-array-remove') return 2; // Item, optional Trigger
+        if (element.type === 'memory-array-read') return 0;
         if (element.type === 'event-element') return 1; // optional Element input pin
         if (element.type === 'event-id') return 1; // optional Element input pin
         if (element.type === 'event-processor') return 2;
@@ -2170,6 +2820,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'and') return 2;
         if (element.type === 'or') return 2;
         if (element.type === 'fallback') return 2;
+        if (element.type === 'fallback-event') return 3; // Main, Fallback, Hold (ms)
         if (element.type === 'condition') return 2;
         if (element.type === 'regex') return 1;
         if (element.type === 'concat') return 2;
@@ -2260,7 +2911,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return isMainInputType ? 4 : 3;
         }
         if (element.type === 'constant' || element.type === 'variable') return 0;
-        if (element.type === 'output') return outputPropertyNames.length + (customNodeMode ? 0 : 1);
+        // Non-custom-node mode: Element target pin + Value pin only now.
+        // Background/Color/Disabled/CSS were removed -- that functionality
+        // is provided entirely by the Action System (action-set-style/
+        // action-enable/action-disable) wired through the Output's own
+        // "actions" fan-out (its output0 pin, unrelated to this input
+        // count). Value is kept: it's the primary mechanism the whole
+        // product uses for the common "compute a value, display it" case
+        // with no event involved at all, not a rarely-used legacy pin.
+        // Custom-node mode is untouched: those 5 slots are still the
+        // editable zip-output field labels for the (separate, PRO)
+        // custom-node-template feature.
+        if (element.type === 'output') return customNodeMode ? outputPropertyNames.length : 2;
         if (element.type === 'clamp') return 3;
         if (element.type === 'min-val' || element.type === 'max-val') return 2;
         if (element.type === 'string-split') return 1;
@@ -2272,6 +2934,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'multi-concat') {
             return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
         }
+        if (element.type === 'object-build') {
+            return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(1, Math.min(8, Number(element.data?.inputCount))) : 3;
+        }
+        if (element.type === 'json-body') return 0;
         if (element.type === 'css-join') {
             return Number.isFinite(Number(element.data?.inputCount)) ? Math.max(2, Math.min(8, Number(element.data.inputCount))) : 3;
         }
@@ -2312,12 +2978,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'action-notify') return 2;
         if (element.type === 'action-redirect') return 2;
         if (element.type === 'action-trigger-event') return 2;
+        // Action -> its trigger is a wired Event VALUE, not a DOM event type
+        if (element.type === 'action-event-gate') return 2; // action + Trigger event
         // New event nodes
         if (element.type === 'event-hover') return 1; // optional Element input pin
         if (element.type === 'event-scroll') return 1; // optional Element input pin
         if (element.type === 'event-page-load') return 0;
         if (element.type === 'event-timer') return 0;
         if (element.type === 'event-custom') return 0;
+        // Event combinators: two Event inputs each
+        if (element.type === 'event-or') return 2;
+        if (element.type === 'event-and') return 2;
         // New array nodes
         if (element.type === 'array-map') return 2;        // array + formula/value
         if (element.type === 'array-filter') return 2;     // array + condition
@@ -2335,6 +3006,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'api-status') return 2; // URL, optional Body
         if (element.type === 'api-field') return 2;
         if (element.type === 'api-list-mapper') return 1;
+        if (element.type === 'form-data') return 1; // optional Element input pin (the <form>)
+        if (element.type === 'send-email') return 4; // Recipient, Subject, Message, Trigger
+        if (element.type === 'db-connect') return 0;
+        if (element.type === 'db-table') return 1; // Connection (from DB Connect)
+        if (element.type === 'db-fields' || element.type === 'db-join' || element.type === 'db-sort') return 1; // Query
+        if (element.type === 'db-filter') return 2; // Query, Value
+        if (element.type === 'db-select') return 3; // Query, Limit, Offset
+        if (element.type === 'db-insert' || element.type === 'db-update') {
+            // Query + one value pin per chosen column + Trigger
+            return 2 + (Array.isArray(element.data?.dbColumns) ? element.data.dbColumns.length : 0);
+        }
+        if (element.type === 'db-delete') return 2; // Query, Trigger
         if (element.type === 'chart-data') return 2;
         if (element.type === 'operator' || element.type === 'comparison' || element.type === 'logic') return 2;
         return 1;
@@ -2386,10 +3069,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const getGetChildrenDetectedCount = (nodeId: string): number =>
         getGetChildrenDetectedChildren(nodeId).length;
 
+    // ── Form Data helper (live-detected form fields, one output pin each) ──────
+    const getAutoDetectedFormFields = (nodeId: string): DetectedFormField[] =>
+        formFieldDetectionsRef.current[nodeId] || [];
+
     // Nodes whose output pin count is dynamic (mode / selection / live detection).
     const DYNAMIC_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
         'element-property',
         'get-children',
+        'unzip',
     ] as CanvasElement['type'][]);
 
     // Nodes whose output pin *type* (array vs element) can flip on a config
@@ -2397,6 +3085,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     // keeps count-only pruning (its scalar type is lenient by design).
     const TYPE_FLIP_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
         'get-children',
+        'unzip',
     ] as CanvasElement['type'][]);
 
     // Drop connections that originate from a dynamic-output node when, after a
@@ -2425,8 +3114,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 10
             );
             if (!Number.isFinite(outputIndex) || outputIndex < 0) return true;
+            if (sourceElement.type === 'unzip' && isUnzipRemapPending(sourceElement)) return true;
+            // Unknown is not "changed": never drop a wire because the schema it
+            // depends on has not finished loading (or failed to load).
+            if (sourceElement.type === 'unzip' && isUnzipDbSchemaPending(sourceElement)) return true;
             if (outputIndex >= getOutputCount(sourceElement)) return false;
             if (!TYPE_FLIP_OUTPUT_NODE_TYPES.has(sourceElement.type)) return true;
+            // An Unzip whose schema is unknown right now (no live detection,
+            // no snapshot -- e.g. a graph saved before snapshots existed,
+            // opened without the form in the preview) reports a placeholder
+            // 'number' type; that must not be treated as a real type change
+            // that "invalidates" its existing wires.
+            if (sourceElement.type === 'unzip' && !getUnzipKnownSchema(sourceElement)) {
+                const unzipSource = resolveInput0Source(sourceElement);
+                if (unzipSource && isUnzipSnapshotSource(unzipSource.source.type, unzipSource.outputIndex)) {
+                    return true;
+                }
+            }
             const targetElement = byId.get(connection.toId);
             if (!targetElement) return true;
             const targetInputIndex = getInputIndex(connection.toInput);
@@ -2468,7 +3172,211 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 readGetChildrenReturnAs(element.data) === 'child'
             );
         }
+        // Unzip's schema is only live-detected (and thus at risk of a
+        // transient 0 on a headless save) when it's unpacking a Form Data
+        // node's Data output -- the ordinary custom-node-schema path already
+        // persists customOutputSchema once and isn't detection-driven.
+        if (element.type === 'unzip') {
+            return !Array.isArray(element.data?.customOutputSchema) || element.data.customOutputSchema.length === 0;
+        }
         return false;
+    };
+
+    // Resolves what a node's input0 pin is wired FROM -- its source element
+    // AND which of the source's own output pins, or null when unwired. A
+    // small, broadly-accessible helper for the height/pin-count functions
+    // defined up here, which run long before the compiler's own
+    // (differently-scoped) getConnectionForInput.
+    const resolveInput0Source = (element: CanvasElement): { source: CanvasElement; outputIndex: number } | null => {
+        const connection = connectionsRef.current.find(
+            (candidate) => candidate.toId === element.id && candidate.toInput === 'input0'
+        );
+        if (!connection) return null;
+        const source = elementsRef.current.find((candidate) => candidate.id === connection.fromId);
+        if (!source) return null;
+        const outputIndex = Number.parseInt(String(connection.fromOutput || '').replace(/^output/i, ''), 10);
+        return { source, outputIndex: Number.isFinite(outputIndex) ? outputIndex : 0 };
+    };
+
+    // Unzip's per-field schema when its input0 traces back to a node whose
+    // zip output has a KNOWN field layout -- one entry per field, named by
+    // the field's real id (not a positional o0/field-1 convention key) --
+    // instead of Unzip's original single-value-by-index design, which only
+    // ever worked for a custom-node's own declared, positionally-keyed zip
+    // shape. Two kinds of "known" here:
+    //   - form-data (its Data/output0 only): LIVE-detected form fields,
+    //     nested one level under `.values` in the runtime object.
+    //   - send-email / api-status (their one zip output): a FIXED, static
+    //     field list matching their runtime return shape exactly (see
+    //     __nodeSendEmail / __nodeApiStatus in frontend.js) -- these never
+    //     need live detection, the shape never changes.
+    // `nestedUnder`, when set, is the one property name the compiler must
+    // read through before indexing by field id (see the 'unzip' compiler
+    // case) -- unset means the fields sit directly on the zip value itself.
+    // DB Select whose Rows feed this For Each (following array ops that keep
+    // the items as they are), or ''.
+    const resolveForEachDbSelectId = (forEachId: string): string => {
+        const ITEM_PRESERVING = new Set(['array-filter', 'array-sort', 'array-remove-index', 'array-unique', 'array-pop', 'array-push', 'array-merge', 'array-replace-index']);
+        let nodeId = forEachId;
+        for (let hop = 0; hop < 12; hop++) {
+            const conn = connectionsRef.current.find((c) => c.toId === nodeId && c.toInput === 'input0');
+            if (!conn) return '';
+            const source = elementsRef.current.find((e) => e.id === conn.fromId);
+            if (!source) return '';
+            // (pin parsed inline: this runs during render, above parsePinIndex)
+            if (source.type === 'db-select') return (Number.parseInt(String(conn.fromOutput || '').replace(/^output/i, ''), 10) || 0) === 0 ? source.id : '';
+            if (!ITEM_PRESERVING.has(source.type)) return '';
+            nodeId = source.id;
+        }
+        return '';
+    };
+
+    const getUnzipSchemaForSource = (
+        sourceType: CanvasElement['type'] | undefined,
+        sourceId: string | undefined,
+        sourceOutputIndex: number
+    ): { fields: ArrayItemSchemaField[]; nestedUnder?: string } | null => {
+        if (sourceType === 'form-data' && sourceOutputIndex === 0 && sourceId) {
+            const fields: ArrayItemSchemaField[] = getAutoDetectedFormFields(sourceId).map((field) => ({
+                id: field.name,
+                label: field.name,
+                type: field.type === 'boolean' ? 'boolean' : field.type === 'array' ? 'zip' : 'string',
+            }));
+            return fields.length > 0 ? { fields, nestedUnder: 'values' } : null;
+        }
+        if (sourceType === 'send-email' && sourceOutputIndex === 0) {
+            return {
+                fields: [
+                    { id: 'sending', label: 'Sending', type: 'boolean' },
+                    { id: 'ok', label: 'Ok', type: 'boolean' },
+                    { id: 'error', label: 'Error', type: 'string' },
+                ],
+            };
+        }
+        if (sourceType === 'db-select' && sourceOutputIndex === 1) {
+            const fields = getDbSelectSchema(String(sourceId || ''), elementsRef.current, connectionsRef.current);
+            return fields.length > 0 ? { fields } : null;
+        }
+        if (sourceType === 'array-for-each' && sourceOutputIndex === 0 && sourceId) {
+            // The loop item of a For Each over DB Select's Rows (directly or
+            // through item-preserving array ops) is one row: its columns.
+            const selectId = resolveForEachDbSelectId(sourceId);
+            if (!selectId) return null;
+            const fields = getDbSelectSchema(selectId, elementsRef.current, connectionsRef.current);
+            return fields.length > 0 ? { fields } : null;
+        }
+        if (sourceType === 'db-select' && sourceOutputIndex === 3) {
+            return {
+                fields: [
+                    { id: 'ok', label: 'Ok', type: 'boolean' },
+                    { id: 'loading', label: 'Loading', type: 'boolean' },
+                    { id: 'error', label: 'Error', type: 'string' },
+                    { id: 'count', label: 'Count', type: 'number' },
+                ],
+            };
+        }
+        if ((sourceType === 'db-insert' || sourceType === 'db-update' || sourceType === 'db-delete') && sourceOutputIndex === 0) {
+            return {
+                fields: [
+                    { id: 'sending', label: 'Sending', type: 'boolean' },
+                    { id: 'ok', label: 'Ok', type: 'boolean' },
+                    { id: 'error', label: 'Error', type: 'string' },
+                    { id: 'affectedRows', label: 'Affected Rows', type: 'number' },
+                    { id: 'insertId', label: 'Insert ID', type: 'number' },
+                ],
+            };
+        }
+        if (sourceType === 'api-status' && sourceOutputIndex === 0) {
+            return {
+                fields: [
+                    { id: 'ok', label: 'Ok', type: 'boolean' },
+                    { id: 'status', label: 'Status', type: 'number' },
+                    { id: 'statusText', label: 'Status Text', type: 'string' },
+                    { id: 'error', label: 'Error', type: 'string' },
+                    { id: 'loading', label: 'Loading', type: 'boolean' },
+                ],
+            };
+        }
+        return null;
+    };
+
+    // Sources whose field layout is only known through LIVE detection (form
+    // fields in the preview, DB columns fetched asynchronously). Unzip keeps a
+    // snapshot of it so its pins, pin types, wires and compiled formula don't
+    // collapse whenever that detection is momentarily unavailable -- editor
+    // just opened, Elementor without its preview, a save in between.
+    const isUnzipSnapshotSource = (sourceType: CanvasElement['type'] | undefined, outputIndex: number): boolean =>
+        (sourceType === 'form-data' && outputIndex === 0)
+        || (sourceType === 'db-select' && outputIndex === 1)
+        || (sourceType === 'array-for-each' && outputIndex === 0);
+
+    // An Unzip's live field list differs from its snapshot (e.g. DB Fields
+    // changed which columns a row has): its wires are about to be moved to
+    // their fields' new pins by the snapshot effect -- until then nothing
+    // may prune them by their stale pin index.
+    // A DB-backed Unzip's pin TYPES come from column metadata that arrives
+    // asynchronously (and can fail). Until every table of its query chain is
+    // loaded, those columns read as a placeholder 'string' -- which must never
+    // be mistaken for a real type change that invalidates (prunes) its wires.
+    const isUnzipDbSchemaPending = (element: CanvasElement): boolean => {
+        const resolved = resolveInput0Source(element);
+        if (!resolved) return false;
+        let selectId = '';
+        if (resolved.source.type === 'db-select' && resolved.outputIndex === 1) selectId = resolved.source.id;
+        else if (resolved.source.type === 'array-for-each' && resolved.outputIndex === 0) selectId = resolveForEachDbSelectId(resolved.source.id);
+        if (!selectId) return false;
+        const chain = resolveDbChain(selectId, elementsRef.current, connectionsRef.current);
+        if (!chain.table) return false;
+        const byId = new Map(elementsRef.current.map((node) => [node.id, node]));
+        const tables = [chain.table, ...chain.chainIds
+            .map((id) => byId.get(id))
+            .filter((node): node is CanvasElement => Boolean(node) && node!.type === 'db-join')
+            .map((node) => String(node.data?.dbJoinTable || ''))
+            .filter(Boolean)];
+        return tables.some((table) => !Array.isArray(dbColumnsRef.current[dbColumnsCacheKey(chain.connectionId, chain.database, table)]));
+    };
+
+    const isUnzipRemapPending = (element: CanvasElement): boolean => {
+        const snapshot = element.data?.unzipSchemaSnapshot;
+        if (!snapshot || !Array.isArray(snapshot.fields)) return false;
+        const resolved = resolveInput0Source(element);
+        if (!resolved || snapshot.sourceId !== resolved.source.id || snapshot.sourceOutputIndex !== resolved.outputIndex) return false;
+        const live = getUnzipSchemaForSource(resolved.source.type, resolved.source.id, resolved.outputIndex);
+        if (!live) return false;
+        return live.fields.map((field) => field.id).join('\u0001') !== snapshot.fields.map((field) => field.id).join('\u0001');
+    };
+
+    // Live schema when it can be detected right now; otherwise the snapshot
+    // persisted on this Unzip for the SAME source node + output pin.
+    const resolveUnzipSchema = (
+        element: CanvasElement,
+        sourceType: CanvasElement['type'] | undefined,
+        sourceId: string | undefined,
+        sourceOutputIndex: number
+    ): { fields: ArrayItemSchemaField[]; nestedUnder?: string } | null => {
+        const live = getUnzipSchemaForSource(sourceType, sourceId, sourceOutputIndex);
+        if (live) return live;
+        const snapshot = element.data?.unzipSchemaSnapshot;
+        if (
+            snapshot
+            && isUnzipSnapshotSource(sourceType, sourceOutputIndex)
+            && snapshot.sourceId === sourceId
+            && snapshot.sourceOutputIndex === sourceOutputIndex
+            && Array.isArray(snapshot.fields)
+            && snapshot.fields.length > 0
+        ) {
+            return { fields: snapshot.fields, nestedUnder: snapshot.nestedUnder };
+        }
+        return null;
+    };
+
+    const getUnzipKnownSchema = (element: CanvasElement): { fields: ArrayItemSchemaField[]; nestedUnder?: string } | null => {
+        if (Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0) {
+            return null; // an explicit/persisted schema always wins
+        }
+        const resolved = resolveInput0Source(element);
+        if (!resolved) return null;
+        return resolveUnzipSchema(element, resolved.source.type, resolved.source.id, resolved.outputIndex);
     };
 
     const getOutputCount = (element: CanvasElement): number => {
@@ -2478,6 +3386,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 ? Math.max(base, connectedOutputPinFloor(element.id))
                 : base;
         }
+        if (element.type === 'clone-element' || element.type === 'elements-by-class') return 2;
         if (element.type === 'get-children') {
             const base = getChildrenOutputCount(element.data, getGetChildrenDetectedCount(element.id));
             return isDetectionDrivenOutputCount(element)
@@ -2508,6 +3417,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-increment':
             case 'memory-array-append':
             case 'memory-array-remove':
+            case 'memory-array-read':
             case 'event-element':
             case 'event-id':
             case 'event-processor':
@@ -2544,6 +3454,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'number-parse':
             case 'number-to-base':
             case 'multi-concat':
+            case 'object-build':
+            case 'json-body':
             case 'css-unit':
             case 'css-margin':
             case 'css-padding':
@@ -2563,12 +3475,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return Math.max(1, schema.length);
                 }
                 return 1;
-            }
-            case 'unzip': {
-                const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
-                    ? element.data.customOutputSchema
-                    : getCustomNodeOutputSchema(element.data?.customNodeId);
-                return Math.max(1, schema.length);
             }
             case 'array':
                 return 1;
@@ -2605,7 +3511,36 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'event-page-load':
             case 'event-timer':
             case 'event-custom':
+            case 'event-or':
+            case 'event-and':
                 return 1;       // event output
+            case 'form-data':
+                return 2;       // Data (zip) + Submitted (event)
+            case 'send-email':
+                return 4;       // Status (zip), Sending / Sent / Failed (events)
+            case 'db-connect':
+            case 'db-table':
+            case 'db-fields':
+            case 'db-join':
+            case 'db-filter':
+            case 'db-sort':
+                return 1;       // Connection / Query
+            case 'db-select':
+                return 4;       // Rows, First Row, Count, Status
+            case 'db-insert':
+            case 'db-update':
+            case 'db-delete':
+                return 1;       // Status (zip)
+            case 'unzip': {
+                const knownSchema = getUnzipKnownSchema(element);
+                if (knownSchema) return Math.max(1, knownSchema.fields.length);
+                const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                    ? element.data.customOutputSchema
+                    : getCustomNodeOutputSchema(element.data?.customNodeId);
+                return isDetectionDrivenOutputCount(element)
+                    ? Math.max(Math.max(1, schema.length), connectedOutputPinFloor(element.id))
+                    : Math.max(1, schema.length);
+            }
             case 'image-from-link':
             case 'image-from-element':
             case 'api-request':
@@ -2616,6 +3551,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 1;
             case 'action-event':
             case 'action-block':
+            case 'action-event-gate':
                 return 1;
             case 'action-if':
                 return 2;
@@ -2652,11 +3588,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const getOutputPinType = (element: CanvasElement, index: number): CanvasElement['valueType'] => {
         if (element.type === 'unzip' || (element.type === 'custom-node' && !element.data?.zipOutput && !element.data?.customNodeTypeCarrier)) {
-            const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
-                ? element.data.customOutputSchema
-                : getCustomNodeOutputSchema(element.data?.customNodeId);
+            const schema = getUnzipKnownSchema(element)?.fields || (
+                Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                    ? element.data.customOutputSchema
+                    : getCustomNodeOutputSchema(element.data?.customNodeId)
+            );
             const pinType = schema[index]?.type;
-            if (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'case') {
+            if (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'case' || pinType === 'zip') {
                 return pinType;
             }
             return 'number';
@@ -2674,6 +3612,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-find') return index === 0 ? 'array' : 'number';
         if (element.type === 'array-contains') return 'boolean';
         if (element.type === 'array-length') return 'number';
+        if (element.type === 'raw-html' || element.type === 'set-parent') return 'element';
+        if (DEBUG_NODE_TYPES.has(element.type)) return element.valueType || 'string'; // pass-through
+        if (element.type === 'clone-element') return index === 1 ? 'array' : 'element';
+        if (element.type === 'elements-by-class') return index === 1 ? 'number' : 'array';
         if (element.type === 'get-children') {
             // Single, or Child return-as -> individual element pin(s).
             // Children return-as -> one array pin.
@@ -2686,7 +3628,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'switch-branch') {
             return element.valueType || 'number';
         }
-        if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom') return 'event';
+        if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom' || element.type === 'event-or' || element.type === 'event-and') return 'event';
         if (element.type === 'case-range' || element.type === 'case-value' || element.type === 'case-default') return 'case';
         if (element.type === 'element-ref') return 'element';
         if (element.type === 'element-property') {
@@ -2708,6 +3650,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return 'string';
         }
         if (element.type === 'api-list-mapper') return 'array';
+        if (element.type === 'form-data') return index === 1 ? 'event' : 'zip';
+        if (element.type === 'send-email') return index === 0 ? 'zip' : 'event';
+        if (element.type === 'db-connect') return 'dbconn';
+        if (element.type === 'db-table' || element.type === 'db-fields' || element.type === 'db-join' || element.type === 'db-filter' || element.type === 'db-sort') return 'query';
+        if (element.type === 'db-select') return (['array', 'zip', 'number', 'zip'] as const)[index] || 'zip';
+        if (element.type === 'db-insert' || element.type === 'db-update' || element.type === 'db-delete') return 'zip';
         if (element.type === 'chart-data') return 'zip';
         if (element.type === 'action-event'
             || element.type === 'action-block'
@@ -2733,9 +3681,201 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-notify'
             || element.type === 'action-redirect'
             || element.type === 'action-trigger-event'
+            || element.type === 'action-event-gate'
             || element.type === 'action-if') return 'action';
         if (element.type === 'output') return 'action';
         return element.valueType || 'number';
+    };
+
+    // ---- Config-area content height, in pixels, not an abstract row count ----
+    //
+    // A prior version of this file charged every "config row" a flat 34px +
+    // 8px gap unit — the SAME unit `.input-row`/`.label-row` pin rows use.
+    // That unit is CSS-locked correct for a pin row (style.css pins those
+    // classes to min-height:34px !important), but most config-UI bodies are
+    // bare <div>s with their OWN smaller gaps (3-4px, not 8px) — and, more
+    // importantly, a `ConfigFieldLabel` sitting above a control is an EXTRA
+    // text row the flat per-row unit never priced in at all. Charging a
+    // labeled control (label + control) the same 42px as a bare control
+    // silently undersizes the card by however tall the label actually is —
+    // which is also why object-build (1 label + N controls) was undersized
+    // specifically at low key counts, where there isn't enough of the
+    // (over-priced) per-key rows left over to absorb the deficit.
+    //
+    // Fix: compute each node's config-area pixel height directly from the
+    // SAME control/label counts its JSX actually renders (named constants
+    // below), instead of forcing it through the pin-row unit. `CTRL_H` is
+    // CSS-locked (`.input-control{height:32px!important}`) so it's exact;
+    // `LABEL_ROW_H`/`CHECKBOX_ROW_H` are NOT CSS-locked (their line-height
+    // depends on the host page's font stack, which this file cannot see or
+    // control) so they carry a deliberate few px of headroom rather than
+    // being computed to the exact assumed pixel — this is what was missing
+    // from the previous, razor-margin hand-tuned constants (css-unit,
+    // event-element, event-id) that kept reappearing as "still overflowing".
+    // Realistic structural estimates, not padded with hidden slack (any
+    // safety margin is added separately and explicitly — see
+    // NL_HEIGHT_SAFETY_MARGIN below — so the two concerns don't get
+    // conflated the way the old per-node hand-tuned constants did).
+    const NL_CTRL_H = 32; // .input-control height, CSS-locked (style.css: height:32px !important)
+    const NL_LABEL_ROW_H = 17; // ConfigFieldLabel: 11px font, ~14px line-box + 3px margin-bottom
+    const NL_CHECKBOX_ROW_H = 18; // a single checkbox+text row at the same 11px font size
+    // Line-height for that 11px text is NOT CSS-locked the way .input-control's
+    // dimensions are — it depends on the host page's inherited font stack,
+    // which this file cannot see or control. Any node whose height is decided
+    // by config content (rather than pin count) gets this added once, so a
+    // few px of real-world font-metric variance can't push it back into
+    // overflow the way the previous single-pixel-tuned constants did.
+    const NL_HEIGHT_SAFETY_MARGIN = 10;
+
+    // Mirrors renderDbNodeControls' flex column (gap 4px): labels, controls,
+    // column checklists (capped, scrollable) and hint lines. An authorization
+    // error hint can wrap to ~3 lines at 10px, so it's budgeted as such.
+    const dbConfigContentHeight = (element: CanvasElement): number => {
+        const HINT = 14;
+        const HINT_2 = 28;
+        const HINT_3 = 42;
+        const stack = (parts: number[]) => parts.reduce((sum, part) => sum + part, 0) + Math.max(0, parts.length - 1) * 4;
+        const api = getDbApiConfig();
+        if (!api || !api.canManage || dbConnectionsError || dbConnections === null) return HINT_2;
+        const chain = resolveDbChain(element.id, elements, connections);
+        const checklist = (count: number) => Math.min(DB_CHECKLIST_MAX_H, Math.max(1, count) * DB_CHECK_ROW_H + 10);
+        const tableColumns = (table: string) => getDbColumnsFor(chain.connectionId, chain.database, table).length;
+        const label = NL_LABEL_ROW_H;
+        const ctrl = NL_CTRL_H;
+        const policy = [label, ctrl, ...(element.data?.dbExecutePolicy === 'anyone' ? [HINT_2] : [])];
+        const signature = element.data?.dbSignatureError ? HINT_3 : HINT;
+        switch (element.type) {
+            case 'db-connect':
+                return stack([label, ctrl, label, ctrl, DB_SMALL_BUTTON_H, HINT_3]);
+            case 'db-table':
+                return chain.connectNode && chain.database ? stack([label, ctrl, HINT_3]) : HINT_2;
+            case 'db-fields':
+                return chain.table ? stack([label, checklist(tableColumns(chain.table)), HINT]) : HINT_2;
+            case 'db-join': {
+                if (!chain.table) return HINT_2;
+                const joinTable = String(element.data?.dbJoinTable || '');
+                return stack([label, ctrl, label, ctrl, label, ctrl, label, ctrl, label, checklist(joinTable ? tableColumns(joinTable) : 0)]);
+            }
+            case 'db-filter':
+                return chain.table ? stack([label, ctrl, label, ctrl, ctrl + 2]) : HINT_2;
+            case 'db-sort':
+                return chain.table ? stack([label, ctrl, label, ctrl]) : HINT_2;
+            case 'db-select':
+                return stack([label, ctrl, label, ctrl, ...policy, signature]);
+            case 'db-insert':
+            case 'db-update':
+                if (!chain.table) return HINT_2;
+                return stack([
+                    label,
+                    checklist(tableColumns(chain.table)),
+                    ...(element.type === 'db-update' ? [label, ctrl] : []),
+                    ...policy,
+                    HINT,
+                    signature,
+                ]);
+            case 'db-delete':
+                return stack([label, ctrl, ...policy, HINT_2, signature]);
+            default:
+                return 0;
+        }
+    };
+
+    // Mirrors renderDomNodeControls (flex column, gap 4px).
+    const domConfigContentHeight = (element: CanvasElement): number => {
+        const HINT = 14;
+        const HINT_2 = 28;
+        const HINT_3 = 42;
+        const stack = (parts: number[]) => parts.reduce((sum, part) => sum + part, 0) + Math.max(0, parts.length - 1) * 4;
+        const label = NL_LABEL_ROW_H;
+        const ctrl = NL_CTRL_H;
+        switch (element.type) {
+            case 'raw-html': {
+                const analysis = analyzeRawHtmlCached(String(element.data?.rawHtml || ''));
+                const rows = Math.min(DB_CHECKLIST_MAX_H, Math.max(1, analysis.slots.length) * DB_CHECK_ROW_H + 10);
+                return stack([RAW_HTML_BUTTON_H, label, rows, analysis.removed.length ? HINT_3 : HINT]);
+            }
+            case 'set-parent':
+            case 'clone-element':
+                return stack([label, ctrl, HINT_3]);
+            case 'elements-by-class': {
+                const classWired = connectionsRef.current.some((c) => c.toId === element.id && c.toInput === 'input0');
+                return classWired ? HINT_3 : stack([label, ctrl, HINT_3]);
+            }
+            case 'debug-console-log':
+            case 'debug-console-warn':
+            case 'debug-message-log':
+            case 'debug-message-warn':
+                return stack([label, ctrl, label, ctrl, HINT_3]);
+            default:
+                return HINT_2;
+        }
+    };
+
+    const getConfigContentHeight = (element: CanvasElement): number => {
+        if (DB_NODE_TYPES.has(element.type)) {
+            return dbConfigContentHeight(element);
+        }
+        if (PANEL_NODE_TYPES.has(element.type)) {
+            return domConfigContentHeight(element);
+        }
+        // "Base" label+select + "Minimum Digits" label+input, marginTop:4 between them
+        if (element.type === 'number-to-base') {
+            return NL_LABEL_ROW_H + NL_CTRL_H + 4 + NL_LABEL_ROW_H + NL_CTRL_H;
+        }
+        // "Base of the text" label + select
+        if (element.type === 'number-parse') {
+            return NL_LABEL_ROW_H + NL_CTRL_H;
+        }
+        // "Delimiter" label+input + "Part Index" label+input, gap:3px column
+        if (element.type === 'string-split') {
+            return NL_LABEL_ROW_H + NL_CTRL_H + 3 + NL_LABEL_ROW_H + NL_CTRL_H;
+        }
+        // find input + replace-with input, gap:3px column
+        if (element.type === 'string-replace') {
+            return NL_CTRL_H + 3 + NL_CTRL_H;
+        }
+        // "Number of Inputs to Join" label + input + hint line + one
+        // optional-property-name input per joined slot (gap:4px column,
+        // same layout as object-build's per-key inputs).
+        if (element.type === 'css-join') {
+            const joinCount = Math.max(2, Math.min(8, Number(element.data?.inputCount) || 3));
+            const hintLineHeight = 14;
+            return NL_LABEL_ROW_H + NL_CTRL_H + 4 + hintLineHeight + (joinCount + 1) * 4 + joinCount * NL_CTRL_H;
+        }
+        // "Value" label + value input, gap:4px + unit select
+        if (element.type === 'css-unit') {
+            return NL_LABEL_ROW_H + NL_CTRL_H + 4 + NL_CTRL_H;
+        }
+        // "Number of Keys" label + select, gap:4px, then N key-name inputs
+        // each with the same 4px gap before it (matches the actual flex
+        // column gap:4px wrapping all of it, per key count).
+        if (element.type === 'object-build') {
+            const keyCount = Math.max(1, getInputCount(element));
+            return NL_LABEL_ROW_H + NL_CTRL_H + (keyCount + 1) * 4 + keyCount * NL_CTRL_H;
+        }
+        // Three fallback inputs (Recipient/Subject/Message, 3px column gap)
+        // + a bordered checkbox row (marginTop4+paddingTop4+border1) whose
+        // label text is long enough to wrap onto ~2 lines at this node's width.
+        if (element.type === 'send-email') {
+            const base = (3 * NL_CTRL_H) + (2 * 3) + 4 + 4 + 1 + 30;
+            if (!getDbApiConfig()?.canManage) return base;
+            // + "Send test email" button, + its result (wraps to ~4 lines)
+            const test = emailTests[element.id];
+            // The result is 10px text in a ~150px column: ~24 chars per line.
+            return base + 4 + 26 + (test && !test.sending ? 3 + Math.ceil(test.text.length / 24) * 14 : 0);
+        }
+        // "Window (ms)" label + number input -- the only literal config
+        // field; its two Event pins (A/B) are already accounted for by the
+        // generic pin-row formula in getNodeHeight, which takes the max
+        // against this.
+        if (element.type === 'event-and') {
+            return NL_LABEL_ROW_H + NL_CTRL_H;
+        }
+        // "Only when event fires" checkbox row + a hint that can wrap to 2 lines.
+        if (element.type === 'event-processor') {
+            return NL_CHECKBOX_ROW_H + 3 + 28;
+        }
+        return 0;
     };
 
     const getNodeHeight = (element: CanvasElement): number => {
@@ -2746,46 +3886,78 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-sort') return element.data?.sortMode?.startsWith('custom') ? 120 : 86;
         // action-event: ID select(32) + event-type select(32) + separator + checkbox — z paddinigiem
         if (element.type === 'action-event') return 168;
-        if (element.type === 'action-length') return 168;
-        if (element.type === 'action-block') return 118;
-        if (element.type === 'action-if') return 150;
-        // event-element / event-id: dropdown/input(32) + event-type(32) + separator + checkbox(20)
-        if (element.type === 'event-element') return 168;
-        if (element.type === 'event-id') return 168;
-        // css-unit: value input(32) + unit select(32) + gaps
-        if (element.type === 'css-unit') return 120;
+        // action-length/action-block/action-if: plain pin-row nodes (their
+        // "config" -- Min/Max inputs, or a reverse-toggle checkbox -- renders
+        // INSIDE a normal pin row, not as separate body content) -- fall
+        // through to the generic pin-row formula below instead of a flat,
+        // consistently-over-estimated constant.
+        // event-element / event-id: target select/input(32) + gap4 + event-type
+        // select(32) + a bordered separator (marginTop8+paddingTop8+
+        // paddingBottom6+borderTop1+minHeight26, holding one checkbox row) --
+        // exact structure of that JSX block, computed instead of hand-tuned
+        // to a single pixel with no margin (which is why this kept coming
+        // back as "still overflowing" after being hand-tuned twice already).
+        if (element.type === 'event-element' || element.type === 'event-id') {
+            const separatorHeight = 8 + 8 + 6 + 1 + Math.max(26, NL_CHECKBOX_ROW_H);
+            return 44 + NL_CTRL_H + 4 + NL_CTRL_H + separatorHeight + NL_HEIGHT_SAFETY_MARGIN;
+        }
+        // css-unit: "Value" label + value input, gap4, unit select
+        if (element.type === 'css-unit') {
+            return 44 + getConfigContentHeight(element) + NL_HEIGHT_SAFETY_MARGIN;
+        }
         // element-ref: dropdown/input(32) + separator + checkbox(20)
         if (element.type === 'element-ref') return 128;
-        // element: dropdown/input(32) + separator(8) + checkbox(22) + gaps
-        if (element.type === 'element') return 174;
-        // element-property: Single keeps the original fixed height; All / Custom
-        // grow with the number of output pins and the config UI.
+        // element: ID control(32) + [Gutenberg only: bordered Manual-ID
+        // separator + checkbox row] -- computed instead of a flat constant
+        // that still assumed the now-removed eventType select.
+        if (element.type === 'element') {
+            const contentHeight = NL_CTRL_H + (isGutenbergHost ? 35 : 0);
+            return 2 + 2 + 16 + 8 + Math.max(contentHeight, 34) + 16 + NL_HEIGHT_SAFETY_MARGIN;
+        }
+        // element-property: the mode select and everything below it only
+        // ever render once a WIRED Element pin has resolved and its
+        // properties were detected (see the config-panel JSX) -- before
+        // that, the card holds only the hint line (the Element pin is the
+        // only element source -- no ID controls).
         if (element.type === 'element-property') {
-            if (getElementPropertyMode(element) === 'single') return 144;
+            const detectedKeys = getAutoDetectedPropertyKeys(element.id);
+            const hintLineHeight = 14; // 10px-font hint line, always shown
+            if (detectedKeys.length === 0) {
+                return 2 + 2 + 16 + 8 + Math.max(hintLineHeight, 34) + 16 + NL_HEIGHT_SAFETY_MARGIN;
+            }
             const outCount = getOutputCount(element);
             const outputsHeight = outCount > 0 ? outCount * 34 + (outCount - 1) * 8 : 22;
-            let configHeight = 12 + 32 + 8; // padding + mode select + gap
-            if (getElementPropertyMode(element) === 'all') {
-                configHeight += outCount > 0 ? Math.min(outCount, 5) * 16 + 22 : 34;
+            let configHeight = hintLineHeight + 8 + NL_CTRL_H; // hint + gap + mode select
+            if (getElementPropertyMode(element) === 'single') {
+                configHeight += NL_CTRL_H; // the "Property" select itself
+                if (String(element.data?.elementProperty || '').trim()) configHeight += 16; // "Type: X" line
+            } else if (getElementPropertyMode(element) === 'all') {
+                configHeight += Math.min(outCount, 5) * 16 + 22;
             } else {
                 configHeight += 26; // "Properties" toggle row
                 if (customPropertyListExpandedRef.current.has(element.id)) {
                     const selectedCount = (element.data?.elementPropertySelected || []).length;
-                    const detectedCount = getAutoDetectedPropertyKeys(element.id).length;
-                    const rows = Math.max(1, Math.min(8, Math.max(selectedCount, detectedCount)));
+                    const rows = Math.max(1, Math.min(8, Math.max(selectedCount, detectedKeys.length)));
                     configHeight += rows * 24 + 8;
                 }
                 configHeight += 34; // add-custom input
             }
-            return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16;
+            return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16 + NL_HEIGHT_SAFETY_MARGIN;
         }
         if (element.type === 'get-children') {
             const outCount = getOutputCount(element);
             const outputsHeight = outCount > 0 ? outCount * 34 + (outCount - 1) * 8 : 22;
             const mode = readGetChildrenMode(element.data);
-            let configHeight = 12 + 32 + 8; // padding + mode select + gap
+            const hintLineHeight = 14; // "Element: ..." line, always shown
+            if (getGetChildrenDetectedCount(element.id) === 0) {
+                // Nothing detected yet: only the hint line(s), no options.
+                const hasElementPin = connections.some((c) => c.toId === element.id && c.toInput === 'input0');
+                const contentHeight = hintLineHeight + (hasElementPin ? 5 + 28 : 0);
+                return 2 + 2 + 16 + 8 + Math.max(outputsHeight, contentHeight, 34) + 16 + NL_HEIGHT_SAFETY_MARGIN;
+            }
+            let configHeight = hintLineHeight + 5 + 12 + 32 + 8; // hint + padding + mode select + gap
             if (mode === 'single') {
-                configHeight += 34; // child <select> / index input
+                configHeight += 34; // child <select>
             } else {
                 configHeight += 18; // "N children detected" line
                 if (mode === 'custom') {
@@ -2805,39 +3977,72 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }
             return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16;
         }
-        if (element.type === 'action-required'
-            || element.type === 'action-min'
-            || element.type === 'action-max'
-            || element.type === 'action-regex'
-            || element.type === 'action-add-class'
-            || element.type === 'action-remove-class'
-            || element.type === 'action-toggle-class') return 144;
-        // New action nodes with 2 inputs (action + value)
-        if (element.type === 'action-set-text'
-            || element.type === 'action-set-html'
-            || element.type === 'action-set-value'
-            || element.type === 'action-set-attr'
-            || element.type === 'action-set-style') return 166;
-        // New action nodes with 1 input + selector UI
-        if (element.type === 'action-set-visibility') return 118;
-        if (element.type === 'action-enable'
-            || element.type === 'action-disable'
-            || element.type === 'action-focus'
-            || element.type === 'action-scroll-to') return 104;
-        if (element.type === 'action-trigger-event') return 136;
-        if (element.type === 'action-notify') return 136;
-        if (element.type === 'action-redirect') return 136;
-        // New event nodes
-        if (element.type === 'event-hover'
-            || element.type === 'event-scroll') return 164;
-        if (element.type === 'event-page-load') return 90;
-        if (element.type === 'event-timer') return 144;
-        if (element.type === 'event-custom') return 112;
+        // action-required/min/max/regex/add-class/remove-class/toggle-class,
+        // action-set-text/html/value/attr/style, action-set-visibility,
+        // action-enable/disable/focus/scroll-to, action-trigger-event/notify/
+        // redirect: every one of these is a plain two-column pin-row layout
+        // (NOT the special single-column layout below) -- their "config"
+        // control (a select/input/checkbox) renders INSIDE a normal pin row,
+        // never as separate body content below the pins. A flat per-type
+        // height here was consistently an OVER-estimate (too much empty
+        // space at the card's bottom, sometimes 40+px) because it duplicated
+        // what the generic pin-row formula at the end of this function
+        // already computes correctly from getInputCount/getOutputCount --
+        // removed so they fall through to it, same as most other node types.
+        if (element.type === 'event-hover' || element.type === 'event-scroll') {
+            // Element control(32) [+ hover-mode select(32), event-hover only]
+            // + the same bordered Manual-ID separator as event-element/id.
+            const separatorHeight = 8 + 8 + 6 + 1 + Math.max(26, NL_CHECKBOX_ROW_H);
+            const secondControl = element.type === 'event-hover' ? 4 + NL_CTRL_H : 0;
+            return 44 + NL_CTRL_H + secondControl + separatorHeight + NL_HEIGHT_SAFETY_MARGIN;
+        }
+        if (element.type === 'event-page-load') return 44 + NL_CTRL_H + NL_HEIGHT_SAFETY_MARGIN;
+        if (element.type === 'event-timer') {
+            // Interval number input(32) + gap4 + interval/timeout select(32), no separator.
+            return 44 + NL_CTRL_H + 4 + NL_CTRL_H + NL_HEIGHT_SAFETY_MARGIN;
+        }
+        if (element.type === 'event-custom') return 44 + NL_CTRL_H + NL_HEIGHT_SAFETY_MARGIN;
+        // form-data / send-email fall through to the generic pin+config
+        // formula below (see getConfigContentHeight) rather than a flat
+        // constant: form-data's pin count grows with detected form fields,
+        // and send-email's fixed 176 didn't leave room for its 4th (Trigger)
+        // input row, which rendered clipped at the card's bottom-left edge.
+        if (element.type === 'output' && !customNodeMode) {
+            // getInputCount('output') in non-custom-node mode is 2 (Element
+            // pin + Value) -- always, regardless of whether Value is wired;
+            // both still render their own row in .labels-column. A previous
+            // fix here only measured getOutputCount(element) (the output
+            // side, ~0-1 for a sink node) and never looked at getInputCount
+            // at all -- undersizing the card (worse still, back when this
+            // node had 6 input pins pre-Action-System-migration). Must take
+            // the max of both sides, same as the generic fallback below.
+            const outCount = getOutputCount(element);
+            const inCount = getInputCount(element);
+            const maxRows = Math.max(inCount, outCount);
+            const pinBasedHeight = 2 + 2 + 16 + 8 + (maxRows * 34) + (Math.max(0, maxRows - 1) * 8) + 16;
+            // Config body (target select/input + a bordered separator with
+            // up to 2 checkbox rows) needs this much regardless of pin count.
+            const controlsHeight = 2 + 2 + 16 + 8 + 96 + 16;
+            return Math.max(pinBasedHeight, controlsHeight);
+        }
         const inputCount = getInputCount(element);
         const outputCount = getOutputCount(element);
-        const maxRows = Math.max(inputCount, outputCount);
-        // border(2*2) + paddingTop(16) + header(~8) + rows*(rowHeight+gap) + paddingBottom(16)
-        return 2 + 2 + 16 + 8 + (maxRows * 34) + ((maxRows - 1) * 8) + 16;
+        const maxPinRows = Math.max(inputCount, outputCount);
+        // Pin rows use `.input-row`/`.label-row`/`.output-row`, CSS-locked to
+        // min-height:34px !important (style.css) with an 8px column gap --
+        // this part of the formula is exact, not estimated.
+        const pinContentHeight = maxPinRows > 0 ? (maxPinRows * 34) + ((maxPinRows - 1) * 8) : 0;
+        // Config content is a DIFFERENT, node-specific pixel total (see
+        // getConfigContentHeight above) -- it must never be folded into the
+        // pin-row unit (34px+8px), which is what silently undersized every
+        // node that mixed pins with labeled config controls previously.
+        const configContentHeight = getConfigContentHeight(element);
+        const contentHeight = Math.max(pinContentHeight, configContentHeight, 34);
+        // border(2*2) + paddingTop(16) + header(~8) + content + paddingBottom(16)
+        const base = 2 + 2 + 16 + 8 + contentHeight + 16;
+        // Only add the host-font safety margin when config content (not
+        // CSS-locked pin rows) is what's actually deciding the card's height.
+        return configContentHeight > pinContentHeight ? base + NL_HEIGHT_SAFETY_MARGIN : base;
     };
 
     const getNodeWidth = (element: CanvasElement): number => {
@@ -2848,7 +4053,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'css-text') return 240;
         if (element.type === 'array' || element.type.startsWith('array-')) return 220;
         if (element.type === 'chart-data' && element.data?.chartDataTypeCarrier) return 160;
-        if (element.type === 'action-event') return 280;
+        // Same config shape (target select/input + event-type select + Manual
+        // ID toggle) as element-ref/event-hover/event-id, all 220 -- 280 here
+        // was noticeably wider than every sibling with no matching content.
+        if (element.type === 'action-event') return 220;
         if (element.type === 'action-length') return 240;
         if (element.type === 'event-element') return 220;
         if (element.type === 'event-id') return 220;
@@ -2868,6 +4076,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || element.type === 'action-remove-class'
             || element.type === 'action-toggle-class') return 220;
         if (element.type === 'image-from-link' || element.type === 'image-from-element') return 220;
+        // DB nodes use the special layout (pin labels | config | outputs side
+        // by side), so their dropdowns/checklists need a wider card; Select's
+        // four output labels ("First Row"...) and Join's two column pickers
+        // need the most.
+        if (element.type === 'event-processor') return 250;
+        if (element.type === 'fallback-event') return 250;
+        // 4 input labels | fallback inputs + test button | 4 output labels
+        if (element.type === 'send-email') return 320;
+        if (element.type === 'raw-html') return 340;
+        if (PANEL_NODE_TYPES.has(element.type)) return 260;
+        if (element.type === 'db-select' || element.type === 'db-join') return 340;
+        if (DB_NODE_TYPES.has(element.type)) return 300;
         return 200;
     };
 
@@ -3105,6 +4325,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
         if (valuePinNode && index > 0 && valuePinConnected) return null;
         switch (element.type) {
+            case 'fallback-event': {
+                // Literal Fallback / Hold controls only while their pin is unwired.
+                if (valuePinConnected || index === 0) return null;
+                const update = (patch: Record<string, unknown>) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, ...patch } } : elem)));
+                if (index === 1) {
+                    return <input className="input-control" value={String(element.data?.fallbackEventValue ?? '')} placeholder="Fallback value" onClick={(e) => e.stopPropagation()} onChange={(e) => update({ fallbackEventValue: e.target.value })} />;
+                }
+                return <input type="number" min={0} step={100} className="input-control" value={String(element.data?.fallbackEventDurationMs ?? 3000)} onClick={(e) => e.stopPropagation()} onChange={(e) => update({ fallbackEventDurationMs: Math.max(0, Number(e.target.value) || 0) })} />;
+            }
             case 'output':
                 // The Output node uses the special layout; its target controls
                 // live in the config column (Element pin / ID select / Use ID
@@ -3124,13 +4353,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-redirect':
             case 'action-trigger-event': {
                 if (index === 0 && element.type === 'action-set-visibility') return <select className="input-control" value={String(element.data?.actionVisibility || 'toggle')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionVisibility: e.target.value as 'show' | 'hide' | 'toggle' } } : elem)))}><option value="show">Show</option><option value="hide">Hide</option><option value="toggle">Toggle</option></select>;
+                // Attribute name / CSS property are the node's OWN config,
+                // not "the value" -- they must render at index 0 (the
+                // 'action' attach-to-parent pin's row, never subject to the
+                // valuePinConnected gate above) so they stay visible once the
+                // VALUE pin (index 1) is wired. Rendering them at index 1
+                // instead (as a previous version of this file did) meant
+                // `if (valuePinNode && index > 0 && valuePinConnected) return
+                // null;` hid the field the instant a value was wired in,
+                // permanently freezing actionAttrName/actionStyleProperty at
+                // their default empty string -- e.g. "CSS Color -> Set
+                // Style" silently no-op'd forever because the CSS property
+                // field could never be typed into once a value was wired.
+                if (index === 0 && element.type === 'action-set-attr') return <input className="input-control" value={String(element.data?.actionAttrName || '')} placeholder="Attribute name" onClick={(e) => e.stopPropagation()} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionAttrName: e.target.value } } : elem)))} />;
+                if (index === 0 && element.type === 'action-set-style') return <input className="input-control" value={String(element.data?.actionStyleProperty || '')} placeholder="CSS property (e.g. color, background-color)" onClick={(e) => e.stopPropagation()} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionStyleProperty: e.target.value } } : elem)))} />;
                 if (index === 0) return null;
                 if (element.type === 'action-set-visibility') return <select className="input-control" value={String(element.data?.actionVisibility || 'toggle')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionVisibility: e.target.value as 'show' | 'hide' | 'toggle' } } : elem)))}><option value="show">Show</option><option value="hide">Hide</option><option value="toggle">Toggle</option></select>;
                 if (element.type === 'action-notify') return <input className="input-control" value={String(element.data?.actionNotifyMessage || '')} placeholder="Notification" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionNotifyMessage: e.target.value } } : elem)))} />;
                 if (element.type === 'action-trigger-event') return <input className="input-control" value={String(element.data?.actionEventName || '')} placeholder="Event name" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionEventName: e.target.value } } : elem)))} />;
                 if (element.type === 'action-redirect') return <input className="input-control" value={String(element.data?.valueText || '')} placeholder="URL" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} />;
-                if (element.type === 'action-set-attr') return <input className="input-control" value={String(element.data?.actionAttrName || '')} placeholder="Attribute name" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionAttrName: e.target.value } } : elem)))} />;
-                if (element.type === 'action-set-style') return <input className="input-control" value={String(element.data?.actionStyleProperty || '')} placeholder="CSS property" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, actionStyleProperty: e.target.value } } : elem)))} />;
                 return <input className="input-control" value={String(element.data?.valueText ?? element.data?.value ?? '')} placeholder="Value" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === element.id ? { ...elem, data: { ...elem.data, valueText: e.target.value } } : elem)))} />;
             }
             case 'action-event': {
@@ -3145,7 +4386,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 ? 'Element: from connected pin (overrides the ID below)'
                                 : 'Element: connect a pin, or use the ID below'}
                         </div>
-                        {element.data?.actionUseManualId ? (
+                        {(!isGutenbergHost || element.data?.actionUseManualId) ? (
                             <input
                                 type="text"
                                 className="input-control"
@@ -3213,6 +4454,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             <option value="keydown">keydown</option>
                             <option value="keyup">keyup</option>
                         </select>
+                        {isGutenbergHost && (
                         <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
                             <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                 <input
@@ -3236,6 +4478,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 Manual ID
                             </label>
                         </div>
+                        )}
                     </div>
                 );
             }
@@ -4016,6 +5259,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 onMouseDownCapture={(e) => e.stopPropagation()}
                 onPointerDownCapture={(e) => e.stopPropagation()}
             >
+                <ConfigFieldLabel>Match Mode</ConfigFieldLabel>
                 <select
                     className="input-control"
                     value={String(element.data?.apiListMatchMode || 'auto')}
@@ -4036,6 +5280,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     onClick={(e) => e.stopPropagation()}
                 />
 
+                <ConfigFieldLabel>Item Type</ConfigFieldLabel>
                 <select
                     className="input-control"
                     value={String(element.data?.apiListItemType || 'string')}
@@ -4178,6 +5423,87 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         );
     };
 
+    const renderSendEmailControls = (el: CanvasElement): React.ReactNode => {
+        const updateSendEmail = (patch: Record<string, unknown>) => {
+            setElements((prev) =>
+                updateElementValueTypes(
+                    prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, ...patch } } : elem))
+                )
+            );
+        };
+
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={(e) => e.stopPropagation()}>
+                <input
+                    type="text"
+                    className="input-control"
+                    value={String(el.data?.sendEmailRecipient || '')}
+                    placeholder="Recipient (fallback)"
+                    onChange={(e) => updateSendEmail({ sendEmailRecipient: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                />
+                <input
+                    type="text"
+                    className="input-control"
+                    value={String(el.data?.sendEmailSubject || '')}
+                    placeholder="Subject (fallback)"
+                    onChange={(e) => updateSendEmail({ sendEmailSubject: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                />
+                <input
+                    type="text"
+                    className="input-control"
+                    value={String(el.data?.sendEmailMessage || '')}
+                    placeholder="Message (fallback)"
+                    onChange={(e) => updateSendEmail({ sendEmailMessage: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                />
+                <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                    <label className="reverse-toggle" onClick={(e) => e.stopPropagation()}>
+                        <input
+                            type="checkbox"
+                            checked={!!el.data?.sendEmailAllowAnonymous}
+                            onChange={(e) => updateSendEmail({ sendEmailAllowAnonymous: e.target.checked })}
+                        />
+                        Allow anonymous visitors to trigger this
+                    </label>
+                </div>
+                {getDbApiConfig()?.canManage && (() => {
+                    const test = emailTests[el.id];
+                    const runTest = () => {
+                        setEmailTests((prev) => ({ ...prev, [el.id]: { sending: true, text: '' } }));
+                        dbApiFetch<{ ok?: boolean; to?: string; mailer?: string; from?: string; error?: string }>('send-email/test', 'POST', { to: String(el.data?.sendEmailRecipient || '') })
+                            .then((result) => {
+                                const ok = !!result?.ok;
+                                const via = result?.mailer === 'smtp' ? 'SMTP' : result?.mailer === 'mail' ? 'PHP mail()' : (result?.mailer || 'the default mailer');
+                                const text = ok
+                                    ? `WordPress accepted it for ${result?.to} (via ${via}, from ${result?.from || 'unknown'}).${result?.mailer === 'mail' ? ' PHP mail() is often dropped or sent to spam - an SMTP plugin is recommended.' : ''} Not in the inbox? Check spam.`
+                                    : `WordPress could not send: ${result?.error || 'unknown error'}`;
+                                setEmailTests((prev) => ({ ...prev, [el.id]: { sending: false, ok, text } }));
+                            })
+                            .catch((error) => setEmailTests((prev) => ({ ...prev, [el.id]: { sending: false, ok: false, text: String(error?.message || error) } })));
+                    };
+                    return (
+                        <div style={{ marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                            <button
+                                type="button"
+                                disabled={!!test?.sending}
+                                onClick={(e) => { e.stopPropagation(); runTest(); }}
+                                title="Sends a test message through WordPress (to the Recipient above, or to your own admin address)"
+                                style={{ height: '26px', fontSize: '11px', borderRadius: '6px', border: '1px solid rgba(148,163,184,0.35)', background: 'rgba(15,23,42,0.6)', color: '#e2e8f0', cursor: test?.sending ? 'default' : 'pointer' }}
+                            >
+                                {test?.sending ? 'Sending test...' : 'Send test email'}
+                            </button>
+                            {test && !test.sending && (
+                                <div style={{ fontSize: '10px', lineHeight: 1.35, color: test.ok ? '#86efac' : '#fca5a5' }}>{test.text}</div>
+                            )}
+                        </div>
+                    );
+                })()}
+            </div>
+        );
+    };
+
     const renderApiNodeControls = (el: CanvasElement): React.ReactNode => {
         const updateApiNode = (patch: Record<string, unknown>) => {
             setElements((prev) =>
@@ -4216,11 +5542,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         onChange={(e) => updateApiNode({ apiHeaders: e.target.value })}
                         onClick={(e) => e.stopPropagation()}
                     />
+                    <ConfigFieldLabel>Timeout (ms)</ConfigFieldLabel>
                     <input
                         type="number"
                         className="input-control"
                         value={String(el.data?.apiTimeout ?? 15000)}
-                        placeholder="Timeout (ms)"
+                        placeholder="15000"
                         min={0}
                         onChange={(e) => {
                             const v = parseInt(e.target.value, 10);
@@ -4235,6 +5562,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (el.type === 'api-field') {
             return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <ConfigFieldLabel>Field Type</ConfigFieldLabel>
                     <select
                         className="input-control"
                         value={String(el.data?.apiFieldType || 'string')}
@@ -4274,6 +5602,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const getInputLabel = (element: CanvasElement, index: number): string => {
         switch (element.type) {
+            case 'raw-html': {
+                const slot = selectedRawHtmlSlots(analyzeRawHtmlCached(String(element.data?.rawHtml || '')).slots, element.data?.rawHtmlSlots)[index];
+                return slot ? slot.label : '';
+            }
+            case 'set-parent':
+                return ['Element', 'Parent', 'Trigger'][index] || '';
+            case 'clone-element':
+                return ['Element', 'Trigger'][index] || '';
+            case 'elements-by-class':
+                return ['Class', 'Scope'][index] || '';
+            case 'debug-console-log':
+            case 'debug-console-warn':
+            case 'debug-message-log':
+            case 'debug-message-warn':
+                return index === 1 ? 'Trigger' : 'Value';
             case 'calculation':
                 return `Input ${index + 1}`;
             case 'condition':
@@ -4423,6 +5766,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'A' : 'B';
             case 'fallback':
                 return index === 0 ? 'Primary' : 'Fallback';
+            case 'fallback-event':
+                return ['Main', 'Fallback', 'Hold (ms)'][index] || '';
             case 'clamp':
                 if (index === 0) return 'Value';
                 if (index === 1) return 'Min';
@@ -4444,6 +5789,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return 'Number';
             case 'multi-concat':
                 return `Text ${index + 1}`;
+            case 'object-build':
+                return String(element.data?.objectKeys?.[index] || `key${index + 1}`);
             case 'css-join':
                 return `CSS ${index + 1}`;
             case 'array':
@@ -4472,11 +5819,34 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'Source' : 'Path';
             case 'api-list-mapper':
                 return index === 0 ? 'Request Data' : `Input ${index + 1}`;
+            case 'form-data':
+                return 'Element';
+            case 'send-email':
+                return ['Recipient', 'Subject', 'Message', 'Trigger'][index] || `Input ${index + 1}`;
+            case 'db-table':
+                return 'Connection';
+            case 'db-fields':
+            case 'db-join':
+            case 'db-sort':
+                return 'Query';
+            case 'db-filter':
+                return index === 0 ? 'Query' : 'Value';
+            case 'db-select':
+                return ['Query', 'Limit', 'Offset'][index] || '';
+            case 'db-insert':
+            case 'db-update': {
+                if (index === 0) return 'Query';
+                const columns = Array.isArray(element.data?.dbColumns) ? element.data.dbColumns : [];
+                return index <= columns.length ? String(columns[index - 1] || `Column ${index}`) : 'Trigger';
+            }
+            case 'db-delete':
+                return index === 0 ? 'Query' : 'Trigger';
             case 'action-event':
                 // input0 stays the existing 'action' attach-to-parent slot;
                 // input1 is the Element pin, not a generic 'Value' pin.
                 return index === 0 ? 'Action' : 'Element';
             case 'action-block':
+            case 'action-if':
             case 'action-required':
             case 'action-min':
             case 'action-max':
@@ -4515,7 +5885,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (index === 0) return 'Action';
                 if (index === 1) return 'Value';
                 return '';
+            case 'action-event-gate':
+                return index === 0 ? 'Action' : 'Trigger';
             // New event nodes — no inputs
+            case 'event-or':
+            case 'event-and':
+                return index === 0 ? 'A' : 'B';
             // New array nodes
             case 'array-map':
                 return index === 0 ? 'Array' : 'Value';
@@ -4544,6 +5919,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     const getOutputLabel = (element: CanvasElement, index: number): string => {
         switch (element.type) {
+            case 'raw-html':
+            case 'set-parent':
+                return 'Element';
+            case 'clone-element':
+                return index === 1 ? 'All Clones' : 'Clone';
+            case 'elements-by-class':
+                return index === 1 ? 'Count' : 'Elements';
+            case 'debug-console-log':
+            case 'debug-console-warn':
+            case 'debug-message-log':
+            case 'debug-message-warn':
+                return 'Value';
+            case 'number-to-base':
+                return 'Text';
+            case 'number-parse':
+                return 'Number';
             case 'case-range':
             case 'case-value':
             case 'case-default':
@@ -4574,6 +5965,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-increment':
             case 'memory-array-append':
             case 'memory-array-remove':
+            case 'memory-array-read':
+            case 'json-body':
             case 'event-element':
             case 'event-id':
             case 'event-processor':
@@ -4591,6 +5984,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'and':
             case 'or':
             case 'fallback':
+            case 'fallback-event':
             case 'clamp':
                 return 'Value';
             case 'element-property': {
@@ -4608,7 +6002,27 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'event-page-load':
             case 'event-timer':
             case 'event-custom':
+            case 'event-or':
+            case 'event-and':
                 return 'Event';
+            case 'form-data':
+                return index === 1 ? 'Submitted' : 'Data';
+            case 'send-email':
+                return ['Status', 'Sending', 'Sent', 'Failed'][index] || '';
+            case 'db-connect':
+                return 'Connection';
+            case 'db-table':
+            case 'db-fields':
+            case 'db-join':
+            case 'db-filter':
+            case 'db-sort':
+                return 'Query';
+            case 'db-select':
+                return ['Rows', 'First Row', 'Count', 'Status'][index] || '';
+            case 'db-insert':
+            case 'db-update':
+            case 'db-delete':
+                return 'Status';
             // New array nodes
             case 'array-map':
             case 'array-filter':
@@ -4678,9 +6092,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             : (getCustomNodeOutputSchema(element.data?.customNodeId)[index]?.label || `Output ${index + 1}`)
                     );
             case 'unzip': {
-                const schema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
-                    ? element.data.customOutputSchema
-                    : getCustomNodeOutputSchema(element.data?.customNodeId);
+                const schema = getUnzipKnownSchema(element)?.fields || (
+                    Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0
+                        ? element.data.customOutputSchema
+                        : getCustomNodeOutputSchema(element.data?.customNodeId)
+                );
                 return schema[index]?.label || `Output ${index + 1}`;
             }
             case 'css-unit':
@@ -4717,6 +6133,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'action-if':
                 return index === 0 ? 'True' : 'False';
             case 'action-event':
+            case 'action-event-gate':
             case 'action-block':
             case 'action-required':
             case 'action-min':
@@ -4908,7 +6325,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const getOutgoingConnections = (elementId: string, outputName: string = 'output0'): Connection[] => (
             allConnections.filter((connection) => connection.fromId === elementId && connection.fromOutput === outputName)
         );
-        const buildActionPlanExpression = (element: CanvasElement, currentDepth = 0): string | null => {
+        const buildActionPlanExpression = (
+            element: CanvasElement,
+            currentDepth = 0,
+            inheritedTarget?: { elementExpr?: string; sourceId?: string }
+        ): string | null => {
             if (!element || currentDepth > 24) {
                 return null;
             }
@@ -4916,7 +6337,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const childExpressions = getOutgoingConnections(element.id)
                 .map((connection) => elementMap.get(connection.toId))
                 .filter((child): child is CanvasElement => Boolean(child))
-                .map((child) => buildActionPlanExpression(child, currentDepth + 1))
+                .map((child) => buildActionPlanExpression(child, currentDepth + 1, inheritedTarget))
                 .filter((entry): entry is string => Boolean(entry));
 
             switch (element.type) {
@@ -4926,7 +6347,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const falseChildExpressions = getOutgoingConnections(element.id, 'output1')
                         .map((connection) => elementMap.get(connection.toId))
                         .filter((child): child is CanvasElement => Boolean(child))
-                        .map((child) => buildActionPlanExpression(child, currentDepth + 1))
+                        .map((child) => buildActionPlanExpression(child, currentDepth + 1, inheritedTarget))
                         .filter((entry): entry is string => Boolean(entry));
                     return `({ type: "actionIf", condition: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionIfCondition ? 'true' : 'false')}, trueActions: [${childExpressions.join(', ')}], falseActions: [${falseChildExpressions.join(', ')}] })`;
                 }
@@ -4937,9 +6358,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     // execution, exactly like Output's Element pin. Falls back
                     // to the existing sourceId ID control (dropdown/manual)
                     // when unconnected; that fallback is untouched from before
-                    // this change.
-                    const elementExpr = buildElementInstanceExpr(element, 1);
-                    const sourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
+                    // this change. If NEITHER is set, fall back to the
+                    // enclosing Output's OWN target (inheritedTarget) -- e.g.
+                    // "Output(targets X) -> Action Event -> Set Style" reads
+                    // naturally as "when X fires this event, do this to X",
+                    // without redundantly re-specifying X on the Action Event
+                    // too. Previously, omitting a target here made this ENTIRE
+                    // node (and everything wired under it) compile to `null` --
+                    // silently dropped, no error -- which is exactly the
+                    // "Set Style does nothing, no error" failure users hit.
+                    const ownElementExpr = buildElementInstanceExpr(element, 1) || '';
+                    const ownSourceId = String(element.data?.actionTargetManualId || element.data?.actionTargetId || '').trim();
+                    const hasOwnTarget = Boolean(ownElementExpr || ownSourceId);
+                    const elementExpr = hasOwnTarget ? ownElementExpr : String(inheritedTarget?.elementExpr || '');
+                    const sourceId = hasOwnTarget
+                        ? ownSourceId
+                        : (!elementExpr ? String(inheritedTarget?.sourceId || '').trim() : '');
                     if (!elementExpr && !sourceId) {
                         return null;
                     }
@@ -4955,6 +6389,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         return `({ ${JSON.stringify('type')}: "event", ${JSON.stringify('__element')}: ${elementExpr}, ${JSON.stringify('__nodeId')}: ${JSON.stringify(element.id)}, ${JSON.stringify('eventType')}: ${serializeGraphFormulaLiteral(eventType)}, ${JSON.stringify('actions')}: ${actionsExpr} })`;
                     }
                     return `({ type: "event", sourceId: ${serializeGraphFormulaLiteral(sourceId)}, eventType: ${serializeGraphFormulaLiteral(eventType)}, actions: ${actionsExpr} })`;
+                }
+                case 'action-event-gate': {
+                    // Fires its nested actions when the wired Trigger Event
+                    // (input1 -- a plain event, or an event-or/event-and
+                    // combinator) has occurred since it was last consumed --
+                    // see nlConsumeEventOnce in frontend.js, the same
+                    // "increments only on a genuinely new firing" primitive
+                    // Send Email's own Trigger pin already relies on.
+                    // __nodeId disambiguates this gate's own consumed-count
+                    // bookkeeping from every other gate/Send Email node.
+                    const triggerExpr = getConnectedExpression(element.id, 'input1') || 'null';
+                    const actionsExpr = childExpressions.length > 0 ? `[${childExpressions.join(', ')}]` : '[]';
+                    // Keys quoted (matches action-event's __element/__nodeId
+                    // convention) so the safety-checker's bare-identifier scan
+                    // never needs to see them.
+                    return `({ type: "eventGate", ${JSON.stringify('trigger')}: ${triggerExpr}, ${JSON.stringify('__nodeId')}: ${JSON.stringify(element.id)}, actions: ${actionsExpr} })`;
                 }
                 case 'action-required':
                     return `({ type: "required", value: ${getConnectedExpression(element.id, 'input1') || (element.data?.actionRequired !== false ? 'true' : 'false')} })`;
@@ -5109,14 +6559,33 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'color':
                     return serializeGraphFormulaLiteral(String(element.data?.colorValue || '#2563eb'));
                 case 'element': {
+                    // Always the element's VALUE -- this node never emits an
+                    // event object (regardless of any legacy eventType data
+                    // a previously-saved graph might still carry): getting an
+                    // object back instead of a value here was the reported
+                    // bug. Dedicated nodes (Event Hover/Scroll/ID/Element,
+                    // Action Event) already cover "react to this DOM event",
+                    // so this node has exactly one job now.
+                    //
+                    // The old `[${selectedElement}]` output looked like an
+                    // Element-ID reference but was actually a bare AST
+                    // Identifier with that raw id as its name -- at runtime,
+                    // resolveFormulaIdentifier only recognizes a handful of
+                    // fixed context names (plus the "oN" custom-node-output
+                    // convention), so any real element id threw "Identifier
+                    // is not allowed", which some caller silently swallowed
+                    // into a default of 0. It never returned the element's
+                    // real value, in EITHER manual-ID or dropdown mode (both
+                    // just feed a plain DOM id string in here, exactly like
+                    // element-ref does). Resolve the element the same safe
+                    // way element-ref does, then read its live "value".
                     const useManual = !!element.data?.elementUseManualId;
                     const selectedElement = useManual
                         ? String(element.data?.customElementId || '').trim()
                         : String(element.data?.selectedElement || '').trim();
-                    const eventType = String(element.data?.eventType || '').trim();
-                    return selectedElement && eventType
-                        ? `__nodeEvent(${serializeGraphFormulaLiteral(selectedElement)}, ${serializeGraphFormulaLiteral(eventType)})`
-                        : selectedElement ? `[${selectedElement}]` : '0';
+                    return selectedElement
+                        ? `__nodeGetElementProp(__nodeGetElement(${serializeGraphFormulaLiteral(selectedElement)}), ${serializeGraphFormulaLiteral('value')})`
+                        : '0';
                 }
                 case 'element-id':
                     return serializeGraphFormulaLiteral(String(element.data?.elementId || ''));
@@ -5133,7 +6602,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     // when wired, else the node's own Element ID control.
                     // outputIndex selects which key when the node has several pins
                     // (All / Custom); Single keeps its original single-value behaviour.
-                    const sourceExpr = buildElementSourceExpr(element);
+                    // Element pin only ('' = no ID-control fallback; legacy IDs
+                    // were migrated to a wired Element Reference on load).
+                    const sourceExpr = buildElementSourceExpr(element, 0, '');
                     const propKeys = resolveElementPropertyOrderedKeys(element);
                     const propKey = getElementPropertyMode(element) === 'single'
                         ? (propKeys[0] || '')
@@ -5148,7 +6619,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     //   custom + children .. selected children -> one array subset
                     //   all/custom + child . one child per output pin -> element pins
                     // Element input pin when wired, else the node's own Element ID control.
-                    const ref = buildElementSourceExpr(element);
+                    const ref = buildElementSourceExpr(element, 0, '');
                     const mode = readGetChildrenMode(element.data);
                     if (mode === 'single') {
                         return `__nodeGetChildAt(${ref}, ${readGetChildrenSingleIndex(element.data)})`;
@@ -5229,14 +6700,110 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'event-page-load': return '__nodePageLoadEvent()';
                 case 'event-timer': return `__nodeTimerEvent(${serializeGraphFormulaLiteral(Number(element.data?.eventTimerInterval || 1000))}, ${serializeGraphFormulaLiteral(element.data?.eventTimerMode || 'interval')})`;
                 case 'event-custom': return `__nodeCustomEvent(${serializeGraphFormulaLiteral(String(element.data?.eventCustomName || ''))})`;
+                case 'event-or':
+                    return `__nodeEventOr(${serializeGraphFormulaLiteral(element.id)}, ${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'event-and':
+                    return `__nodeEventAnd(${serializeGraphFormulaLiteral(element.id)}, ${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(Number(element.data?.eventAndWindowMs ?? 5000))})`;
+                case 'raw-html': {
+                    // HTML travels as ONE string literal; the runtime parses +
+                    // sanitizes it once and updates only the checked slots.
+                    const html = String(element.data?.rawHtml || '');
+                    const slots = selectedRawHtmlSlots(analyzeRawHtmlCached(html).slots, element.data?.rawHtmlSlots);
+                    const specs = slots.map((slot) => [slot.path.join('.'), slot.kind, slot.name]);
+                    const values = slots.map((_, index) => getConnectedExpression(element.id, `input${index}`) || 'undefined');
+                    return `__nodeRawHtml(${serializeGraphFormulaLiteral(element.id)}, ${serializeGraphFormulaLiteral(html)}, ${serializeGraphFormulaLiteral(specs)}, [${values.join(', ')}])`;
+                }
+                case 'set-parent': {
+                    const target = getConnectedExpression(element.id, 'input0') || 'null';
+                    const parent = getConnectedExpression(element.id, 'input1') || 'null';
+                    const trigger = getConnectedExpression(element.id, 'input2');
+                    const position = element.data?.setParentPosition === 'start' ? 'start' : 'end';
+                    return `__nodeSetParent(${serializeGraphFormulaLiteral(element.id)}, ${target}, ${parent}, ${serializeGraphFormulaLiteral(position)}, ${trigger || 'null'}, ${trigger ? 'true' : 'false'})`;
+                }
+                case 'clone-element': {
+                    const source = getConnectedExpression(element.id, 'input0') || 'null';
+                    const trigger = getConnectedExpression(element.id, 'input1');
+                    const placement = element.data?.clonePlacement === 'detached' ? 'detached' : 'after';
+                    const member = outputIndex === 1 ? 'clones' : 'clone';
+                    return `(__nodeCloneElement(${serializeGraphFormulaLiteral(element.id)}, ${source}, ${serializeGraphFormulaLiteral(placement)}, ${trigger || 'null'}, ${trigger ? 'true' : 'false'})).${member}`;
+                }
+                case 'debug-console-log':
+                case 'debug-console-warn':
+                case 'debug-message-log':
+                case 'debug-message-warn': {
+                    // Shows its Value (console / closable message) and passes
+                    // it through unchanged, so it can sit inline in a chain.
+                    const valueExpr = getConnectedExpression(element.id, 'input0') || 'undefined';
+                    const trigger = getConnectedExpression(element.id, 'input1');
+                    const label = String(element.data?.debugLabel || '').trim() || element.name || 'Debug';
+                    const everyone = element.data?.debugAudience === 'everyone';
+                    return `__nodeDebug(${serializeGraphFormulaLiteral(element.id)}, ${serializeGraphFormulaLiteral(DEBUG_KIND_BY_TYPE[element.type] || 'log')}, ${serializeGraphFormulaLiteral(label)}, ${valueExpr}, ${trigger || 'null'}, ${trigger ? 'true' : 'false'}, ${everyone ? 'true' : 'false'})`;
+                }
+                case 'elements-by-class': {
+                    const classExpr = connectedInputExpression(0, String(element.data?.classNames || ''));
+                    const scopeExpr = getConnectedExpression(element.id, 'input1') || 'null';
+                    const query = `__nodeElementsByClass(${classExpr}, ${scopeExpr})`;
+                    return outputIndex === 1 ? `__nodeArrayLength(${query})` : query;
+                }
                 case 'fallback':
                     return `__nodeFallback(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'fallback-event': {
+                    // Main unwired = "nothing ever appears" (undefined), not
+                    // a 0 that would look like a real value.
+                    const mainExpr = getConnectedExpression(element.id, 'input0') || 'undefined';
+                    const rawFallback = String(element.data?.fallbackEventValue ?? '');
+                    // A typed literal: numbers / booleans stay numbers / booleans.
+                    const literalFallback: unknown = /^-?\d+(\.\d+)?$/.test(rawFallback.trim())
+                        ? Number(rawFallback)
+                        : rawFallback === 'true' ? true : rawFallback === 'false' ? false : rawFallback;
+                    const fallbackExpr = getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(literalFallback);
+                    const holdExpr = getConnectedExpression(element.id, 'input2') || serializeGraphFormulaLiteral(Math.max(0, Number(element.data?.fallbackEventDurationMs ?? 3000)));
+                    return `__nodeFallbackEvent(${serializeGraphFormulaLiteral(element.id)}, ${mainExpr}, ${fallbackExpr}, ${holdExpr})`;
+                }
                 case 'concat':
                 case 'multi-concat': {
                     const inputCount = Math.max(2, getInputCount(element));
                     const parts = Array.from({ length: inputCount }, (_, index) => connectedInputExpression(index));
                     return `__nodeConcat(${parts.join(', ')})`;
                 }
+                // Object Builder: a generic, PRO-independent-in-the-compiler
+                // reuse of the graph's existing 'zip' object value type (the
+                // same runtime shape chart-data/custom-node "Zip Output"
+                // already produce) -- one wired input per named key, output
+                // typed 'zip' so it's directly wireable into anything that
+                // already accepts a zip value (e.g. API Request's Body pin).
+                // Plain JSON-quoted key names (NOT computed [key]: syntax --
+                // key names are compile-time literals, so no computed
+                // property is needed, and a bare `[identifier]` outside a
+                // string is exactly the legacy calculator variable-reference
+                // token that prepareFormulaForEval's replaceFormulaVarsOutsideStrings
+                // rewrites on every formula; using it here silently corrupted
+                // the object literal). A quoted string key handles arbitrary
+                // user-typed text (spaces, quotes, reserved words) just as
+                // safely without that collision.
+                case 'object-build': {
+                    const keyCount = Math.max(1, getInputCount(element));
+                    const entries = Array.from({ length: keyCount }, (_, index) => {
+                        const keyName = String(element.data?.objectKeys?.[index] || `key${index + 1}`);
+                        const valueExpr = connectedInputExpression(index, '');
+                        return `${serializeGraphFormulaLiteral(keyName)}: ${valueExpr}`;
+                    });
+                    return `({ ${entries.join(', ')} })`;
+                }
+                // JSON Body: the user pastes/types raw JSON; parsing happens
+                // at RUNTIME via __nodeJsonParse (new, tiny, try/catch-safe
+                // helper in frontend.js) rather than at compile time, so it
+                // stays a normal graph node producing a value, not a
+                // compile-time literal bake. The JSON text is embedded as a
+                // single, safely-escaped STRING literal -- never interpolated
+                // as raw object-literal syntax -- so there is no risk of the
+                // computed-bracket/legacy-[identifier] collision object-build
+                // hit above. Invalid JSON parses to `null`, which
+                // __nodeApiSerializeBody (frontend.js) already turns into a
+                // safe "{}" body via its existing `data ?? {}` fallback --
+                // no API-specific handling needed here.
+                case 'json-body':
+                    return `__nodeJsonParse(${serializeGraphFormulaLiteral(String(element.data?.jsonBodyText ?? ''))})`;
                 case 'cut-a':
                     return `__nodeCutA(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
                 case 'cut-b':
@@ -5415,6 +6982,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const fn = element.type === 'memory-array-append' ? '__nodeMemoryArrayAppend' : '__nodeMemoryArrayRemove';
                     return `${fn}(${key}, ${itemExpr}, ${triggerExpr}, ${persistExpr}, ${scope})`;
                 }
+                case 'memory-array-read': {
+                    // No new runtime function needed: __nodeMemoryGet already
+                    // returns the raw stored value (or the default) and is what
+                    // memory-array-append/remove call internally before mutating
+                    // -- this just reads it, side-effect-free, defaulting to [].
+                    const key = serializeGraphFormulaLiteral(String(element.data?.variableKey || ''));
+                    const persistExpr = element.data?.persistVariable ? 'true' : 'false';
+                    const scope = serializeGraphFormulaLiteral(String(element.data?.memoryScope || 'widget'));
+                    return `__nodeMemoryGet(${key}, [], ${persistExpr}, ${scope})`;
+                }
                 // CSS / gradient / event-processor: the runtime helpers
                 // (__nodeCssJoin, __nodeGradient, __nodeEventProcessor) and the
                 // node config UIs already exist; the formula-gen cases were lost
@@ -5426,6 +7003,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'css-text':
                     return serializeGraphFormulaLiteral(String(element.data?.cssText || ''));
                 case 'css-color':
+                    // Relays a wired value when present (unchanged, backward
+                    // compatible with existing graphs using it purely as a
+                    // pass-through/type-tag) but ALSO works standalone: this
+                    // node's palette name is literally "CSS Color" and it
+                    // renders its own color-picker control (see the canvas UI
+                    // below), so leaving it silently empty when nothing is
+                    // wired -- its only previous behavior -- meant "CSS Color
+                    // -> Set Style" produced an empty value with no error,
+                    // despite looking like a self-contained color picker.
+                    return `__nodeToString(${connectedInputExpression(0, String(element.data?.colorValue || '#2563eb'))})`;
                 case 'css-width':
                 case 'css-height':
                 case 'css-font-size':
@@ -5447,7 +7034,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 case 'css-join': {
                     const inputCount = Math.max(2, getInputCount(element));
-                    const parts = Array.from({ length: inputCount }, (_, i) => connectedInputExpression(i, ''));
+                    const propertyNames = Array.isArray(element.data?.cssJoinPropertyNames) ? element.data.cssJoinPropertyNames : [];
+                    const parts = Array.from({ length: inputCount }, (_, i) => {
+                        const valueExpr = connectedInputExpression(i, '');
+                        const propName = String(propertyNames[i] || '').trim();
+                        // A named slot becomes a real "name: value" declaration;
+                        // an unnamed slot stays a bare joined string, exactly as
+                        // before (backward compatible with existing graphs that
+                        // already feed it complete "prop: value" literals).
+                        return propName ? `__nodeConcat(${serializeGraphFormulaLiteral(`${propName}: `)}, ${valueExpr})` : valueExpr;
+                    });
                     return `__nodeCssJoin(${parts.join(', ')})`;
                 }
                 case 'gradient': {
@@ -5469,7 +7065,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'event-processor': {
                     const eventExpr = getConnectedExpression(element.id, 'input0') || 'undefined';
                     const payloadExpr = getConnectedExpression(element.id, 'input1') || 'undefined';
-                    return `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${element.data?.passOnlyOnEvent === true ? 'true' : 'false'})`;
+                    // Gated by default: the payload passes only on the pass in
+                    // which the event actually fired. Only an EXPLICIT
+                    // "pass always" (false) relays it unconditionally -- an
+                    // unset option used to mean "always", which made
+                    // Event -> Payload -> Value fire without any event.
+                    return `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${element.data?.passOnlyOnEvent === false ? 'false' : 'true'})`;
                 }
                 case 'node': {
                     const condition = connectedInputExpression(0, true);
@@ -5642,6 +7243,71 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 }
                 case 'api-list-mapper':
                     return `__nodeApiListMapper(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(String(element.data?.apiListPath || ''))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListLabelField || 'label'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListValueField || 'value'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListMatchMode || 'auto'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListItemType || 'string'))}, ${serializeGraphFormulaLiteral(String(element.data?.apiListCustomNodeId || ''))}, ${serializeGraphFormulaLiteral(Array.isArray(element.data?.apiListFieldMappings) ? element.data.apiListFieldMappings : [])})`;
+                case 'form-data': {
+                    // Element input pin wins when wired, else the shared ID control
+                    // -- same resolution model as event-hover / element-ref.
+                    const elementExpr = buildElementSourceExpr(element, 0);
+                    const callExpr = `__nodeFormData(${elementExpr}, ${serializeGraphFormulaLiteral(element.id)})`;
+                    // Both output pins read the SAME underlying resolution (one
+                    // localStorage/transient lookup per formKey, memoized runtime-
+                    // side) -- outputIndex just selects which facet of it. Per-
+                    // field extraction is Unzip's job (see its own case below),
+                    // wired from this node's Data (zip) output.
+                    return outputIndex === 1 ? `(${callExpr}).event` : `(${callExpr}).data`;
+                }
+                case 'send-email': {
+                    const recipientExpr = connectedInputExpression(0, element.data?.sendEmailRecipient || '');
+                    const subjectExpr = connectedInputExpression(1, element.data?.sendEmailSubject || '');
+                    const messageExpr = connectedInputExpression(2, element.data?.sendEmailMessage || '');
+                    const triggerExpr = connectedInputExpression(3);
+                    const callExpr = `__nodeSendEmail(${recipientExpr}, ${subjectExpr}, ${messageExpr}, ${triggerExpr}, ${serializeGraphFormulaLiteral(element.id)})`;
+                    // Output 0 = Status (zip); 1..3 = Sending / Sent / Failed
+                    // events, each a new firing whenever that transition
+                    // happens (see __nodeSendEmail in frontend.js).
+                    const eventMember = ['', 'sendingEvent', 'sentEvent', 'failedEvent'][outputIndex] || '';
+                    return eventMember ? `(${callExpr}).${eventMember}` : callExpr;
+                }
+                // Database: the compiled formula carries only node ids and
+                // RUNTIME values. Table/column/operator config never appears
+                // here -- the server reads it from the saved graph and checks
+                // the admin signature (dbSignature) before running anything.
+                // DB Connect / DB Table carry no runtime value at all -- the
+                // connection + database + table live only in the saved graph.
+                case 'db-connect':
+                    return `__nodeDbChain(${serializeGraphFormulaLiteral(element.id)}, null, undefined)`;
+                case 'db-table':
+                    return `__nodeDbChain(${serializeGraphFormulaLiteral(element.id)}, ${getConnectedExpression(element.id, 'input0') || 'null'}, undefined)`;
+                case 'db-fields':
+                case 'db-join':
+                case 'db-sort':
+                case 'db-filter': {
+                    const upstreamExpr = getConnectedExpression(element.id, 'input0') || 'null';
+                    // An unwired filter value compiles to `undefined`, so the
+                    // runtime never sends one and the server uses the saved
+                    // literal (which a request can never override).
+                    const valueExpr = element.type === 'db-filter'
+                        ? (getConnectedExpression(element.id, 'input1') || 'undefined')
+                        : 'undefined';
+                    return `__nodeDbChain(${serializeGraphFormulaLiteral(element.id)}, ${upstreamExpr}, ${valueExpr})`;
+                }
+                case 'db-select': {
+                    const queryExpr = getConnectedExpression(element.id, 'input0') || 'null';
+                    const limitExpr = getConnectedExpression(element.id, 'input1') || 'null';
+                    const offsetExpr = getConnectedExpression(element.id, 'input2') || 'null';
+                    const member = ['rows', 'firstRow', 'count', 'status'][outputIndex] || 'rows';
+                    return `(__nodeDbSelect(${serializeGraphFormulaLiteral(element.id)}, ${queryExpr}, ${limitExpr}, ${offsetExpr})).${member}`;
+                }
+                case 'db-insert':
+                case 'db-update':
+                case 'db-delete': {
+                    const queryExpr = getConnectedExpression(element.id, 'input0') || 'null';
+                    const columns = element.type === 'db-delete'
+                        ? []
+                        : (Array.isArray(element.data?.dbColumns) ? element.data.dbColumns : []);
+                    const valueExprs = columns.map((_, index) => getConnectedExpression(element.id, `input${index + 1}`) || 'null');
+                    const triggerExpr = getConnectedExpression(element.id, `input${columns.length + 1}`) || 'null';
+                    return `__nodeDbWrite(${serializeGraphFormulaLiteral(element.id)}, ${queryExpr}, [${valueExprs.join(', ')}], ${triggerExpr})`;
+                }
                 case 'chart-data':
                     return `({ label: ${connectedInputExpression(0, element.data?.chartDataLabel ?? '')}, value: ${connectedInputExpression(1, element.data?.chartDataValue ?? 0)} })`;
                 case 'action-event':
@@ -5724,6 +7390,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `__nodeUnzip(${zipExpr}, ${outputIndex})`;
                 }
                 case 'unzip': {
+                    const sourceConnection = getConnectionForInput(element.id, 'input0');
+                    const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                    const sourceOutputIndex = sourceConnection
+                        ? Number.parseInt(String(sourceConnection.fromOutput || '').replace(/^output/i, ''), 10) || 0
+                        : -1;
+                    const hasPersistedSchema = Array.isArray(element.data?.customOutputSchema) && element.data.customOutputSchema.length > 0;
+                    // Wired from a node whose zip output has a KNOWN, named
+                    // field layout (Form Data's Data / Send Email's Status /
+                    // API Status -- see getUnzipSchemaForSource) and no
+                    // explicit schema already overrides it: unpack by the
+                    // field's real NAME (bracket/computed member access), not
+                    // __nodeUnzip's positional o0/field-1 convention, which
+                    // none of these shapes follow.
+                    const knownSchema = !hasPersistedSchema && sourceElement
+                        ? resolveUnzipSchema(element, sourceElement.type, sourceElement.id, sourceOutputIndex)
+                        : null;
+                    if (knownSchema) {
+                        const sourceExpr = connectedInputExpression(0);
+                        const field = knownSchema.fields[outputIndex];
+                        const fieldId = field?.id || '';
+                        const defaultLiteral: unknown = field?.type === 'boolean' ? false : field?.type === 'zip' ? [] : field?.type === 'number' ? 0 : '';
+                        const basePath = knownSchema.nestedUnder ? `.${knownSchema.nestedUnder}` : '';
+                        return `__nodeFallback((${sourceExpr})${basePath}[${serializeGraphFormulaLiteral(fieldId)}], ${serializeGraphFormulaLiteral(defaultLiteral)})`;
+                    }
                     const sourceExpr = connectedInputExpression(0);
                     const indexExpr = connectedInputExpression(1, element.data?.unzipIndex ?? 0);
                     return `__nodeUnzip(${sourceExpr}, ${indexExpr})`;
@@ -5792,7 +7482,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const elementInstanceExpr = buildElementInstanceExpr(element);
                 const targetId = String(element.data?.selectedElement || '').trim();
 
-                const valuePairs = outputPropertyNames
+                // Non-custom-node mode: only "value" remains (input1, kept --
+                // see getInputCount). Background/Color/Disabled/CSS are
+                // retired; that functionality now lives entirely in the
+                // Action System (actionPairs, below), reached via this same
+                // Output's actions fan-out. Custom-node mode is untouched:
+                // those 5 slots still compile the editable zip-output fields
+                // for the (separate, PRO) custom-node-template feature.
+                const activeOutputPropertyNames = customNodeMode ? outputPropertyNames : ['value'];
+                const valuePairs = activeOutputPropertyNames
                     .map((propName, index) => {
                         const connection = getConnectionForInput(element.id, `input${index + outputValueOffset}`);
                         if (!connection) return null;
@@ -5808,10 +7506,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     })
                     .filter(Boolean);
 
+                // Action-tree children with no target of their own (no wired
+                // Element pin, no manual/dropdown ID on the Action Event
+                // itself) fall back to THIS Output's own resolved target --
+                // see buildActionPlanExpression's 'action-event' case.
+                const outputInheritedTarget = { elementExpr: elementInstanceExpr || undefined, sourceId: targetId || undefined };
                 const actionPairs = getOutgoingConnections(element.id)
                     .map((connection) => elementMap.get(connection.toId))
                     .filter((child): child is CanvasElement => Boolean(child))
-                    .map((child) => buildActionPlanExpression(child, depth + 1))
+                    .map((child) => buildActionPlanExpression(child, depth + 1, outputInheritedTarget))
                     .filter((entry): entry is string => Boolean(entry));
 
                 buildingLoopBody = prevLoopMode;
@@ -5863,11 +7566,72 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             })
             .filter(Boolean);
 
-        if (payloadEntries.length === 0) {
+        // Side-effect nodes (Send Email, DB writes) must run even when nothing
+        // reads their Status output -- previously they were only compiled if
+        // some Output node happened to consume them, so e.g.
+        // Form Data -> Unzip -> Send Email silently never sent anything.
+        // Each gets its own root entry; the runtime evaluates it (which is
+        // what fires the side effect, gated by its Trigger) and never applies
+        // it to the DOM. Running the same node twice in one evaluation (also
+        // consumed by an Output) is harmless: its trigger is consumed once.
+        //
+        // A side-effect node fed by a For Each loop item -- directly or through
+        // ordinary nodes (DB Select Rows -> For Each -> Unzip -> Raw HTML ->
+        // Set Parent) -- runs ONCE PER ITEM: its expression becomes the loop
+        // body, the same per-item shape an Output with a looped Element pin
+        // uses. Compiled as a plain root it read the loop's whole ARRAY where
+        // one item was expected (Unzip compiled to `rows["name"]`); the
+        // runtime refuses that member access, and the failure took the whole
+        // logic block down.
+        //
+        // Only nodes whose runtime keys its work by the active loop path (one
+        // DOM instance / trigger consumption per item) run per item. Send
+        // Email and DB writes consume their Trigger per NODE, so inside a loop
+        // they would silently fire for the first row only; they stay plain
+        // roots (an entry that cannot evaluate is skipped and reported by the
+        // runtime, never taking the rest of the block down).
+        const LOOP_AWARE_SIDE_EFFECT_TYPES: ReadonlySet<string> = new Set(['set-parent', 'clone-element', ...DEBUG_NODE_TYPES]);
+        const LOOP_CLOSING_NODE_TYPES = new Set(['array-collect', 'array-map', 'array-filter']);
+        const findOpenLoopStart = (elementId: string, visited = new Set<string>()): CanvasElement | null => {
+            if (visited.has(elementId)) return null;
+            visited.add(elementId);
+            for (const connection of allConnections) {
+                if (connection.toId !== elementId) continue;
+                const source = elementMap.get(connection.fromId);
+                if (!source) continue;
+                if (source.type === 'array-for-each') return source;
+                // Collect / Map / Filter close their loop: what they output is
+                // a whole array, not a per-item value.
+                if (LOOP_CLOSING_NODE_TYPES.has(source.type)) continue;
+                const loopStart = findOpenLoopStart(source.id, visited);
+                if (loopStart) return loopStart;
+            }
+            return null;
+        };
+        const sideEffectEntries = customNodeMode
+            ? []
+            : allElements
+                .filter((element) => SIDE_EFFECT_NODE_TYPES.has(element.type))
+                .map((element) => {
+                    const entryKey = JSON.stringify(` nlSide:${element.id}`);
+                    const loopStart = LOOP_AWARE_SIDE_EFFECT_TYPES.has(element.type) ? findOpenLoopStart(element.id) : null;
+                    if (loopStart) {
+                        const arrayExpr = connectedInputExpressionFor(loopStart, 0, []);
+                        const previousLoopMode = buildingLoopBody;
+                        buildingLoopBody = true;
+                        const bodyExpression = buildNodeExpression(element, 0, depth + 1);
+                        buildingLoopBody = previousLoopMode;
+                        return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: __nodeArrayMapGraph(${arrayExpr}, ${serializeGraphFormulaLiteral(bodyExpression)}) }`;
+                    }
+                    return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: ${buildNodeExpression(element, 0, depth + 1)} }`;
+                });
+
+        const allEntries = [...payloadEntries, ...sideEffectEntries];
+        if (allEntries.length === 0) {
             return '';
         }
 
-        return `({ ${payloadEntries.join(', ')} })`;
+        return `({ ${allEntries.join(', ')} })`;
     };
 
     const updateElementValueTypes = (
@@ -5879,7 +7643,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const getConnectedType = (
             toId: string,
             toInput: string
-        ): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | null => {
+        ): 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn' | null => {
             const conn = nextConnections.find((connection) => connection.toId === toId && connection.toInput === toInput);
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
@@ -5908,6 +7672,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (node.type === 'get-children') {
                 return getChildrenOutputsArray(node.data) ? 'element' : undefined;
             }
+            if (node.type === 'elements-by-class' || node.type === 'clone-element') {
+                return 'element';
+            }
             if (node.data?.arrayItemType !== undefined) {
                 return normalizeArrayItemType(node.data.arrayItemType);
             }
@@ -5923,7 +7690,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
 
         return nextElements.map((el) => {
-            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' = 'number';
+            let valueType: 'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn' = 'number';
             let nextData: CanvasElement['data'] | undefined;
 
             switch (el.type) {
@@ -6069,6 +7836,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
                 case 'memory-array-append':
                 case 'memory-array-remove':
+                case 'memory-array-read':
                     valueType = 'array';
                     break;
                 case 'event-element':
@@ -6130,10 +7898,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'string-includes':
                     valueType = 'boolean';
                     break;
-                case 'fallback': {
+                case 'fallback':
+                case 'fallback-event': {
                     const primaryType = getConnectedType(el.id, 'input0');
                     const fallbackType = getConnectedType(el.id, 'input1');
-                    valueType = primaryType || fallbackType || el.valueType || 'number';
+                    valueType = primaryType || fallbackType || el.valueType || (el.type === 'fallback-event' ? 'string' : 'number');
                     break;
                 }
                 case 'clamp':
@@ -6146,6 +7915,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
                 case 'multi-concat':
                     valueType = 'string';
+                    break;
+                case 'object-build':
+                case 'json-body':
+                    valueType = 'zip';
                     break;
                 case 'css-unit':
                     valueType = 'css-unit';
@@ -6160,6 +7933,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'css-text':
                 case 'css-join':
                     valueType = 'css';
+                    break;
+                case 'raw-html':
+                case 'set-parent':
+                    valueType = 'element';
+                    break;
+                case 'debug-console-log':
+                case 'debug-console-warn':
+                case 'debug-message-log':
+                case 'debug-message-warn':
+                    valueType = getConnectedType(el.id, 'input0') || 'string';
+                    break;
+                case 'clone-element':
+                    // Clone = element; All Clones = Array<element>.
+                    valueType = 'element';
+                    nextData = { ...el.data, arrayItemType: 'element', arrayItemSchema: [] };
+                    break;
+                case 'elements-by-class':
+                    valueType = 'array';
+                    nextData = { ...el.data, arrayItemType: 'element', arrayItemSchema: [] };
                     break;
                 case 'get-children': {
                     // Single / Child return-as -> element output(s); Children
@@ -6273,6 +8065,31 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     break;
                 case 'api-request':
                 case 'api-status':
+                    valueType = 'zip';
+                    break;
+                case 'db-connect':
+                    valueType = 'dbconn';
+                    break;
+                case 'db-table':
+                case 'db-fields':
+                case 'db-join':
+                case 'db-filter':
+                case 'db-sort':
+                    valueType = 'query';
+                    break;
+                case 'db-select':
+                    // Rows: Array<zip> whose item schema is the selected columns,
+                    // so For Each / Unzip show real column names.
+                    valueType = 'array';
+                    nextData = {
+                        ...el.data,
+                        arrayItemType: 'zip',
+                        arrayItemSchema: getDbSelectSchema(el.id, nextElements, nextConnections),
+                    };
+                    break;
+                case 'db-insert':
+                case 'db-update':
+                case 'db-delete':
                     valueType = 'zip';
                     break;
                 case 'api-field': {
@@ -6463,78 +8280,73 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }));
     };
 
-    const areSnapshotsEquivalent = (
-        firstSnapshot: Partial<SavedState> | null | undefined,
-        secondSnapshot: Partial<SavedState> | null | undefined
-    ): boolean => {
-        const first = normalizeSnapshotState(firstSnapshot);
-        const second = normalizeSnapshotState(secondSnapshot);
-
-        if (!first || !second) {
-            return false;
-        }
-
-        const firstComparable = {
-            elements: first.elements,
-            connections: first.connections,
-            formula: first.formula,
-            customNodeUi: first.customNodeUi,
-        };
-        const secondComparable = {
-            elements: second.elements,
-            connections: second.connections,
-            formula: second.formula,
-            customNodeUi: second.customNodeUi,
-        };
-
-        try {
-            return JSON.stringify(firstComparable) === JSON.stringify(secondComparable);
-        } catch {
-            return false;
-        }
-    };
-
-    const buildSavedState = (): SavedState => ({
-        elements: cloneCanvasElements(elementsRef.current || elements),
-        connections: cloneConnections(connectionsRef.current || connections),
-        formula: buildGraphFormulaFromState(
-            elementsRef.current || elements,
-            connectionsRef.current || connections
-        ) || (typeof formulaRef.current === 'string' ? formulaRef.current : formula),
-        customNodeUi: customNodeUiRef.current ? normalizeCustomNodeUiState(customNodeUiRef.current) : null,
-        updatedAt: Date.now(),
-    });
-
-    const persistSavedSnapshot = (snapshot: SavedState) => {
-        try {
-            if (typeof window !== 'undefined' && window.localStorage) {
-                window.localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot));
-                window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(snapshot));
-            }
-        } catch {
-            // Ignore storage failures and keep the editor usable.
-        }
-    };
-
-    const persistAutosaveSnapshot = (snapshot: SavedState) => {
-        try {
-            if (typeof window !== 'undefined' && window.localStorage) {
-                window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(snapshot));
-            }
-        } catch {
-            // Ignore storage failures and keep the editor usable.
-        }
-    };
-
     // One-time migration: the Output node gained a leading "Element" target
     // input pin, so every pre-existing Output value connection (input0..N) must
     // shift to (input1..N+1). Marked per node via data.outputTargetElementPin so
     // it never runs twice. No-op in custom-node mode (Output pins are label
     // slots there, not element targets) and for every non-Output node.
+    // One-time migration: Element Property / Get Children lost their own
+    // manual/dropdown Element-ID controls (the Element pin is the only source
+    // now). A node that relied on such an ID (nothing wired to its Element
+    // pin) gets an Element Reference with the SAME id settings, wired to that
+    // pin -- identical resolution (__nodeGetElement(id)), so the graph keeps
+    // working. The legacy fields are then dropped. Also renames "CSS Text"
+    // nodes to the new "CSS Custom" label.
+    const migrateLegacyElementIdControls = (
+        els: CanvasElement[],
+        conns: Connection[]
+    ): { elements: CanvasElement[]; connections: Connection[] } => {
+        const takenIds = new Set(els.map((el) => el.id));
+        const uniqueId = (base: string) => {
+            let candidate = base;
+            let n = 2;
+            while (takenIds.has(candidate)) candidate = `${base}-${n++}`;
+            takenIds.add(candidate);
+            return candidate;
+        };
+        const added: CanvasElement[] = [];
+        const addedConns: Connection[] = [];
+        let changed = false;
+        const nextEls = els.map((el) => {
+            if (el.type === 'css-text' && el.name === 'CSS Text') {
+                changed = true;
+                return { ...el, name: 'CSS Custom' };
+            }
+            if (el.type !== 'element-property' && el.type !== 'get-children') return el;
+            const data = el.data || {};
+            if (!('selectedElement' in data) && !('customElementId' in data) && !('elementUseManualId' in data)) return el;
+            const { selectedElement, customElementId, elementUseManualId, ...rest } = data;
+            changed = true;
+            const legacyId = String(elementUseManualId ? (customElementId || '') : (selectedElement || '')).trim();
+            const pinWired = conns.some((c) => c.toId === el.id && c.toInput === 'input0');
+            if (legacyId && !pinWired) {
+                const refId = uniqueId(`${el.id}-element`);
+                added.push({
+                    id: refId,
+                    name: 'Element Reference',
+                    type: 'element-ref',
+                    x: el.x - 260,
+                    y: el.y,
+                    valueType: 'element',
+                    data: {
+                        elementUseManualId: !!elementUseManualId,
+                        customElementId: String(customElementId || ''),
+                        selectedElement: String(selectedElement || ''),
+                    },
+                } as CanvasElement);
+                addedConns.push({ id: uniqueId(`${refId}-wire`), fromId: refId, fromOutput: 'output0', toId: el.id, toInput: 'input0' } as Connection);
+            }
+            return { ...el, data: rest };
+        });
+        if (!changed) return { elements: els, connections: conns };
+        return { elements: [...nextEls, ...added], connections: [...conns, ...addedConns] };
+    };
+
     const migrateOutputTargetElementPin = (
         els: CanvasElement[],
         conns: Connection[]
     ): { elements: CanvasElement[]; connections: Connection[] } => {
+        ({ elements: els, connections: conns } = migrateLegacyElementIdControls(els, conns));
         if (customNodeMode) return { elements: els, connections: conns };
         const shiftNodeIds = new Set<string>();
         const nextEls = els.map((el) => {
@@ -6542,13 +8354,42 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             shiftNodeIds.add(el.id);
             return { ...el, data: { ...el.data, outputTargetElementPin: true } };
         });
-        if (shiftNodeIds.size === 0) return { elements: nextEls, connections: conns };
-        const nextConns = conns.map((connection) => {
+        const shiftedConns = shiftNodeIds.size === 0 ? conns : conns.map((connection) => {
             if (!shiftNodeIds.has(connection.toId)) return connection;
             const match = /^input(\d+)$/i.exec(String(connection.toInput || ''));
             if (!match) return connection;
             return { ...connection, toInput: `input${Number(match[1]) + 1}` };
         });
+
+        // Legacy Background/Color/Disabled/CSS Output pins were removed
+        // (that functionality now lives entirely in the Action System);
+        // Value (input1) was kept -- it's the primary mechanism the whole
+        // product uses for the common "compute a value, display it" case.
+        // By this point every output-type node's connections are normalized
+        // to input0=Element, input1=Value, input2..5=the 4 retired pins
+        // (the shift above already ran, or had already run in a prior
+        // save). getInputCount('output') no longer reports pins 2-5 at all
+        // in non-custom-node mode, so a stale connection there would never
+        // be compiled (silently inert) but would also never be cleaned up
+        // -- pin-position math has no bounds check against the live input
+        // count, so it would render as a dangling wire pointing below the
+        // now shorter card. Prune those connections outright, the same way
+        // DYNAMIC_OUTPUT_NODE_TYPES connections are pruned when an output
+        // pin disappears (pruneStaleDynamicOutputConnections) -- this is
+        // the target-side equivalent for the one node type whose INPUT pin
+        // count shrank instead.
+        const outputNodeIds = new Set(els.filter((el) => el.type === 'output').map((el) => el.id));
+        let didPrune = false;
+        const nextConns = outputNodeIds.size === 0 ? shiftedConns : shiftedConns.filter((connection) => {
+            if (!outputNodeIds.has(connection.toId)) return true;
+            const match = /^input(\d+)$/i.exec(String(connection.toInput || ''));
+            if (!match) return true;
+            const keep = Number(match[1]) <= 1; // keep the Element pin (0) and Value (1)
+            if (!keep) didPrune = true;
+            return keep;
+        });
+
+        if (shiftNodeIds.size === 0 && !didPrune) return { elements: nextEls, connections: conns };
         return { elements: nextEls, connections: nextConns };
     };
 
@@ -6570,6 +8411,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         };
     };
 
+    // Pre-v2 per-editor save slot. Only the template / custom-node editors
+    // (persistence disabled) still read it, exactly as before.
     const readStoredSnapshot = (storageKey: string): SavedState | null => {
         if (typeof window === 'undefined' || !window.localStorage) {
             return null;
@@ -6586,83 +8429,293 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
     };
 
-    const applySnapshot = (snapshot: SavedState | null) => {
-        if (!snapshot) {
-            return;
+    // ── Persistence: MAIN / WORK / RECOVERY / HISTORY / BACKUPS ─────────────
+    // The rules (and their tests) live in graphEditor/graphStore.ts and
+    // tests/graph_store_smoke.js; this block wires them to editor state.
+    //
+    //   user edit -> WORK (in memory) -> undo/redo
+    //                  | next tick (structural) / <= 400 ms (typing) + on close / page hide
+    //                  v
+    //             WORK record (localStorage, revisioned, compare-and-swap)
+    //   Save Graph: WORK -> validate -> compile -> checkpoint MAIN -> host
+    //             commits MAIN + HISTORY atomically -> WORK rebased on MAIN
+    //   crash / failed WORK write -> RECOVERY snapshot (per session), offered
+    //             back only when its content differs from WORK and MAIN.
+    const graphStorage = React.useMemo<GraphStorage>(() => {
+        let storage: StorageLike | null = null;
+        try {
+            storage = typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+        } catch {
+            storage = null; // storage blocked (privacy settings, sandboxed frame)
         }
+        return createGraphStorage(storage, editorId);
+    }, [editorId]);
 
-        const migratedSnapshot = migrateOutputTargetElementPin(
-            cloneCanvasElements(Array.isArray(snapshot.elements) ? snapshot.elements : []),
-            cloneConnections(Array.isArray(snapshot.connections) ? snapshot.connections : [])
-        );
-        const nextElements = migratedSnapshot.elements;
-        const nextConnections = migratedSnapshot.connections;
-        const nextFormula = typeof snapshot.formula === 'string' ? snapshot.formula : '';
-        const nextCustomNodeUi = snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null;
-        const normalizedElements = updateElementValueTypes(
-            nextElements.length > 0 ? nextElements : [{
-                id: 'main-block',
-                name: 'Html Element',
-                type: 'main',
-                x: 0,
-                y: 0,
-                data: { formula: '' },
-                connections: []
-            }],
-            nextConnections
-        );
+    // Decisions are logged with hashes / revisions / reasons -- never graph
+    // content -- to window.__nodelogicPersistenceLog (last 300), so "why was a
+    // recovery offered?" can always be answered.
+    const persistLog = React.useMemo(() => createPersistenceLog(editorId, (entry) => {
+        if (typeof window === 'undefined') return;
+        const host = window as typeof window & { __nodelogicPersistenceLog?: unknown[] };
+        if (!Array.isArray(host.__nodelogicPersistenceLog)) host.__nodelogicPersistenceLog = [];
+        const buffer = host.__nodelogicPersistenceLog;
+        buffer.push(entry);
+        if (buffer.length > 300) buffer.splice(0, buffer.length - 300);
+        // The console only hears about problems; routine events stay in the buffer.
+        if (/failed|conflict|detected|quarantin/.test(entry.event)) {
+            console.info('[NodeLogic persistence]', entry.event, entry.details || {});
+        }
+    }), [editorId]);
 
-        setElements(normalizedElements);
-        setConnections(nextConnections);
-        setFormula(nextFormula);
-        setCustomNodeUi(nextCustomNodeUi);
-        setSavedState({
-            ...snapshot,
-            elements: normalizedElements,
-            connections: nextConnections,
-            formula: nextFormula,
-            customNodeUi: nextCustomNodeUi,
-            updatedAt: snapshot.updatedAt || Date.now(),
-        });
-        setAutosaveState({
-            ...snapshot,
-            elements: normalizedElements,
-            connections: nextConnections,
-            formula: nextFormula,
-            customNodeUi: nextCustomNodeUi,
-            updatedAt: snapshot.updatedAt || Date.now(),
-        });
-        setRecoverableDraftState({
-            ...snapshot,
-            elements: normalizedElements,
-            connections: nextConnections,
-            formula: nextFormula,
-            customNodeUi: nextCustomNodeUi,
-            updatedAt: snapshot.updatedAt || Date.now(),
-        });
-        setUnsavedChanges(false);
-        setPendingDraftRecovery(null);
-        setShowDraftRecoveryNotice(false);
-        setSelected(normalizedElements.some((element) => element.id === selected) ? selected : (
-            shouldRenderMainBlock
-                ? 'main-block'
-                : (normalizedElements.find((element) => element.id !== 'main-block')?.id || null)
-        ));
-        onUnsavedChange?.(false);
-        onFormulaChange?.(nextFormula);
-        onStateChangeRef.current?.({
-            ...snapshot,
-            elements: normalizedElements,
-            connections: nextConnections,
-            formula: nextFormula,
-            customNodeUi: nextCustomNodeUi,
-            updatedAt: snapshot.updatedAt || Date.now(),
-        });
+    const sessionIdRef = useRef(`s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
+    const mainContentRef = useRef<GraphContent>({ elements: [], connections: [], customNodeUi: null });
+    const mainMetaRef = useRef<MainMeta>({ formatVersion: 1, revision: 0, publishedAt: 0 });
+    const mainHashRef = useRef('');
+    const historyEntriesRef = useRef<MainHistoryEntry[]>([]);
+    // Canonical WORK at the last clean point (load / publish). WORK equal to
+    // it = no unpublished changes.
+    const baselineCanonicalRef = useRef('');
+    const lastPersistedCanonicalRef = useRef<string | null>(null);
+    const lastRecoveryCanonicalRef = useRef<string | null>(null);
+    const workCoordinatorRef = useRef<WorkSaveCoordinator | null>(null);
+    const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const persistDueRef = useRef(0);
+    // WORK writes wait until startup has decided what WORK is (and while the
+    // user resolves a startup conflict).
+    const persistenceReadyRef = useRef(false);
+    const recoverySeqRef = useRef(0);
+    const ownRecoveryWrittenRef = useRef(false);
+    // snapshotId -> every storage key holding that snapshot (a pre-v2 draft
+    // can exist twice with identical content).
+    const recoveryKeysRef = useRef<Map<string, string[]>>(new Map());
+    const unsavedChangesRef = useRef(false);
+    const workStatusRef = useRef<'clean' | 'dirty' | 'error' | 'conflict'>('clean');
+    const importFileInputRef = useRef<HTMLInputElement | null>(null);
+    const PERSIST_INTERVAL_MS = 400;
+
+    const makeLocalId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const currentWorkContent = (): GraphContent => ({
+        elements: elementsRef.current as unknown as GraphContent['elements'],
+        connections: connectionsRef.current as unknown as GraphContent['connections'],
+        customNodeUi: customNodeUiRef.current ?? null,
+    });
+
+    const setCustomNodeUiValue = (next: CustomNodeUiState | null) => {
+        customNodeUiRef.current = next;
+        setCustomNodeUi(next);
     };
 
-    const markGraphDirty = () => {
-        setUnsavedChanges(true);
-        onUnsavedChange?.(true);
+    const setDirtyState = (dirty: boolean) => {
+        if (unsavedChangesRef.current === dirty) return;
+        unsavedChangesRef.current = dirty;
+        setUnsavedChanges(dirty);
+        onUnsavedChangeRef.current?.(dirty);
+    };
+
+    const updateWorkStatus = (state: 'clean' | 'dirty' | 'error' | 'conflict', message = '', savedAt?: number) => {
+        workStatusRef.current = state;
+        setWorkStatus((prev) => ({ state, message, savedAt: savedAt ?? prev.savedAt }));
+    };
+
+    const refreshBackups = () => setBackupEntries(graphStorage.readBackups());
+
+    const backupContent = (graph: GraphContent, reason: string, label: string): boolean => {
+        const result = graphStorage.pushBackup({ id: makeLocalId(), reason, label, createdAt: Date.now(), graph });
+        persistLog(result.ok ? 'backup-created' : 'backup-failed', { reason, contentHash: semanticHash(graph), error: result.error });
+        return result.ok;
+    };
+
+    // Editor-side normal form of stored / imported content: the same
+    // migrations every loaded graph goes through (idempotent).
+    const normalizeGraphContent = (content: GraphContent): GraphContent => pickGraphContent(normalizeSnapshotState({
+        elements: content.elements as unknown as CanvasElement[],
+        connections: content.connections as unknown as Connection[],
+        formula: '',
+        customNodeUi: (content.customNodeUi as CustomNodeUiState | null) ?? null,
+    }));
+
+    // Emergency snapshot of the in-memory graph (page hide / crash / a WORK
+    // write that failed or was refused).
+    const writeRecoverySnapshot = (reason: string): boolean => {
+        if (!persistenceEnabled || !graphStorage.available) return false;
+        const known = workCoordinatorRef.current?.known;
+        recoverySeqRef.current += 1;
+        const content = currentWorkContent();
+        const record = buildStoredRecord({
+            kind: 'nodelogic-recovery',
+            editorId,
+            snapshotId: `${sessionIdRef.current}-r${recoverySeqRef.current}`,
+            sessionId: sessionIdRef.current,
+            revision: recoverySeqRef.current,
+            afterWorkRevision: known && known.sessionId === sessionIdRef.current ? known.revision : -1,
+            createdAt: Date.now(),
+            baseMainHash: mainHashRef.current,
+            reason,
+            appVersion: PERSISTENCE_APP_VERSION,
+            graph: content,
+        });
+        const result = graphStorage.writeRecovery(record);
+        if (result.ok) {
+            ownRecoveryWrittenRef.current = true;
+            lastRecoveryCanonicalRef.current = canonicalGraphString(content);
+        }
+        persistLog(result.ok ? 'recovery-created' : 'recovery-write-failed', {
+            reason,
+            snapshotId: record.snapshotId,
+            contentHash: record.contentHash,
+            afterWorkRevision: record.afterWorkRevision,
+            error: result.error,
+        });
+        return result.ok;
+    };
+
+    // Called only after WORK verifiably holds the latest state.
+    const clearOwnRecoverySnapshot = (why: string) => {
+        if (!ownRecoveryWrittenRef.current) return;
+        const result = graphStorage.remove(graphStorage.keys.recovery(sessionIdRef.current));
+        if (result.ok) {
+            ownRecoveryWrittenRef.current = false;
+            lastRecoveryCanonicalRef.current = null;
+        }
+        persistLog(result.ok ? 'recovery-superseded' : 'recovery-cleanup-failed', { why, error: result.error });
+    };
+
+    /**
+     * Store WORK now (localStorage is synchronous). Returns true when the
+     * in-memory graph is safely stored afterwards. A graph the user has not
+     * touched is never written: derived bookkeeping on a clean graph only
+     * moves the clean baseline.
+     */
+    const persistWorkNow = (trigger: string): boolean => {
+        if (persistTimerRef.current) {
+            clearTimeout(persistTimerRef.current);
+            persistTimerRef.current = null;
+        }
+        if (!persistenceEnabled || !persistenceReadyRef.current) return false;
+        const content = currentWorkContent();
+        const canonical = canonicalGraphString(content);
+        if (!userTouchedRef.current) {
+            baselineCanonicalRef.current = canonical;
+            setDirtyState(false);
+            return true;
+        }
+        const dirty = canonical !== baselineCanonicalRef.current;
+        setDirtyState(dirty);
+        if (canonical === lastPersistedCanonicalRef.current) {
+            if (workStatusRef.current !== 'conflict' && workStatusRef.current !== 'error') updateWorkStatus(dirty ? 'dirty' : 'clean');
+            return true;
+        }
+        const coordinator = workCoordinatorRef.current;
+        if (!coordinator || !graphStorage.available) {
+            updateWorkStatus('error', 'This browser does not allow storing a working copy: your changes exist only while the editor is open. Use Save Graph to keep them.');
+            persistLog('work-save-failed', { trigger, error: 'storage unavailable' });
+            return false;
+        }
+        const outcome = coordinator.save((revision) => buildStoredRecord({
+            kind: 'nodelogic-work',
+            editorId,
+            snapshotId: `${sessionIdRef.current}-w${revision}`,
+            sessionId: sessionIdRef.current,
+            revision,
+            afterWorkRevision: -1,
+            createdAt: Date.now(),
+            baseMainHash: mainHashRef.current,
+            reason: trigger,
+            appVersion: PERSISTENCE_APP_VERSION,
+            graph: content,
+        }));
+        if (outcome instanceof Promise) {
+            // The localStorage adapter is synchronous; never expected here.
+            persistLog('work-save-failed', { trigger, error: 'unexpected asynchronous storage' });
+            return false;
+        }
+        if (outcome.status === 'committed') {
+            lastPersistedCanonicalRef.current = canonical;
+            if (workStatusRef.current !== 'conflict') updateWorkStatus(dirty ? 'dirty' : 'clean', '', Date.now());
+            clearOwnRecoverySnapshot(`work r${outcome.revision} stored`);
+            persistLog('work-saved', { trigger, revision: outcome.revision, contentHash: semanticHash(content), dirty });
+            return true;
+        }
+        if (outcome.status === 'superseded') {
+            persistLog('work-save-superseded', { trigger, revision: outcome.revision });
+            return true;
+        }
+        if (outcome.status === 'conflict') {
+            persistLog('work-save-conflict', { trigger, revision: outcome.revision, storedBy: outcome.stored?.sessionId, storedRevision: outcome.stored?.revision });
+            if (lastRecoveryCanonicalRef.current !== canonical) writeRecoverySnapshot('work-conflict');
+            updateWorkStatus('conflict', 'This graph’s working copy was changed in another tab or window. Your latest changes are kept separately in this browser - nothing was overwritten.');
+            return false;
+        }
+        persistLog('work-save-failed', { trigger, revision: outcome.revision, error: outcome.error });
+        if (lastRecoveryCanonicalRef.current !== canonical) writeRecoverySnapshot('work-save-failed');
+        updateWorkStatus('error', `Could not store the working copy in this browser (${outcome.error}). Use Save Graph to keep your changes.`);
+        return false;
+    };
+
+    // Structural edits (add / delete / move / wire / undo) are stored on the
+    // next tick; other changes within PERSIST_INTERVAL_MS. A pending earlier
+    // save is never pushed out by a later change, so continuous typing is
+    // stored at least every 400 ms and a hard crash can lose at most that.
+    const schedulePersist = (origin: 'user' | 'system', pace: 'soon' | 'debounced' = 'debounced') => {
+        if (!persistenceEnabled || !persistenceReadyRef.current) return;
+        // Immediate feedback; persistWorkNow reconciles it with the content.
+        if (origin === 'user') setDirtyState(true);
+        const delay = pace === 'soon' ? 0 : PERSIST_INTERVAL_MS;
+        const due = Date.now() + delay;
+        if (persistTimerRef.current) {
+            if (persistDueRef.current <= due) return; // an earlier save covers this change
+            clearTimeout(persistTimerRef.current);
+        }
+        persistDueRef.current = due;
+        persistTimerRef.current = setTimeout(() => {
+            persistTimerRef.current = null;
+            persistWorkNow('autosave');
+        }, delay);
+    };
+    schedulePersistRef.current = schedulePersist;
+
+    // Load a graph into the editor as WORK content (no undo step, no "user
+    // change": callers decide what the load means).
+    const loadWorkingGraph = (content: GraphContent) => {
+        const normalized = normalizeGraphContent(content);
+        const nextConnections = normalized.connections as unknown as Connection[];
+        const loadedElements = normalized.elements as unknown as CanvasElement[];
+        const nextElements = updateElementValueTypes(
+            loadedElements.length > 0 ? loadedElements : (shouldRenderMainBlock ? [createDefaultMainBlock()] : []),
+            nextConnections
+        );
+        setConnectionsSystem(nextConnections);
+        setElementsSystem(nextElements);
+        setCustomNodeUiValue(normalized.customNodeUi ? normalizeCustomNodeUiState(normalized.customNodeUi) : null);
+        setSelected((current) => (
+            current && nextElements.some((element) => element.id === current)
+                ? current
+                : (shouldRenderMainBlock
+                    ? 'main-block'
+                    : (nextElements.find((element) => element.id !== 'main-block')?.id || null))
+        ));
+    };
+
+    /**
+     * Replace WORK with another graph (restore a version / backup / recovery,
+     * import, template, discard). The user has already confirmed. MAIN is
+     * never touched: it changes only through Save Graph.
+     */
+    const replaceWorkingGraph = (content: GraphContent, reason: ReplaceWorkReason, label: string) => {
+        const before = currentWorkContent();
+        // CHECKPOINT: the working copy being replaced survives as a local
+        // backup (reload-proof) and as one undo step (this session).
+        const backedUp = backupContent(before, `before-${reason}`, `Working copy before ${label}`);
+        undoTxRef.current = null;
+        pushUndoCheckpoint({ elements: elementsRef.current, connections: connectionsRef.current });
+        loadWorkingGraph(content);
+        userTouchedRef.current = true;
+        persistenceReadyRef.current = true;
+        const stored = persistWorkNow(`replace:${reason}`);
+        persistLog('work-replaced', { reason, from: semanticHash(before), to: semanticHash(content), backedUp, stored });
+        refreshBackups();
+        return stored;
     };
 
     const createElementFromTreeItem = (item: TreeItem, x: number, y: number): CanvasElement => ({
@@ -6743,10 +8796,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 Math.round(dropX - 90),
                 Math.round(dropY - 30)
             );
-            pushHistory(elementsRef.current, connectionsRef.current);
             setElements((prev) => updateElementValueTypes([...prev, nextElement], connectionsRef.current));
             setSelected(nextElement.id);
-            markGraphDirty();
         }
 
         setIsDraggingFromSidebar(false);
@@ -6755,15 +8806,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         draggedItemRef.current = null;
         setDragPreview(null);
         sidebarDragRef.current = null;
-    };
-
-    const handleSaveFormula = () => {
-        const nextFormula = buildGraphFormulaFromState(
-            elementsRef.current || elements,
-            connectionsRef.current || connections
-        ) || (typeof formulaRef.current === 'string' ? formulaRef.current : formula);
-        setFormula(nextFormula);
-        onFormulaChange?.(nextFormula);
     };
 
     const fetchJson = React.useCallback(async (path: string) => {
@@ -6843,151 +8885,254 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
     }, [fetchJson, templateToolsEnabled]);
 
-    const handleImportTemplate = React.useCallback(() => {
-        setIsTemplateBusy(true);
-        try {
-            const template = templates.find((item) => item.id === selectedTemplateId);
-            const state = normalizeSnapshot(template?.state);
-
-            if (!template || !state) {
-                setTemplateInfo('Select a valid template.');
-                return;
-            }
-
-            applySnapshot({
-                elements: state.elements as CanvasElement[],
-                connections: state.connections as Connection[],
-                formula: state.mainFormula,
-                eventFormulas: state.eventFormulas,
-                customNodeUi: state.customNodeUi,
-                updatedAt: state.updatedAt,
-            });
-
-            persistSavedSnapshot({
-                elements: cloneCanvasElements(state.elements as CanvasElement[]),
-                connections: cloneConnections(state.connections as Connection[]),
-                formula: state.mainFormula,
-                customNodeUi: state.customNodeUi,
-                updatedAt: Date.now(),
-            });
-
-            setTemplateInfo('Template imported.');
-        } finally {
-            setIsTemplateBusy(false);
-        }
-    }, [applySnapshot, persistSavedSnapshot, selectedTemplateId, templates]);
-
-    useEffect(() => {
-        if (hasInitializedRef.current) {
+    // Templates replace the WORKING copy (confirmed, checkpointed, undoable);
+    // they never write the page graph directly.
+    const handleImportTemplate = () => {
+        const template = templates.find((item) => item.id === selectedTemplateId);
+        const state = normalizeSnapshot(template?.state);
+        if (!template || !state) {
+            setTemplateInfo('Select a valid template.');
             return;
         }
+        const validation = validateGraphContent(state, { strict: true });
+        if (!validation.ok || !validation.content) {
+            persistLog('import-validation-failed', { source: 'template', errors: validation.errors });
+            setTemplateInfo(`This template is damaged: ${validation.errors[0] || 'invalid graph'}`);
+            return;
+        }
+        let content: GraphContent;
+        try {
+            content = normalizeGraphContent(validation.content);
+        } catch (error) {
+            setTemplateInfo(`This template could not be converted: ${(error as Error)?.message || String(error)}`);
+            return;
+        }
+        setPersistenceDialog({
+            kind: 'confirm-replace',
+            title: `Use template “${template.name}”?`,
+            reason: 'template',
+            label: `template "${template.name}"`,
+            content,
+            notes: [
+                ...validation.warnings,
+                'The template becomes your working copy.',
+                'The page keeps its current graph until you click Save Graph.',
+            ],
+            confirmLabel: 'Use template',
+            onDone: () => setTemplateInfo('Template loaded into the working copy.'),
+        });
+    };
 
-        hasInitializedRef.current = true;
-        draftRecoveryCheckedRef.current = false;
-
+    // Template / custom-node editors: host-managed state, loaded as before
+    // (no WORK / recovery / history).
+    const initializeHostManagedState = () => {
         const normalizedInitial = normalizeSnapshotState(initialState);
         const savedFromStorage = readStoredSnapshot(SAVE_KEY);
         const autosaveFromStorage = readStoredSnapshot(AUTOSAVE_KEY);
         const activeSnapshot = forceInitialState
             ? (normalizedInitial || savedFromStorage || autosaveFromStorage)
             : (savedFromStorage || normalizedInitial || autosaveFromStorage);
+        loadWorkingGraph(pickGraphContent(activeSnapshot));
+        setFormula(typeof activeSnapshot?.formula === 'string' ? activeSnapshot.formula : '');
+        setDirtyState(false);
+    };
 
-        const defaultMainBlock: CanvasElement = {
-            id: 'main-block',
-            name: 'Html Element',
-            type: 'main',
-            x: 0,
-            y: 0,
-            data: { formula: '' },
-            connections: []
-        };
+    /**
+     * Startup: LOAD MAIN + WORK + RECOVERY -> VALIDATE -> NORMALIZE ->
+     * COMPARE -> decide. Read-only until the user decides: nothing here
+     * replaces WORK, touches MAIN or deletes a snapshot that may hold data.
+     */
+    const initializePersistentState = () => {
+        // 1. MAIN (the host's graphState) + its history -- read-only.
+        const mainState = normalizeSnapshotState(initialState);
+        const mainContent = pickGraphContent(mainState);
+        mainContentRef.current = mainContent;
+        mainMetaRef.current = readMainMeta(initialState);
+        mainHashRef.current = semanticHash(mainContent);
+        const history = normalizeHistory(initialHistory);
+        historyEntriesRef.current = history.entries;
+        setHistoryEntries(history.entries);
+        setMainInfo({ revision: mainMetaRef.current.revision, publishedAt: mainMetaRef.current.publishedAt });
+        setFormula(typeof mainState?.formula === 'string' ? mainState.formula : '');
+        if (history.dropped) persistLog('history-entries-ignored', { dropped: history.dropped });
 
-        if (activeSnapshot) {
-            const migratedActive = migrateOutputTargetElementPin(
-                cloneCanvasElements(Array.isArray(activeSnapshot.elements) ? activeSnapshot.elements : []),
-                cloneConnections(Array.isArray(activeSnapshot.connections) ? activeSnapshot.connections : [])
-            );
-            const nextElements = migratedActive.elements;
-            const nextConnections = migratedActive.connections;
-            const nextFormula = typeof activeSnapshot.formula === 'string' ? activeSnapshot.formula : '';
-            const nextCustomNodeUi = activeSnapshot.customNodeUi ? normalizeCustomNodeUiState(activeSnapshot.customNodeUi) : null;
-            const normalizedElements = updateElementValueTypes(
-                nextElements.length > 0 ? nextElements : (shouldRenderMainBlock ? [defaultMainBlock] : []),
-                nextConnections
-            );
-            const nextSavedState = normalizedInitial || savedFromStorage || activeSnapshot;
-            const nextAutosaveState = autosaveFromStorage || nextSavedState;
-            const hasRecoverableDraft = Boolean(
-                autosaveFromStorage
-                && nextSavedState
-                && !areSnapshotsEquivalent(autosaveFromStorage, nextSavedState)
-            );
+        // 2. WORK (this browser). Anything unusable is moved aside verbatim,
+        //    never overwritten and never loaded.
+        let parsedWork = graphStorage.readWork();
+        let workRecord: StoredGraphRecord | null = null;
+        if (parsedWork.status === 'ok' && parsedWork.record) {
+            try {
+                workRecord = { ...parsedWork.record, graph: normalizeGraphContent(parsedWork.record.graph) };
+            } catch (error) {
+                parsedWork = { status: 'corrupt', reason: `migration failed: ${(error as Error)?.message || String(error)}`, record: null };
+            }
+        }
+        if (parsedWork.status !== 'ok' && parsedWork.status !== 'missing') {
+            const quarantine = graphStorage.quarantineWork(Date.now());
+            persistLog('work-quarantined', { status: parsedWork.status, reason: parsedWork.reason, ok: quarantine.ok, key: quarantine.quarantineKey, error: quarantine.error });
+            if (quarantine.ok) showInfoNotice('A damaged working copy was set aside (not deleted); the graph saved on the page was loaded.');
+        }
+        workCoordinatorRef.current = createWorkSaveCoordinator({
+            adapter: graphStorage.adapter,
+            sessionId: sessionIdRef.current,
+            known: graphStorage.readWorkStamp(),
+        });
 
-            setElements(normalizedElements);
-            setConnections(nextConnections);
-            setFormula(nextFormula);
-            setCustomNodeUi(nextCustomNodeUi);
-            setSavedState(nextSavedState);
-            setAutosaveState(nextAutosaveState);
-            setRecoverableDraftState(hasRecoverableDraft ? autosaveFromStorage : nextAutosaveState);
-            setPendingDraftRecovery(hasRecoverableDraft && !templateMode && !customNodeMode ? autosaveFromStorage : null);
-            setShowDraftRecoveryNotice(hasRecoverableDraft && !templateMode && !customNodeMode);
-            setUnsavedChanges(false);
-            setSelected(
-                normalizedElements.some((element) => element.id === 'main-block')
-                    ? (shouldRenderMainBlock ? 'main-block' : (normalizedElements.find((element) => element.id !== 'main-block')?.id || null))
-                    : (normalizedElements.find((element) => element.id !== 'main-block')?.id || (shouldRenderMainBlock ? 'main-block' : null))
-            );
-            onUnsavedChange?.(false);
-            onFormulaChange?.(nextFormula);
-            setIsStateLoaded(true);
-            isStateLoadedRef.current = true;
-            return;
+        // 3. Which state opens? (graphStore.decideStartup)
+        const decision = decideStartup({ main: mainContent, work: workRecord });
+        persistLog('startup-decided', {
+            source: decision.source,
+            reason: decision.reason,
+            mainHash: mainHashRef.current,
+            mainRevision: mainMetaRef.current.revision,
+            workRevision: workRecord?.revision,
+            workSession: workRecord?.sessionId,
+            workBase: workRecord?.baseMainHash,
+            workHash: workRecord?.contentHash,
+        });
+        baselineCanonicalRef.current = canonicalGraphString(mainContent);
+        if (decision.source === 'work' && workRecord) {
+            loadWorkingGraph(workRecord.graph);
+            lastPersistedCanonicalRef.current = canonicalGraphString(workRecord.graph);
+            userTouchedRef.current = true;
+            persistenceReadyRef.current = true;
+            setDirtyState(true);
+            updateWorkStatus('dirty', `Unpublished changes reopened from your working copy (stored ${formatTimestamp(workRecord.createdAt)}).`, workRecord.createdAt);
+        } else {
+            loadWorkingGraph(mainContent);
+            lastPersistedCanonicalRef.current = workRecord ? canonicalGraphString(workRecord.graph) : null;
+            userTouchedRef.current = false;
+            persistenceReadyRef.current = decision.source !== 'conflict';
+            setDirtyState(false);
+            updateWorkStatus('clean');
+            if (decision.source === 'conflict' && workRecord) {
+                setStartupConflict({ decision, work: workRecord, diff: diffGraphs(mainContent, workRecord.graph) });
+            }
         }
 
-        setElements(shouldRenderMainBlock ? [defaultMainBlock] : []);
-        setConnections([]);
-        setFormula('');
-        setCustomNodeUi(null);
-        setSavedState(null);
-        setAutosaveState(null);
-        setRecoverableDraftState(null);
-        setPendingDraftRecovery(null);
-        setShowDraftRecoveryNotice(false);
-        setUnsavedChanges(false);
-        setSelected(shouldRenderMainBlock ? 'main-block' : null);
-        onUnsavedChange?.(false);
-        setIsStateLoaded(true);
-        isStateLoadedRef.current = true;
-    }, [AUTOSAVE_KEY, SAVE_KEY, customNodeMode, forceInitialState, initialState, onFormulaChange, onUnsavedChange, shouldRenderMainBlock, templateMode]);
+        // 4. RECOVERY: other sessions' snapshots + pre-v2 drafts, judged by
+        //    content (graphStore.evaluateRecoveryCandidates), never by age.
+        const keysBySnapshot = new Map<string, string[]>();
+        const candidates = [
+            ...graphStorage.listRecoveries().map((candidate) => {
+                if (candidate.parsed.status !== 'ok' || !candidate.parsed.record) return candidate;
+                try {
+                    return { ...candidate, parsed: { ...candidate.parsed, record: { ...candidate.parsed.record, graph: normalizeGraphContent(candidate.parsed.record.graph) } } };
+                } catch (error) {
+                    return { ...candidate, parsed: { status: 'corrupt' as const, reason: `migration failed: ${(error as Error)?.message || String(error)}`, record: null } };
+                }
+            }),
+            ...graphStorage.readLegacyDrafts().map(({ key, raw }) => legacyDraftCandidate(key, raw, editorId, normalizeGraphContent)),
+        ].filter((candidate) => {
+            const snapshotId = candidate.parsed.record?.snapshotId;
+            if (!snapshotId) return true;
+            const keys = keysBySnapshot.get(snapshotId);
+            keysBySnapshot.set(snapshotId, keys ? [...keys, candidate.key] : [candidate.key]);
+            return !keys; // identical legacy copies are judged once
+        });
+        recoveryKeysRef.current = keysBySnapshot;
+        const evaluation = evaluateRecoveryCandidates({
+            currentSessionId: sessionIdRef.current,
+            main: mainContent,
+            work: { content: workRecord ? workRecord.graph : mainContent, record: workRecord },
+            candidates,
+            dismissed: graphStorage.readDismissed(),
+        });
+        evaluation.decisions.forEach((item) => persistLog(item.decision === 'prompt' ? 'recovery-detected' : 'recovery-compared', {
+            key: item.key,
+            decision: item.decision,
+            reason: item.reason,
+            snapshotId: item.record?.snapshotId,
+            createdAt: item.record?.createdAt,
+            legacy: item.legacy,
+            ...(item.diffVsWork ? { vsWork: summarizeDiff(item.diffVsWork) } : {}),
+            ...(item.diffVsMain ? { vsMain: summarizeDiff(item.diffVsMain) } : {}),
+        }));
+        // Housekeeping AFTER the read-only evaluation, and only for snapshots
+        // whose content is provably held elsewhere (the verified stored WORK)
+        // or was dismissed earlier. Anything not identical to the stored WORK
+        // is copied into the local backups before its key is removed.
+        evaluation.decisions.forEach((item) => {
+            if (!item.cleanup || !item.record) return;
+            const heldByStoredWork = item.decision === 'equal-to-work' && workRecord !== null;
+            if (!heldByStoredWork && !backupContent(item.record.graph, `snapshot-${item.decision}`, `Snapshot from ${formatTimestamp(item.record.createdAt)} (${item.reason})`)) return;
+            removeSnapshotKeys(item, `cleanup:${item.decision}`);
+        });
+        setRecoveryQueue(evaluation.prompts);
+        refreshBackups();
+    };
+
+    const removeSnapshotKeys = (item: RecoveryDecision, why: string) => {
+        const keys = (item.record && recoveryKeysRef.current.get(item.record.snapshotId)) || [item.key];
+        keys.forEach((key) => {
+            const result = graphStorage.remove(key);
+            persistLog(result.ok ? 'recovery-removed' : 'recovery-cleanup-failed', { key, why, error: result.error });
+        });
+    };
 
     useEffect(() => {
-        if (!isStateLoaded || templateMode || customNodeMode || !unsavedChanges) {
-            if (autosaveTimeoutRef.current) {
-                clearTimeout(autosaveTimeoutRef.current);
-                autosaveTimeoutRef.current = null;
-            }
+        if (hasInitializedRef.current) {
             return;
         }
-
-        // Debounce autosave to at most once per 5 seconds to reduce performance impact
-        if (autosaveTimeoutRef.current) {
-            clearTimeout(autosaveTimeoutRef.current);
+        hasInitializedRef.current = true;
+        if (persistenceEnabled) {
+            initializePersistentState();
+        } else {
+            initializeHostManagedState();
         }
-        
-        autosaveTimeoutRef.current = setTimeout(() => {
-            const snapshot = buildSavedState();
-            setAutosaveState(snapshot);
-            persistAutosaveSnapshot(snapshot);
-            autosaveTimeoutRef.current = null;
-        }, 5000);
-        
+        setIsStateLoaded(true);
+        isStateLoadedRef.current = true;
+        // Runs once per mount: later prop changes (the host re-rendering with
+        // the graph it just received from Save Graph) must not reload WORK.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Never lose the last edits: flush WORK when the editor closes, the tab is
+    // hidden or the page unloads. Crash-safe order: emergency snapshot first,
+    // then WORK; the snapshot is removed only once WORK verifiably holds the
+    // same state (a kill between the two leaves a snapshot equal to WORK,
+    // which is never offered back).
+    const flushPersistenceRef = useRef<(trigger: string) => void>(() => {});
+    flushPersistenceRef.current = (trigger: string) => {
+        if (!persistenceEnabled || !persistenceReadyRef.current || !userTouchedRef.current) return;
+        const canonical = canonicalGraphString(currentWorkContent());
+        if (canonical === lastPersistedCanonicalRef.current) return;
+        if (canonical !== lastRecoveryCanonicalRef.current) writeRecoverySnapshot(trigger);
+        persistWorkNow(trigger);
+    };
+    useEffect(() => {
+        if (!persistenceEnabled || typeof window === 'undefined') return undefined;
+        const onPageHide = () => flushPersistenceRef.current('pagehide');
+        const onBeforeUnload = () => flushPersistenceRef.current('beforeunload');
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') flushPersistenceRef.current('hidden');
+        };
+        // While WORK cannot be stored (storage error / another tab owns it),
+        // keep the emergency snapshot of the latest state fresh.
+        const interval = window.setInterval(() => {
+            if (workStatusRef.current !== 'error' && workStatusRef.current !== 'conflict') return;
+            if (!userTouchedRef.current) return;
+            const canonical = canonicalGraphString(currentWorkContent());
+            if (canonical !== lastRecoveryCanonicalRef.current && canonical !== lastPersistedCanonicalRef.current) {
+                writeRecoverySnapshot('periodic');
+            }
+        }, 15000);
+        window.addEventListener('pagehide', onPageHide);
+        window.addEventListener('beforeunload', onBeforeUnload);
+        document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
-            if (autosaveTimeoutRef.current) {
-                clearTimeout(autosaveTimeoutRef.current);
+            window.removeEventListener('pagehide', onPageHide);
+            window.removeEventListener('beforeunload', onBeforeUnload);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.clearInterval(interval);
+            flushPersistenceRef.current('editor-closed');
+            if (persistTimerRef.current) {
+                clearTimeout(persistTimerRef.current);
+                persistTimerRef.current = null;
             }
         };
-    }, [connections, customNodeMode, elements, isStateLoaded, persistAutosaveSnapshot, templateMode, customNodeUi, unsavedChanges]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [persistenceEnabled]);
 
     useLayoutEffect(() => {
         const rafId = window.requestAnimationFrame(() => {
@@ -7141,7 +9286,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const nextConnections = pruneStaleDynamicOutputConnections(nextElements, connectionsRef.current);
         const connectionsChanged = nextConnections.length !== (connectionsRef.current || []).length;
 
-        elementsRef.current = nextElements;
         setElements(nextElements);
 
         if (connectionsChanged) {
@@ -7224,8 +9368,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         first
                     );
                 }
+                if (source.type === 'elements-by-class') {
+                    // First element in the preview carrying the class(es).
+                    const tokens = String(source.data?.classNames || '').trim().split(/\s+/).filter((token) => /^[A-Za-z0-9_-]+$/.test(token));
+                    if (!tokens.length) return null;
+                    const selector = tokens.map((token) => `.${token}`).join('');
+                    for (const doc of getPreviewDocuments()) {
+                        try {
+                            const found = doc.querySelector(selector);
+                            if (found) return found;
+                        } catch { /* invalid selector */ }
+                    }
+                    return null;
+                }
                 return null;
             }
+            case 'raw-html': {
+                // The node's own HTML, parsed + sanitized exactly like the
+                // runtime does (detached, inert, shared read-only preview).
+                return analyzeRawHtmlCached(String(node.data?.rawHtml || '')).root;
+            }
+            case 'clone-element':
+                // A copy looks like its source.
+                return outputIndex === 0 ? resolveInput0Element() : null;
+            case 'set-parent':
             case 'fallback':
             case 'node-branch':
             case 'switch-branch': {
@@ -7240,7 +9406,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     // Refresh detection when the editor preview DOM mutates (Gutenberg / Elementor).
     const hasElementPropertyNode = elements.some((element) => element.type === 'element-property');
     const hasGetChildrenNode = elements.some((element) => element.type === 'get-children');
-    const needsPreviewDetection = hasElementPropertyNode || hasGetChildrenNode;
+    const hasFormDataNode = elements.some((element) => element.type === 'form-data');
+    const needsPreviewDetection = hasElementPropertyNode || hasGetChildrenNode || hasFormDataNode;
     useEffect(() => {
         if (!needsPreviewDetection) return undefined;
         const dispose = observePreviewDomChanges(
@@ -7333,10 +9500,615 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connectionsRef.current
         );
         if (prunedConnections.length !== connectionsRef.current.length) {
-            syncConnectionsAndTypes(prunedConnections);
+            syncConnectionsAndTypes(prunedConnections, 'system');
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [elements, connections, detectedElements, previewDomVersion]);
+
+    // Recompute detected fields for every Form Data node. Unlike Element
+    // Property, the target is resolved from the node's OWN Element-ID control
+    // FIRST-CLASS (form-data doesn't require an upstream element-ref just to
+    // point at a <form>) -- a wired Element pin still wins when present, same
+    // resolution order as buildElementSourceExpr uses at compile time.
+    useEffect(() => {
+        const formNodes = elementsRef.current.filter((element) => element.type === 'form-data');
+        const nextDetections: Record<string, DetectedFormField[]> = {};
+
+        formNodes.forEach((node) => {
+            const connection = connectionsRef.current.find(
+                (candidate) => candidate.toId === node.id && candidate.toInput === 'input0'
+            );
+            const sourceNode = connection
+                ? elementsRef.current.find((element) => element.id === connection.fromId)
+                : null;
+            const liveFromConnection = connection
+                ? resolveNodeOutputPreviewElement(sourceNode, parsePinIndex(connection.fromOutput))
+                : null;
+            const ownTargetId = resolveElementRefTargetId(node);
+            const liveElement = liveFromConnection
+                || (ownTargetId ? resolvePreviewElement(ownTargetId, { unwrapControl: false }) : null);
+
+            if (!liveElement) {
+                nextDetections[node.id] = [];
+                return;
+            }
+            try {
+                nextDetections[node.id] = detectFormFields(liveElement);
+            } catch {
+                nextDetections[node.id] = [];
+            }
+        });
+
+        const signature = JSON.stringify(nextDetections);
+        if (signature === formFieldDetectionSignatureRef.current) {
+            return;
+        }
+        formFieldDetectionSignatureRef.current = signature;
+        formFieldDetectionsRef.current = nextDetections;
+        setFormFieldDetections(nextDetections);
+
+        const prunedConnections = pruneStaleDynamicOutputConnections(
+            elementsRef.current,
+            connectionsRef.current
+        );
+        if (prunedConnections.length !== connectionsRef.current.length) {
+            syncConnectionsAndTypes(prunedConnections, 'system');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [elements, connections, previewDomVersion]);
+
+    // ---- PRO Database nodes: schema loading + administrator signing ----
+    const hasDbNodes = elements.some((el) => DB_NODE_TYPES.has(el.type));
+
+    useEffect(() => {
+        if (!hasDbNodes || dbConnections !== null || !getDbApiConfig()?.canManage) return;
+        let cancelled = false;
+        const refresh = dbSchemaRefreshRef.current;
+        dbSchemaRefreshRef.current = false;
+        dbApiFetch<{ connections?: DbEditorConnection[] }>(refresh ? 'db/editor-schema?refresh=1' : 'db/editor-schema')
+            .then((result) => {
+                if (cancelled) return;
+                setDbConnections(Array.isArray(result?.connections) ? result.connections : []);
+                setDbConnectionsError('');
+            })
+            .catch((error) => {
+                if (cancelled) return;
+                setDbConnections([]);
+                setDbConnectionsError(String(error?.message || error));
+            });
+        return () => { cancelled = true; };
+    }, [hasDbNodes, dbConnections]);
+
+    // Usable tables of every database chosen in a DB Connect node, and the
+    // columns of every table used by a DB Table / DB Join node.
+    useEffect(() => {
+        if (!dbConnections || !getDbApiConfig()?.canManage) return;
+        const wantedTables = new Set<string>();
+        const wantedColumns = new Set<string>();
+        elements.forEach((el) => {
+            if (el.type === 'db-connect' && el.data?.dbDatabase) {
+                wantedTables.add(dbTablesCacheKey(String(el.data.dbConnectionId || 'wp'), String(el.data.dbDatabase)));
+            }
+            if (el.type === 'db-table' || el.type === 'db-join') {
+                const chain = resolveDbChain(el.id, elements, connections);
+                if (!chain.database) return;
+                wantedTables.add(dbTablesCacheKey(chain.connectionId, chain.database));
+                const table = el.type === 'db-table' ? String(el.data?.dbTable || '') : String(el.data?.dbJoinTable || '');
+                if (table) wantedColumns.add(dbColumnsCacheKey(chain.connectionId, chain.database, table));
+            }
+        });
+        wantedTables.forEach((key) => {
+            if (dbTables[key] !== undefined) return;
+            const [connectionId, database] = key.split('|');
+            setDbTables((prev) => ({ ...prev, [key]: 'loading' }));
+            dbApiFetch<{ ok?: boolean; tables?: string[] }>(`db/tables?connectionId=${encodeURIComponent(connectionId)}&database=${encodeURIComponent(database)}`)
+                .then((result) => setDbTables((prev) => ({ ...prev, [key]: result?.ok && Array.isArray(result.tables) ? result.tables : 'error' })))
+                .catch(() => setDbTables((prev) => ({ ...prev, [key]: 'error' })));
+        });
+        wantedColumns.forEach((key) => {
+            if (dbColumns[key] !== undefined) return;
+            const [connectionId, database, table] = key.split('|');
+            setDbColumns((prev) => ({ ...prev, [key]: 'loading' }));
+            dbApiFetch<{ ok?: boolean; columns?: DbColumnInfo[] }>(`db/columns?connectionId=${encodeURIComponent(connectionId)}&database=${encodeURIComponent(database)}&table=${encodeURIComponent(table)}`)
+                .then((result) => setDbColumns((prev) => ({ ...prev, [key]: result?.ok && Array.isArray(result.columns) ? result.columns : 'error' })))
+                .catch(() => setDbColumns((prev) => ({ ...prev, [key]: 'error' })));
+        });
+    }, [elements, connections, dbConnections, dbColumns, dbTables]);
+
+    // Every DB operation node must carry a server-issued signature over its
+    // exact query shape (see the PRO plugin's db-spec.php). Re-request it
+    // only when that shape (or the page it lives on) actually changes.
+    useEffect(() => {
+        if (!getDbApiConfig()?.canManage) return;
+        const ops = elements.filter((el) => DB_OP_TYPES.has(el.type));
+        if (!ops.length) return;
+        const postId = resolveEditorPostId();
+        ops.forEach((op) => {
+            const fingerprint = computeDbSignFingerprint(op.id, elements, connections, postId, editorId);
+            if (dbSignedFingerprintsRef.current[op.id] === fingerprint) return;
+            dbSignedFingerprintsRef.current[op.id] = fingerprint;
+            clearTimeout(dbSignTimersRef.current[op.id]);
+            setDbSignPending(op.id, true);
+            dbSignTimersRef.current[op.id] = setTimeout(() => {
+                const graph = { elements: elementsRef.current, connections: connectionsRef.current };
+                // Changed again during the debounce: the newer schedule owns it.
+                if (computeDbSignFingerprint(op.id, graph.elements, graph.connections, postId, editorId) !== fingerprint) return;
+                const apply = (patch: { dbSignature: string; dbSignatureError: string }) => {
+                    dbCompletedFingerprintsRef.current[op.id] = fingerprint;
+                    setDbSignPending(op.id, false);
+                    // Server-issued signature: derived bookkeeping, not an edit.
+                    setElementsSystem((prev) => {
+                        let changed = false;
+                        const next = prev.map((el) => {
+                            if (el.id !== op.id) return el;
+                            if ((el.data?.dbSignature || '') === patch.dbSignature && (el.data?.dbSignatureError || '') === patch.dbSignatureError) return el;
+                            changed = true;
+                            return { ...el, data: { ...el.data, ...patch } };
+                        });
+                        // Unchanged signature (e.g. re-verified on editor open) must
+                        // not mark the page as modified.
+                        return changed ? next : prev;
+                    });
+                };
+                if (!postId) {
+                    apply({ dbSignature: '', dbSignatureError: 'Save the page first - database nodes are authorized per page.' });
+                    return;
+                }
+                dbApiFetch<{ ok?: boolean; signature?: string; error?: string }>('db/sign', 'POST', { postId, editorId, nodeId: op.id, graph })
+                    .then((result) => apply(result?.ok && result.signature
+                        ? { dbSignature: result.signature, dbSignatureError: '' }
+                        : { dbSignature: '', dbSignatureError: String(result?.error || 'Authorization failed.') }))
+                    .catch((error) => apply({ dbSignature: '', dbSignatureError: String(error?.message || error) }));
+            }, 700);
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [elements, connections, editorId]);
+
+    // Column metadata arrives asynchronously: refresh DB Select row schemas
+    // once it does (only when they actually change, so opening the editor
+    // never marks the page as modified by itself).
+    useEffect(() => {
+        const selects = elementsRef.current.filter((el) => el.type === 'db-select');
+        if (!selects.length) return;
+        const stale = selects.some((el) => JSON.stringify(el.data?.arrayItemSchema || []) !== JSON.stringify(getDbSelectSchema(el.id, elementsRef.current, connectionsRef.current)));
+        if (stale) {
+            setElementsSystem((prev) => updateElementValueTypes(prev));
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dbColumns]);
+
+    // Keep each Unzip's schema snapshot in step with what is detected LIVE.
+    // Only a real detection updates it -- a momentary "nothing detected"
+    // never overwrites a good snapshot -- and only on an actual difference,
+    // so opening the editor doesn't mark the page as modified by itself.
+    // When the field list changes (DB Fields / Join, form fields...), every
+    // wire leaving the Unzip follows ITS field to the field's new pin; a wire
+    // whose field is gone is removed. Done together with the snapshot update,
+    // so it happens exactly once per change.
+    useEffect(() => {
+        const patches: Record<string, NonNullable<NonNullable<CanvasElement['data']>['unzipSchemaSnapshot']>> = {};
+        const remaps = new Map<string, Map<number, number>>();
+        elementsRef.current.forEach((el) => {
+            if (el.type !== 'unzip') return;
+            const resolved = resolveInput0Source(el);
+            if (!resolved || !isUnzipSnapshotSource(resolved.source.type, resolved.outputIndex)) return;
+            const live = getUnzipSchemaForSource(resolved.source.type, resolved.source.id, resolved.outputIndex);
+            if (!live) return;
+            const next = {
+                sourceId: resolved.source.id,
+                sourceOutputIndex: resolved.outputIndex,
+                fields: live.fields,
+                ...(live.nestedUnder ? { nestedUnder: live.nestedUnder } : {}),
+            };
+            if (JSON.stringify(el.data?.unzipSchemaSnapshot || null) !== JSON.stringify(next)) {
+                patches[el.id] = next;
+                const previous = el.data?.unzipSchemaSnapshot;
+                if (previous && previous.sourceId === next.sourceId && previous.sourceOutputIndex === next.sourceOutputIndex && Array.isArray(previous.fields)) {
+                    const nextIds = next.fields.map((field) => field.id);
+                    const pinMap = new Map<number, number>();
+                    previous.fields.forEach((field, index) => pinMap.set(index, nextIds.indexOf(field.id)));
+                    if (Array.from(pinMap.entries()).some(([from, to]) => from !== to)) remaps.set(el.id, pinMap);
+                }
+            }
+        });
+        if (Object.keys(patches).length === 0) return;
+        if (remaps.size > 0) {
+            const moved = connectionsRef.current
+                .map((conn) => {
+                    const pinMap = remaps.get(conn.fromId);
+                    if (!pinMap) return conn;
+                    const from = parsePinIndex(conn.fromOutput);
+                    if (!pinMap.has(from)) return conn;
+                    const to = pinMap.get(from) as number;
+                    if (to < 0) return null;
+                    return to === from ? conn : { ...conn, fromOutput: `output${to}` };
+                })
+                .filter((conn): conn is Connection => conn !== null);
+            syncConnectionsAndTypes(moved, 'system');
+        }
+        setElementsSystem((prev) => prev.map((el) => (patches[el.id] ? { ...el, data: { ...el.data, unzipSchemaSnapshot: patches[el.id] } } : el)));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [elements, connections, formFieldDetections, dbColumns]);
+
+    // "table.column" options available at a node: base table + every table
+    // joined upstream of it.
+    const getDbColumnRefOptions = (nodeId: string): string[] => {
+        const chain = resolveDbChain(nodeId, elements, connections);
+        if (!chain.table) return [];
+        const out: string[] = [];
+        [chain.table, ...chain.joinTables].forEach((table) => {
+            getDbColumnsFor(chain.connectionId, chain.database, table).forEach((column) => out.push(`${table}.${column.name}`));
+        });
+        return out;
+    };
+
+    // Insert/Update value pins are one per chosen column, followed by the
+    // Trigger pin -- changing the column set shifts pin indexes, so existing
+    // wires are remapped by column NAME (and Trigger stays Trigger) instead
+    // of silently landing on a different pin.
+    const updateDbWriteColumns = (el: CanvasElement, nextColumns: string[]) => {
+        const previous = Array.isArray(el.data?.dbColumns) ? el.data.dbColumns : [];
+        const remapped = connectionsRef.current
+            .map((conn) => {
+                if (conn.toId !== el.id) return conn;
+                const index = getInputIndex(conn.toInput);
+                if (index <= 0) return conn;
+                if (index <= previous.length) {
+                    const nextIndex = nextColumns.indexOf(previous[index - 1]);
+                    return nextIndex >= 0 ? { ...conn, toInput: `input${nextIndex + 1}` } : null;
+                }
+                return index === previous.length + 1 ? { ...conn, toInput: `input${nextColumns.length + 1}` } : null;
+            })
+            .filter((conn): conn is Connection => conn !== null);
+        setElements((prev) => prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, dbColumns: nextColumns } } : elem)));
+        syncConnectionsAndTypes(remapped);
+    };
+
+    // Raw HTML: HTML edits / slot checks change the pin list; wires follow
+    // their slot by id (a slot that disappears drops its wire).
+    const updateRawHtmlNode = (el: CanvasElement, nextHtml: string, nextSelected: string[]) => {
+        const previousIds = selectedRawHtmlSlots(analyzeRawHtmlCached(String(el.data?.rawHtml || '')).slots, el.data?.rawHtmlSlots).map((slot) => slot.id);
+        const nextIds = selectedRawHtmlSlots(analyzeRawHtmlCached(nextHtml).slots, nextSelected).map((slot) => slot.id);
+        const remapped = connectionsRef.current
+            .map((conn) => {
+                if (conn.toId !== el.id) return conn;
+                const nextIndex = nextIds.indexOf(previousIds[getInputIndex(conn.toInput)]);
+                return nextIndex >= 0 ? { ...conn, toInput: `input${nextIndex}` } : null;
+            })
+            .filter((conn): conn is Connection => conn !== null);
+        setElements((prev) => prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, rawHtml: nextHtml, rawHtmlSlots: nextSelected } } : elem)));
+        syncConnectionsAndTypes(remapped);
+    };
+
+    const renderDomNodeControls = (el: CanvasElement): React.ReactNode => {
+        const update = (patch: Record<string, unknown>) => {
+            setElements((prev) =>
+                updateElementValueTypes(prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, ...patch } } : elem)))
+            );
+        };
+        const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+        const hint = (text: string, color = '#94a3b8') => (
+            <div style={{ fontSize: '10px', color, lineHeight: 1.35 }}>{text}</div>
+        );
+        const dropdown = (value: string, options: Array<[string, string]>, onChange: (value: string) => void) => (
+            <select className="input-control" value={value} onChange={(e) => onChange(e.target.value)} onClick={stop}>
+                {options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}
+            </select>
+        );
+        const wrap = (children: React.ReactNode) => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={stop}>{children}</div>
+        );
+        switch (el.type) {
+            case 'raw-html': {
+                const html = String(el.data?.rawHtml || '');
+                const selected = Array.isArray(el.data?.rawHtmlSlots) ? el.data.rawHtmlSlots.map(String) : [];
+                const analysis = analyzeRawHtmlCached(html);
+                const toggle = (slotId: string, on: boolean) => {
+                    const next = on ? [...selected.filter((id) => id !== slotId), slotId] : selected.filter((id) => id !== slotId);
+                    updateRawHtmlNode(el, html, next);
+                };
+                return wrap(<>
+                    <button
+                        type="button"
+                        data-raw-html-open="1"
+                        style={{ width: '100%', height: `${RAW_HTML_BUTTON_H}px`, padding: '4px 8px', fontSize: '11px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
+                        onClick={(e) => { e.stopPropagation(); setRawHtmlEditor({ nodeId: el.id, draft: html }); }}
+                    >
+                        {html.trim() ? 'Edit HTML [saved]' : 'Edit HTML...'}
+                    </button>
+                    <ConfigFieldLabel>{`Inputs (${analysis.slots.length} found)`}</ConfigFieldLabel>
+                    <div
+                        className="nl-scroll-guard"
+                        data-raw-html-slots="1"
+                        style={{ maxHeight: `${DB_CHECKLIST_MAX_H}px`, overflowY: 'auto', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '6px', padding: '4px 6px' }}
+                        onClick={stop}
+                    >
+                        {analysis.slots.length === 0 && hint('Nothing to fill yet - write some HTML above.')}
+                        {analysis.slots.map((slot) => (
+                            <label key={slot.id} className="reverse-toggle" title={slot.original} style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', height: `${DB_CHECK_ROW_H}px`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                <input type="checkbox" data-slot-id={slot.id} checked={selected.includes(slot.id)} onChange={(e) => toggle(slot.id, e.target.checked)} onClick={stop} />
+                                {slot.label}
+                            </label>
+                        ))}
+                    </div>
+                    {analysis.removed.length
+                        ? hint(`Removed for safety: ${analysis.removed.join(', ')}`, '#fbbf24')
+                        : hint('Checked items become input pins.')}
+                </>);
+            }
+            case 'set-parent':
+                return wrap(<>
+                    <ConfigFieldLabel>Position in Parent</ConfigFieldLabel>
+                    {dropdown(el.data?.setParentPosition === 'start' ? 'start' : 'end', [['end', 'Last child'], ['start', 'First child']], (value) => update({ setParentPosition: value }))}
+                    {hint('Moves Element into Parent. No Trigger: keeps it there. With Trigger: moves it on each event.')}
+                </>);
+            case 'clone-element':
+                return wrap(<>
+                    <ConfigFieldLabel>Place the copy</ConfigFieldLabel>
+                    {dropdown(el.data?.clonePlacement === 'detached' ? 'detached' : 'after', [['after', 'Right after the original'], ['detached', 'Nowhere (use Set Parent / Output)']], (value) => update({ clonePlacement: value }))}
+                    {hint('No Trigger: one copy. With Trigger: a new copy per event. Copied ids get a unique suffix.')}
+                </>);
+            case 'debug-console-log':
+            case 'debug-console-warn':
+            case 'debug-message-log':
+            case 'debug-message-warn':
+                return wrap(<>
+                    <ConfigFieldLabel>Label</ConfigFieldLabel>
+                    <input
+                        className="input-control"
+                        value={String(el.data?.debugLabel || '')}
+                        placeholder={el.name || 'Debug'}
+                        onChange={(e) => update({ debugLabel: e.target.value })}
+                        onClick={stop}
+                        onKeyDown={stop}
+                    />
+                    <ConfigFieldLabel>Show to</ConfigFieldLabel>
+                    {dropdown(el.data?.debugAudience === 'everyone' ? 'everyone' : 'editors', [['editors', 'Logged-in editors only'], ['everyone', 'Everyone (visitors too)']], (value) => update({ debugAudience: value }))}
+                    {hint('No Trigger: shows the value whenever it changes. With Trigger: on each event. Value passes through unchanged.')}
+                </>);
+            case 'elements-by-class': {
+                const classWired = connectionsRef.current.some((c) => c.toId === el.id && c.toInput === 'input0');
+                return wrap(<>
+                    {!classWired && <ConfigFieldLabel>Class</ConfigFieldLabel>}
+                    {!classWired && (
+                        <input
+                            className="input-control"
+                            value={String(el.data?.classNames || '')}
+                            placeholder="e.g. card  or  card active"
+                            onChange={(e) => update({ classNames: e.target.value })}
+                            onClick={stop}
+                            onKeyDown={stop}
+                        />
+                    )}
+                    {hint('Every element with ALL these classes (inside Scope, if wired). Use For Each to go through them.')}
+                </>);
+            }
+            default:
+                return null;
+        }
+    };
+
+    const renderDbNodeControls = (el: CanvasElement): React.ReactNode => {
+        const update = (patch: Record<string, unknown>) => {
+            setElements((prev) =>
+                updateElementValueTypes(prev.map((elem) => (elem.id === el.id ? { ...elem, data: { ...elem.data, ...patch } } : elem)))
+            );
+        };
+        const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+        const hint = (text: string, color = '#94a3b8') => (
+            <div style={{ fontSize: '10px', color, lineHeight: 1.35 }}>{text}</div>
+        );
+        const dropdown = (value: string, options: Array<[string, string]>, onChange: (value: string) => void, placeholder?: string) => (
+            <select className="input-control" value={value} onChange={(e) => onChange(e.target.value)} onClick={stop}>
+                {placeholder !== undefined && <option value="">{placeholder}</option>}
+                {options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}
+            </select>
+        );
+        const checklist = (all: string[], selected: string[], onChange: (next: string[]) => void) => (
+            <div
+                className="nl-scroll-guard"
+                style={{ maxHeight: `${DB_CHECKLIST_MAX_H}px`, overflowY: 'auto', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '6px', padding: '4px 6px' }}
+                onClick={stop}
+            >
+                {all.length === 0 && hint('No columns.')}
+                {all.map((name) => (
+                    <label key={name} className="reverse-toggle" style={{ display: 'flex', height: `${DB_CHECK_ROW_H}px` }}>
+                        <input
+                            type="checkbox"
+                            checked={selected.includes(name)}
+                            onChange={(e) => onChange(all.filter((candidate) => (candidate === name ? e.target.checked : selected.includes(candidate))))}
+                        />
+                        {name}
+                    </label>
+                ))}
+            </div>
+        );
+        const policy = () => (
+            <>
+                <ConfigFieldLabel>Who can run this</ConfigFieldLabel>
+                {dropdown(String(el.data?.dbExecutePolicy || 'editors'), [
+                    ['editors', 'Editors of this page'],
+                    ['logged-in', 'Any logged-in user'],
+                    ['anyone', 'Anyone (incl. anonymous)'],
+                ], (value) => update({ dbExecutePolicy: value }))}
+                {el.data?.dbExecutePolicy === 'anyone' && hint('Anonymous visitors can run this and send any value for connected pins.', '#fbbf24')}
+            </>
+        );
+        const signature = () => (el.data?.dbSignatureError
+            ? hint(`Not authorized: ${el.data.dbSignatureError}`, '#fca5a5')
+            : el.data?.dbSignature
+                ? hint('Authorized for this page.', '#86efac')
+                : hint('Authorizing...'));
+        const maxRows = () => (
+            <>
+                <ConfigFieldLabel>Max rows it may change</ConfigFieldLabel>
+                <input
+                    type="number"
+                    className="input-control"
+                    min={1}
+                    max={1000}
+                    value={String(el.data?.dbMaxRows ?? 1)}
+                    onChange={(e) => update({ dbMaxRows: Math.max(1, Math.min(1000, Number(e.target.value) || 1)) })}
+                    onClick={stop}
+                />
+            </>
+        );
+
+        const api = getDbApiConfig();
+        if (!api) return hint('Database nodes require NodeLogic Pro.', '#fca5a5');
+        if (!api.canManage) return hint('Only administrators can configure database nodes.', '#fca5a5');
+        if (dbConnectionsError) return hint(dbConnectionsError, '#fca5a5');
+        if (dbConnections === null) return hint('Loading database schema...');
+
+        const chain = resolveDbChain(el.id, elements, connections);
+        const needsTable = hint('Connect a DB Table node (with a table selected) to the Query pin.', '#fbbf24');
+        const wrap = (children: React.ReactNode) => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={stop}>{children}</div>
+        );
+
+        switch (el.type) {
+            case 'db-connect': {
+                // Picks WHICH database -- credentials never leave the server;
+                // the graph stores only the connection id + database name.
+                const connectionId = String(el.data?.dbConnectionId || 'wp');
+                const connection = dbConnections.find((candidate) => candidate.id === connectionId);
+                const databases = connection?.databases || [];
+                const database = String(el.data?.dbDatabase || '');
+                return wrap(<>
+                    <ConfigFieldLabel>Connection</ConfigFieldLabel>
+                    {dropdown(connectionId, dbConnections.map((candidate) => [candidate.id, candidate.status === 'ok' ? candidate.label : `${candidate.label} (unavailable)`]), (value) => {
+                        const next = dbConnections.find((candidate) => candidate.id === value);
+                        update({ dbConnectionId: value, dbDatabase: next?.defaultDatabase && next.databases.includes(next.defaultDatabase) ? next.defaultDatabase : '' });
+                    })}
+                    <ConfigFieldLabel>{`Database (${databases.length} visible)`}</ConfigFieldLabel>
+                    {dropdown(database, databases.map((name) => [name, name === connection?.defaultDatabase ? `${name} (default)` : name]), (value) => update({ dbDatabase: value }), '-- database --')}
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                        <button type="button" data-db-action="refresh" onClick={(e) => { e.stopPropagation(); refreshDbSchema(); }} title="Reload connections and databases from the server" style={dbSmallButtonStyle}>Refresh</button>
+                        {api.adminUrl && (
+                            <button type="button" data-db-action="add-connection" onClick={(e) => { e.stopPropagation(); window.open(api.adminUrl, '_blank', 'noopener'); }} title="Add a connection (user + password) for another database, e.g. one created in your hosting panel" style={dbSmallButtonStyle}>+ Add database...</button>
+                        )}
+                    </div>
+                    {connection?.error ? hint(connection.error, '#fca5a5')
+                        : connection && connection.status !== 'ok' ? hint('This connection is unavailable (NodeLogic > Database).', '#fca5a5')
+                            : databases.length <= 1 ? hint('Missing a database? It usually has its own DB user: "+ Add database...", then Refresh.', '#94a3b8')
+                                : hint('Credentials stay on the server.', '#94a3b8')}
+                </>);
+            }
+            case 'db-table': {
+                if (!chain.connectNode) return hint('Connect a DB Connect node to the Connection pin.', '#fbbf24');
+                if (!chain.database) return hint('Choose a database in the connected DB Connect node.', '#fbbf24');
+                const tables = getDbTablesFor(chain.connectionId, chain.database);
+                return wrap(<>
+                    <ConfigFieldLabel>{`Table in ${chain.database}`}</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbTable || ''), (Array.isArray(tables) ? tables : []).map((table) => [table, table]), (value) => update({ dbTable: value }), tables === 'loading' ? 'Loading tables...' : '-- table --')}
+                    {tables === 'error' && hint('Could not list tables of this database.', '#fca5a5')}
+                    {Array.isArray(tables) && tables.length === 0 && hint('No usable tables in this database (see NodeLogic > Database > Table access).', '#fbbf24')}
+                </>);
+            }
+            case 'db-fields': {
+                if (!chain.table) return needsTable;
+                const all = getDbColumnsFor(chain.connectionId, chain.database, chain.table).map((column) => column.name);
+                const selected = Array.isArray(el.data?.dbFields) ? el.data.dbFields : [];
+                return wrap(<>
+                    <ConfigFieldLabel>{`Columns (${selected.length || 'all'})`}</ConfigFieldLabel>
+                    {checklist(all, selected, (next) => update({ dbFields: next }))}
+                    {hint('None checked = all columns.')}
+                </>);
+            }
+            case 'db-join': {
+                if (!chain.table) return needsTable;
+                const joinableTables = getDbTablesFor(chain.connectionId, chain.database);
+                const used = new Set([chain.table, ...chain.joinTables]);
+                const joinTable = String(el.data?.dbJoinTable || '');
+                const joinColumns = joinTable ? getDbColumnsFor(chain.connectionId, chain.database, joinTable).map((column) => column.name) : [];
+                const joinFields = Array.isArray(el.data?.dbJoinFields) ? el.data.dbJoinFields : [];
+                return wrap(<>
+                    <ConfigFieldLabel>Join type</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbJoinType || 'inner'), [['inner', 'INNER JOIN'], ['left', 'LEFT JOIN'], ['right', 'RIGHT JOIN']], (value) => update({ dbJoinType: value }))}
+                    <ConfigFieldLabel>Table</ConfigFieldLabel>
+                    {dropdown(joinTable, (Array.isArray(joinableTables) ? joinableTables : []).filter((table) => !used.has(table) || table === joinTable).map((table) => [table, table]), (value) => update({ dbJoinTable: value, dbJoinRightColumn: '', dbJoinFields: [] }), '-- table --')}
+                    <ConfigFieldLabel>ON</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbJoinLeftColumn || ''), getDbColumnRefOptions(el.id).map((ref) => [ref, ref]), (value) => update({ dbJoinLeftColumn: value }), '-- column --')}
+                    <ConfigFieldLabel>=</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbJoinRightColumn || ''), joinColumns.map((column) => [column, `${joinTable}.${column}`]), (value) => update({ dbJoinRightColumn: value }), '-- column --')}
+                    <ConfigFieldLabel>Columns to add</ConfigFieldLabel>
+                    {checklist(joinColumns, joinFields, (next) => update({ dbJoinFields: next }))}
+                </>);
+            }
+            case 'db-filter': {
+                if (!chain.table) return needsTable;
+                const operator = String(el.data?.dbFilterOperator || 'eq');
+                const valueWired = connections.some((conn) => conn.toId === el.id && conn.toInput === 'input1');
+                const takesValue = operator !== 'empty' && operator !== 'notempty';
+                return wrap(<>
+                    <ConfigFieldLabel>Column</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbFilterColumn || ''), getDbColumnRefOptions(el.id).map((ref) => [ref, ref]), (value) => update({ dbFilterColumn: value }), '-- column --')}
+                    <ConfigFieldLabel>Operator</ConfigFieldLabel>
+                    {dropdown(operator, DB_OPERATOR_OPTIONS, (value) => update({ dbFilterOperator: value }))}
+                    {takesValue && (valueWired
+                        ? hint('Value comes from the connected pin (visitors can send any value for it).', '#86efac')
+                        : (
+                            <input
+                                type="text"
+                                className="input-control"
+                                value={String(el.data?.dbFilterValue ?? '')}
+                                placeholder="Fixed value"
+                                onChange={(e) => update({ dbFilterValue: e.target.value })}
+                                onClick={stop}
+                            />
+                        ))}
+                </>);
+            }
+            case 'db-sort': {
+                if (!chain.table) return needsTable;
+                return wrap(<>
+                    <ConfigFieldLabel>Column</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbSortColumn || ''), getDbColumnRefOptions(el.id).map((ref) => [ref, ref]), (value) => update({ dbSortColumn: value }), '-- column --')}
+                    <ConfigFieldLabel>Direction</ConfigFieldLabel>
+                    {dropdown(String(el.data?.dbSortDirection || 'asc'), [['asc', 'Ascending'], ['desc', 'Descending']], (value) => update({ dbSortDirection: value }))}
+                </>);
+            }
+            case 'db-select': {
+                const limitWired = connections.some((conn) => conn.toId === el.id && conn.toInput === 'input1');
+                const offsetWired = connections.some((conn) => conn.toId === el.id && conn.toInput === 'input2');
+                return wrap(<>
+                    <ConfigFieldLabel>Limit (max 500)</ConfigFieldLabel>
+                    {limitWired ? hint('From the connected pin.', '#86efac') : (
+                        <input type="number" className="input-control" min={1} max={500} value={String(el.data?.dbLimit ?? 50)} onChange={(e) => update({ dbLimit: Math.max(1, Math.min(500, Number(e.target.value) || 1)) })} onClick={stop} />
+                    )}
+                    <ConfigFieldLabel>Offset</ConfigFieldLabel>
+                    {offsetWired ? hint('From the connected pin.', '#86efac') : (
+                        <input type="number" className="input-control" min={0} value={String(el.data?.dbOffset ?? 0)} onChange={(e) => update({ dbOffset: Math.max(0, Number(e.target.value) || 0) })} onClick={stop} />
+                    )}
+                    {policy()}
+                    {signature()}
+                </>);
+            }
+            case 'db-insert':
+            case 'db-update': {
+                if (!chain.table) return needsTable;
+                const all = getDbColumnsFor(chain.connectionId, chain.database, chain.table).map((column) => column.name);
+                const selected = Array.isArray(el.data?.dbColumns) ? el.data.dbColumns : [];
+                return wrap(<>
+                    <ConfigFieldLabel>{el.type === 'db-insert' ? 'Columns to fill' : 'Columns to change'}</ConfigFieldLabel>
+                    {checklist(all, selected, (next) => updateDbWriteColumns(el, next))}
+                    {el.type === 'db-update' && maxRows()}
+                    {policy()}
+                    {hint('Runs only when the Trigger event fires.')}
+                    {signature()}
+                </>);
+            }
+            case 'db-delete':
+                return wrap(<>
+                    {maxRows()}
+                    {policy()}
+                    {hint('Runs only when the Trigger event fires. A DB Filter is required.')}
+                    {signature()}
+                </>);
+            default:
+                return null;
+        }
+    };
 
     // Recompute detected direct children for every get-children node.
     useEffect(() => {
@@ -7352,7 +10124,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 : null;
             const targetId = resolveElementRefTargetId(refNode);
             if (!targetId) {
-                nextDetections[node.id] = [];
+                // Not an element-ref: resolve whatever element the wired pin
+                // carries (Raw HTML's own structure, a clone's source, ...).
+                const previewElement = connection ? resolveNodeOutputPreviewElement(refNode, parsePinIndex(connection.fromOutput)) : null;
+                nextDetections[node.id] = previewElement ? detectElementChildren('', { element: previewElement }).children : [];
                 return;
             }
             try {
@@ -7375,36 +10150,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connectionsRef.current
         );
         if (prunedConnections.length !== connectionsRef.current.length) {
-            syncConnectionsAndTypes(prunedConnections);
+            syncConnectionsAndTypes(prunedConnections, 'system');
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [elements, connections, detectedElements, previewDomVersion]);
 
     useEffect(() => {
-        if (!isStateLoaded || templateMode || customNodeMode || draftRecoveryCheckedRef.current) {
-            return;
-        }
-
-        draftRecoveryCheckedRef.current = true;
-
-        if (autosaveState && (!savedState || !areSnapshotsEquivalent(autosaveState, savedState))) {
-            setRecoverableDraftState(autosaveState);
-            setPendingDraftRecovery(autosaveState);
-            setShowDraftRecoveryNotice(true);
-            return;
-        }
-
-        setRecoverableDraftState(null);
-        setPendingDraftRecovery(null);
-        setShowDraftRecoveryNotice(false);
-    }, [autosaveState, customNodeMode, isStateLoaded, savedState, templateMode]);
-
-    useEffect(() => {
         const handleWindowMouseUp = (event: MouseEvent) => {
-            if (!isDraggingFromSidebarRef.current || !draggedItemRef.current) {
+            if (isDraggingFromSidebarRef.current && draggedItemRef.current) {
+                finishSidebarDrag(event.clientX, event.clientY);
                 return;
             }
-            finishSidebarDrag(event.clientX, event.clientY);
+            // Released outside the canvas (sidebar, modal chrome, outside the
+            // window): the canvas's own onMouseUp never ran. When released over
+            // the canvas, that handler already ended the interaction (its refs
+            // are reset synchronously), so this is a no-op.
+            if (isDraggingCanvasElementRef.current || isPanningRef.current || connectionInProgressRef.current) {
+                canvasMouseUpRef.current(event as unknown as React.MouseEvent<HTMLElement>);
+            }
         };
 
         window.addEventListener('mouseup', handleWindowMouseUp);
@@ -7418,27 +10181,42 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     }, []);
 
     // ── Keyboard shortcuts (Undo / Redo / Delete) ──────────────────────────
+    const keyboardActionsRef = useRef({ undo: () => {}, redo: () => {}, remove: (_id: string) => {} });
+    // Lambdas: handleDelete is declared further down (render-time TDZ).
+    keyboardActionsRef.current = { undo: () => handleUndo(), redo: () => handleRedo(), remove: (id: string) => handleDelete(id) };
+    const blockingDialogOpenRef = useRef(false);
+    blockingDialogOpenRef.current = Boolean(startupConflict || recoveryQueue.length > 0 || persistenceDialog);
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            // Ignore when focus is inside an input / textarea / select
-            const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            // Ignore when focus is inside an input / textarea / select / rich text
+            const target = e.target as HTMLElement | null;
+            const tag = target?.tagName?.toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+            // Only this editor (another one may be mounted on the page), and
+            // never underneath a persistence dialog.
+            const root = editorRootRef.current;
+            if (!root || !root.isConnected || blockingDialogOpenRef.current) return;
+            // Focus may sit on a container AROUND the editor (the Gutenberg
+            // modal frame) or nowhere (body/document); only a target in an
+            // unrelated subtree (another editor, the page behind) is ignored.
+            const targetNode = target as unknown as Node | null;
+            if (targetNode && typeof targetNode.nodeType === 'number' && !root.contains(targetNode) && !targetNode.contains(root)) return;
 
             const ctrl = e.ctrlKey || e.metaKey;
 
             if (ctrl && !e.shiftKey && e.key.toLowerCase() === 'z') {
                 e.preventDefault();
-                handleUndo();
+                keyboardActionsRef.current.undo();
                 return;
             }
             if (ctrl && (e.shiftKey && e.key.toLowerCase() === 'z') || (ctrl && e.key.toLowerCase() === 'y')) {
                 e.preventDefault();
-                handleRedo();
+                keyboardActionsRef.current.redo();
                 return;
             }
             if ((e.key === 'Delete' || e.key === 'Backspace') && selectedRef.current && selectedRef.current !== 'main-block') {
                 e.preventDefault();
-                handleDelete(selectedRef.current);
+                keyboardActionsRef.current.remove(selectedRef.current);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
@@ -7446,38 +10224,435 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     }, []);
     // ───────────────────────────────────────────────────────────────────────
 
-    const handleSave = () => {
-        const snapshot = buildSavedState();
-        setSavedState(snapshot);
-        setAutosaveState(snapshot);
-        setRecoverableDraftState(snapshot);
-        setUnsavedChanges(false);
-        setPendingDraftRecovery(null);
-        setShowDraftRecoveryNotice(false);
-        onUnsavedChange?.(false);
-        onStateChangeRef.current?.(snapshot);
-        persistSavedSnapshot(snapshot);
+    /**
+     * Save Graph = PUBLISH WORK -> MAIN:
+     * validate -> compile -> prepare MAIN + HISTORY -> checkpoint the replaced
+     * MAIN locally -> host commits MAIN + HISTORY in one update -> adopt.
+     * Any failure before the commit leaves MAIN, HISTORY and WORK untouched.
+     */
+    const handlePublish = () => {
+        if (!persistenceEnabled) return;
+        if (startupConflict) {
+            showInfoNotice('Choose which version to continue with first.');
+            return;
+        }
+        if (hasDynamicInputGapErrors) {
+            const firstError = Object.values(dynamicInputGapErrors)[0];
+            setTemplateInfo(`Save blocked: ${firstError}`);
+            return;
+        }
+        if (dbPendingSignCount > 0 || hasUnsignedDbChanges()) {
+            setTemplateInfo('Save blocked: authorizing database nodes - try again in a moment.');
+            return;
+        }
+        const content = currentWorkContent();
+        const structure = validateGraphContent(content, { strict: true });
+        if (!structure.ok) {
+            persistLog('publish-failed', { stage: 'validate', errors: structure.errors });
+            setPersistenceDialog({
+                kind: 'message',
+                tone: 'error',
+                title: 'Nothing was saved',
+                lines: ['The graph has structural problems, so it was not saved to the page:', ...structure.errors, 'Your working copy is unchanged.'],
+            });
+            return;
+        }
+        let nextFormula = '';
+        try {
+            // An empty result is a real result (nothing left to run) -- never
+            // fall back to the previously saved formula, which would keep
+            // deleted logic running on the page.
+            nextFormula = buildGraphFormulaFromState(elementsRef.current, connectionsRef.current) || '';
+        } catch (error) {
+            const message = (error as Error)?.message || String(error);
+            console.error('Formula generation error during save:', error);
+            persistLog('publish-failed', { stage: 'compile', error: message });
+            setPersistenceDialog({
+                kind: 'message',
+                tone: 'error',
+                title: 'Nothing was saved',
+                lines: [`The graph could not be compiled: ${message}`, 'The page keeps its current graph. Your working copy is unchanged and stored in this browser.'],
+            });
+            return;
+        }
+
+        const now = Date.now();
+        const previousMain = mainContentRef.current;
+        const plan = preparePublish({
+            previousMain,
+            previousMeta: mainMetaRef.current,
+            history: historyEntriesRef.current,
+            next: content,
+            limit: historyLimit,
+            now,
+            makeId: makeLocalId,
+        });
+        const state: SavedState = {
+            elements: cloneCanvasElements(elementsRef.current),
+            connections: cloneConnections(connectionsRef.current),
+            formula: nextFormula,
+            customNodeUi: customNodeUiRef.current ? normalizeCustomNodeUiState(customNodeUiRef.current) : null,
+            updatedAt: now,
+            formatVersion: GRAPH_FORMAT_VERSION,
+            revision: plan.revision,
+            publishedAt: now,
+            contentHash: plan.contentHash,
+        };
+        // CHECKPOINT the MAIN being replaced, independent of the history limit
+        // (limit 0 keeps no versions in the page, but this one survives here).
+        if (!plan.unchanged && !isEffectivelyEmptyGraph(previousMain)) {
+            const revisionLabel = mainMetaRef.current.revision > 0 ? `version ${mainMetaRef.current.revision}` : 'version';
+            backupContent(previousMain, 'before-publish', `Published ${revisionLabel} (replaced ${formatTimestamp(now)})`);
+        }
+        persistLog('publish-started', {
+            revision: plan.revision,
+            contentHash: plan.contentHash,
+            keptVersions: plan.history.length,
+            prunedVersions: plan.pruned.length,
+            limit: historyLimit,
+            unchanged: plan.unchanged,
+        });
+
+        // COMMIT: the host applies MAIN + HISTORY in one update.
+        let accepted = false;
+        let commitError = '';
+        try {
+            if (onPublishRef.current) {
+                accepted = onPublishRef.current({ state, history: plan.history, historyLimit }) !== false;
+            } else if (onStateChangeRef.current) {
+                onStateChangeRef.current(state);
+                onFormulaChangeRef.current?.(nextFormula);
+                accepted = true;
+            } else {
+                commitError = 'this editor is not connected to a block';
+            }
+        } catch (error) {
+            commitError = (error as Error)?.message || String(error);
+        }
+        if (!accepted) {
+            persistLog('publish-failed', { stage: 'commit', revision: plan.revision, error: commitError || 'rejected by the host' });
+            setPersistenceDialog({
+                kind: 'message',
+                tone: 'error',
+                title: 'Save Graph failed',
+                lines: [
+                    'The block did not accept the new graph, so the graph on the page and its version history are unchanged.',
+                    commitError ? `Reason: ${commitError}` : '',
+                    'Your working copy is kept in this browser.',
+                ].filter(Boolean),
+            });
+            return;
+        }
+
+        // Adopt: MAIN is now this WORK; WORK is re-stored based on it.
+        mainContentRef.current = pickGraphContent(state);
+        mainMetaRef.current = { formatVersion: GRAPH_FORMAT_VERSION, revision: plan.revision, publishedAt: now };
+        mainHashRef.current = plan.contentHash;
+        historyEntriesRef.current = plan.history;
+        setHistoryEntries(plan.history);
+        setMainInfo({ revision: plan.revision, publishedAt: now });
+        setFormula(nextFormula);
+        baselineCanonicalRef.current = canonicalGraphString(content);
+        lastPersistedCanonicalRef.current = null;
+        userTouchedRef.current = true;
+        persistenceReadyRef.current = true;
+        persistWorkNow('publish');
+        setDirtyState(false);
+        persistLog('publish-completed', {
+            revision: plan.revision,
+            contentHash: plan.contentHash,
+            prunedRevisions: plan.pruned.map((entry) => entry.revision),
+        });
+        refreshBackups();
+        showInfoNotice(plan.unchanged
+            ? 'Graph saved (no changes since the last save).'
+            : 'Graph saved to the block. Update the page to make it live.');
     };
 
-    const handleRestore = () => {
-        const snapshot = savedState || autosaveState || recoverableDraftState;
-        applySnapshot(snapshot);
-        if (snapshot) {
-            persistSavedSnapshot(snapshot);
+    const requestDiscardWork = () => {
+        setPersistenceDialog({
+            kind: 'confirm-replace',
+            title: 'Discard unpublished changes?',
+            reason: 'discard',
+            label: 'discarding unpublished changes',
+            content: mainContentRef.current,
+            notes: ['Your working copy goes back to the graph saved on the page.'],
+            confirmLabel: 'Discard changes',
+        });
+    };
+
+    const resolveVersion = (ref: VersionRef): {
+        content: GraphContent;
+        title: string;
+        subtitle: string;
+        reason: ReplaceWorkReason;
+        label: string;
+        exportSource: ExportSourceKind;
+        revision?: number;
+    } | null => {
+        if (ref.kind === 'main') {
+            const meta = mainMetaRef.current;
+            return {
+                content: mainContentRef.current,
+                title: 'Graph saved on the page',
+                subtitle: meta.publishedAt ? `Saved ${formatTimestamp(meta.publishedAt)}${meta.revision ? ` (version ${meta.revision})` : ''}.` : 'The graph currently stored in the block.',
+                reason: 'restore-version',
+                label: 'restoring the graph saved on the page',
+                exportSource: 'main',
+                revision: meta.revision || undefined,
+            };
+        }
+        if (ref.kind === 'history') {
+            const entry = historyEntriesRef.current.find((item) => item.id === ref.id);
+            if (!entry) return null;
+            return {
+                content: entry.graph,
+                title: entry.revision > 0 ? `Previous version ${entry.revision}` : 'Previous version',
+                subtitle: `${entry.publishedAt ? `Saved ${formatTimestamp(entry.publishedAt)}, ` : ''}replaced ${formatTimestamp(entry.replacedAt)}.`,
+                reason: 'restore-version',
+                label: `restoring version ${entry.revision || ''}`.trim(),
+                exportSource: 'history',
+                revision: entry.revision || undefined,
+            };
+        }
+        const backup = graphStorage.readBackups().find((item) => item.id === ref.id);
+        if (!backup) return null;
+        return {
+            content: backup.graph,
+            title: 'Local backup',
+            subtitle: `${backup.label || backup.reason} - ${formatTimestamp(backup.createdAt)} (stored in this browser).`,
+            reason: 'restore-backup',
+            label: 'restoring a local backup',
+            exportSource: 'backup',
+        };
+    };
+
+    // VIEW: read-only, never changes anything.
+    const viewVersion = (ref: VersionRef) => {
+        const version = resolveVersion(ref);
+        if (!version) {
+            showInfoNotice('That version is no longer available.');
+            return;
+        }
+        setPersistenceDialog({
+            kind: 'view',
+            title: version.title,
+            subtitle: version.subtitle,
+            content: version.content,
+            exportRef: ref,
+            restorable: true,
+        });
+    };
+
+    // RESTORE: potentially destructive for WORK -> explicit confirmation.
+    const requestRestoreVersion = (ref: VersionRef) => {
+        const version = resolveVersion(ref);
+        if (!version) {
+            showInfoNotice('That version is no longer available.');
+            return;
+        }
+        setPersistenceDialog({
+            kind: 'confirm-replace',
+            title: `Restore: ${version.title}?`,
+            reason: version.reason,
+            label: version.label,
+            content: version.content,
+            notes: [version.subtitle, 'The restored version becomes your working copy.', 'The page keeps its current graph until you click Save Graph.'],
+            confirmLabel: 'Restore into working copy',
+        });
+    };
+
+    const confirmReplaceDialog = (dialog: Extract<PersistenceDialogState, { kind: 'confirm-replace' }>) => {
+        setPersistenceDialog(null);
+        const stored = replaceWorkingGraph(dialog.content, dialog.reason, dialog.label);
+        persistLog(dialog.reason === 'import' ? 'work-imported' : dialog.reason === 'discard' ? 'work-discarded' : 'work-restored', { reason: dialog.reason, stored });
+        dialog.onDone?.();
+        showInfoNotice(dialog.reason === 'discard'
+            ? 'Changes discarded. Undo (Ctrl+Z) brings them back.'
+            : 'Working copy replaced. Undo (Ctrl+Z) brings the previous one back.');
+    };
+
+    const downloadTextFile = (text: string, fileName: string): boolean => {
+        try {
+            const blob = new Blob([text], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fileName;
+            link.rel = 'noopener';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+            return true;
+        } catch (error) {
+            const message = (error as Error)?.message || String(error);
+            persistLog('export-failed', { error: message });
+            setPersistenceDialog({ kind: 'message', tone: 'error', title: 'Export failed', lines: [`The file could not be created: ${message}`] });
+            return false;
         }
     };
 
-    const handleRestoreUnsaved = () => {
-        const previousSavedState = savedState;
-        applySnapshot(pendingDraftRecovery || recoverableDraftState || autosaveState || savedState);
-        setSavedState(previousSavedState);
-        setUnsavedChanges(true);
-        onUnsavedChange?.(true);
+    // EXPORT: an explicit, versioned file of ONE chosen state (working copy,
+    // the page graph, a previous version or a backup) -- authored content
+    // only, no compiled formula and no recovery/session metadata.
+    const exportGraph = (ref: VersionRef | { kind: 'work' }) => {
+        const resolved = ref.kind === 'work'
+            ? { content: currentWorkContent(), exportSource: 'work' as ExportSourceKind, revision: undefined as number | undefined, label: 'working copy' }
+            : (() => {
+                const version = resolveVersion(ref);
+                return version ? { content: version.content, exportSource: version.exportSource, revision: version.revision, label: version.title } : null;
+            })();
+        if (!resolved) {
+            showInfoNotice('That version is no longer available.');
+            return;
+        }
+        const now = Date.now();
+        const doc = buildExportDocument(resolved.content, {
+            source: resolved.exportSource,
+            revision: resolved.revision,
+            label: resolved.label,
+            appVersion: PERSISTENCE_APP_VERSION,
+            now,
+        });
+        const stamp = new Date(now).toISOString().slice(0, 16).replace(/[-:T]/g, '');
+        const safeId = String(editorId).replace(/[^a-z0-9_-]+/gi, '').slice(0, 12) || 'graph';
+        const fileName = `nodelogic-graph-${safeId}-${resolved.exportSource}${resolved.revision ? `-v${resolved.revision}` : ''}-${stamp}.json`;
+        if (downloadTextFile(serializeExportDocument(doc), fileName)) {
+            persistLog('exported', { source: resolved.exportSource, revision: resolved.revision, contentHash: doc.contentHash });
+        }
     };
 
-    const handleDismissDraftRecovery = () => {
-        setShowDraftRecoveryNotice(false);
-        setPendingDraftRecovery(null);
+    // IMPORT: READ -> PARSE -> VALIDATE -> MIGRATE -> VERIFY (graphStore.
+    // parseImportText) -> confirmation -> CHECKPOINT -> COMMIT into WORK.
+    // A bad file never touches the current graph.
+    const processImportText = (text: string, fileName: string) => {
+        const result = parseImportText(text, { migrate: normalizeGraphContent });
+        if (!result.ok || !result.content) {
+            persistLog('import-validation-failed', { stage: result.stage, errors: result.errors });
+            setPersistenceDialog({
+                kind: 'message',
+                tone: 'error',
+                title: 'Import failed - nothing was changed',
+                lines: [`File: ${fileName}`, ...result.errors, ...result.warnings.map((warning) => `Note: ${warning}`)],
+            });
+            return;
+        }
+        persistLog('import-validated', { sourceFormat: result.sourceFormat, contentHash: semanticHash(result.content), warnings: result.warnings.length });
+        setPersistenceDialog({
+            kind: 'confirm-replace',
+            title: 'Import graph from file?',
+            reason: 'import',
+            label: `importing ${fileName}`,
+            content: result.content,
+            notes: [
+                `File: ${fileName}${result.exportedAt ? ` (exported ${formatTimestamp(Date.parse(result.exportedAt))})` : ''}`,
+                ...result.warnings,
+                'The imported graph becomes your working copy.',
+                'The page keeps its current graph until you click Save Graph.',
+            ],
+            confirmLabel: 'Import into working copy',
+        });
+    };
+
+    const handleImportFile = (file: File | null | undefined) => {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => processImportText(typeof reader.result === 'string' ? reader.result : '', file.name);
+        reader.onerror = () => {
+            persistLog('import-validation-failed', { stage: 'read', error: String(reader.error?.message || reader.error) });
+            setPersistenceDialog({ kind: 'message', tone: 'error', title: 'Import failed - nothing was changed', lines: [`The file "${file.name}" could not be read.`] });
+        };
+        reader.readAsText(file);
+    };
+
+    const handleHistoryLimitChange = (value: number) => {
+        const next = clampHistoryLimit(value);
+        setHistoryLimitState(next);
+        onHistoryLimitChangeRef.current?.(next);
+        persistLog('history-limit-changed', { limit: next, appliesAt: 'next Save Graph' });
+    };
+
+    // Startup conflict: WORK was based on a different MAIN than the page has
+    // now. Neither side silently wins; the one not chosen is preserved.
+    const resolveStartupConflict = (choice: 'work' | 'main') => {
+        const conflict = startupConflict;
+        if (!conflict) return;
+        if (choice === 'work') {
+            loadWorkingGraph(conflict.work.graph);
+            // Re-store WORK so it is based on the MAIN the page has now.
+            lastPersistedCanonicalRef.current = null;
+            userTouchedRef.current = true;
+            persistenceReadyRef.current = true;
+            persistWorkNow('conflict-kept-working-copy');
+        } else {
+            if (!backupContent(conflict.work.graph, 'conflict-replaced', `Working copy from ${formatTimestamp(conflict.work.createdAt)} (not continued)`)) {
+                setPersistenceDialog({
+                    kind: 'message',
+                    tone: 'error',
+                    title: 'The working copy could not be backed up',
+                    lines: ['Browser storage is full, so the working copy cannot be set aside safely.', 'Continue with the working copy, or export it first (Versions, import & export) and then choose the page version.'],
+                });
+                return;
+            }
+            const removed = graphStorage.remove(graphStorage.keys.work);
+            if (removed.ok) workCoordinatorRef.current?.adoptStored(null);
+            persistenceReadyRef.current = true;
+            userTouchedRef.current = false;
+            lastPersistedCanonicalRef.current = null;
+            baselineCanonicalRef.current = canonicalGraphString(currentWorkContent());
+        }
+        persistLog('startup-conflict-resolved', { choice, reason: conflict.decision.reason });
+        setStartupConflict(null);
+        refreshBackups();
+    };
+
+    // Another tab stored WORK meanwhile: the user may take it over explicitly
+    // (the other tab's copy is kept as a local backup first).
+    const takeOverWorkingCopy = () => {
+        const stored = graphStorage.readWork();
+        if (stored.record && !backupContent(stored.record.graph, 'other-tab-replaced', `Working copy from another tab (${formatTimestamp(stored.record.createdAt)})`)) {
+            setPersistenceDialog({ kind: 'message', tone: 'error', title: 'Could not take over', lines: ['The other tab’s working copy could not be backed up (browser storage is full), so it was not replaced.'] });
+            return;
+        }
+        workCoordinatorRef.current?.adoptStored(graphStorage.readWorkStamp());
+        lastPersistedCanonicalRef.current = null;
+        workStatusRef.current = 'dirty';
+        persistWorkNow('take-over');
+        refreshBackups();
+    };
+
+    const currentRecovery = recoveryQueue.length > 0 ? recoveryQueue[0] : null;
+
+    const restoreRecovery = (item: RecoveryDecision) => {
+        if (!item.record) return;
+        const stored = replaceWorkingGraph(item.record.graph, 'recovery', `restoring changes from ${formatTimestamp(item.record.createdAt)}`);
+        // The snapshot may go only once WORK verifiably holds it.
+        if (stored && lastPersistedCanonicalRef.current === canonicalGraphString(currentWorkContent())) {
+            removeSnapshotKeys(item, 'restored');
+        }
+        persistLog('recovery-restored', { snapshotId: item.record.snapshotId, stored });
+        setRecoveryQueue((queue) => queue.filter((entry) => entry.key !== item.key));
+        showInfoNotice('Changes restored into your working copy. Undo (Ctrl+Z) brings the previous one back.');
+    };
+
+    // Not a decision: the snapshot stays exactly as it is and is evaluated
+    // again on the next open.
+    const postponeRecovery = (item: RecoveryDecision) => {
+        persistLog('recovery-postponed', { snapshotId: item.record?.snapshotId });
+        setRecoveryQueue((queue) => queue.filter((entry) => entry.key !== item.key));
+    };
+
+    const dismissRecovery = (item: RecoveryDecision) => {
+        if (!item.record) return;
+        const remembered = graphStorage.addDismissed(item.record.snapshotId, Date.now());
+        // Dismissed content stays available as a local backup.
+        const backedUp = backupContent(item.record.graph, 'dismissed-recovery', `Dismissed unsaved changes from ${formatTimestamp(item.record.createdAt)}`);
+        if (backedUp) removeSnapshotKeys(item, 'dismissed');
+        persistLog('recovery-dismissed', { snapshotId: item.record.snapshotId, remembered: remembered.ok, backedUp });
+        setRecoveryQueue((queue) => queue.filter((entry) => entry.key !== item.key));
+        refreshBackups();
     };
 
     const getDefaultNodeDataForTreeItem = (type: TreeItem['type']): CanvasElement['data'] => {
@@ -7591,6 +10766,52 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { eventTimerInterval: 1000, eventTimerMode: 'interval' as const };
             case 'event-custom':
                 return { eventCustomName: '' };
+            case 'event-and':
+                return { eventAndWindowMs: 5000 };
+            case 'event-processor':
+                return { passOnlyOnEvent: true };
+            case 'fallback-event':
+                return { fallbackEventValue: '', fallbackEventDurationMs: 3000 };
+            case 'raw-html':
+                return { rawHtml: '<div class="nl-card">\n  <h3>Title</h3>\n  <p style="color: #334155">Text</p>\n</div>', rawHtmlSlots: [] };
+            case 'set-parent':
+                return { setParentPosition: 'end' };
+            case 'clone-element':
+                return { clonePlacement: 'after' };
+            case 'elements-by-class':
+                return { classNames: '' };
+            case 'debug-console-log':
+            case 'debug-console-warn':
+            case 'debug-message-log':
+            case 'debug-message-warn':
+                return { debugLabel: '', debugAudience: 'editors' as const };
+            // Database: every operation defaults to the most restrictive
+            // execution policy (editors of the page only) and, for writes,
+            // to changing at most one row.
+            case 'db-connect':
+                return { dbConnectionId: 'wp', dbDatabase: '' };
+            case 'db-table':
+                return { dbTable: '' };
+            case 'db-fields':
+                return { dbFields: [] };
+            case 'db-join':
+                return { dbJoinType: 'inner' as const, dbJoinTable: '', dbJoinLeftColumn: '', dbJoinRightColumn: '', dbJoinFields: [] };
+            case 'db-filter':
+                return { dbFilterColumn: '', dbFilterOperator: 'eq' as const, dbFilterValue: '' };
+            case 'db-sort':
+                return { dbSortColumn: '', dbSortDirection: 'asc' as const };
+            case 'db-select':
+                return { dbLimit: 50, dbOffset: 0, dbExecutePolicy: 'editors' as const };
+            case 'db-insert':
+                return { dbColumns: [], dbExecutePolicy: 'editors' as const };
+            case 'db-update':
+                return { dbColumns: [], dbMaxRows: 1, dbExecutePolicy: 'editors' as const };
+            case 'db-delete':
+                return { dbMaxRows: 1, dbExecutePolicy: 'editors' as const };
+            case 'form-data':
+                return { selectedElement: '', elementUseManualId: false, customElementId: '' };
+            case 'send-email':
+                return { sendEmailRecipient: '', sendEmailSubject: '', sendEmailMessage: '', sendEmailAllowAnonymous: false };
             // New array nodes
             case 'array-map':
             case 'array-filter':
@@ -7613,7 +10834,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (elementId === 'main-block') {
             return;
         }
-        pushHistory(elementsRef.current, connectionsRef.current);
+        // One undo step: both mutations below run in the same tick.
         // Drop the node's wires first, then recompute downstream value types
         // against the post-delete connection set — matching every other mutation
         // path so a node that fed a now-deleted source doesn't keep a stale type.
@@ -7630,7 +10851,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             );
             setSelected(fallback ? fallback.id : null);
         }
-        markGraphDirty();
+    };
+
+    // A text selection left over from a drag that started on text (sidebar,
+    // labels, the page behind the editor) turns the next press on it into a
+    // native drag-and-drop, which swallows the mouseup: the node then keeps
+    // following the pointer. Starting a canvas interaction clears it.
+    const clearStrayTextSelection = () => {
+        if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return;
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount > 0 && !selection.isCollapsed) selection.removeAllRanges();
     };
 
     const handleMouseDown = (event: React.MouseEvent<HTMLElement>) => {
@@ -7652,6 +10882,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (isDraggingFromSidebarRef.current && draggedItemRef.current) {
             return;
         }
+
+        clearStrayTextSelection();
+        // The drag's own starting point (a lost release finishes at the last
+        // point seen during THIS interaction, never an older one).
+        pendingCanvasMouseRef.current = { x: event.clientX, y: event.clientY };
 
         const currentTarget = event.currentTarget as HTMLElement;
         const elementId = currentTarget?.dataset?.elementId;
@@ -7687,6 +10922,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const handleMouseMove = (event: React.MouseEvent<HTMLElement>) => {
+        // No button is down any more, yet a node drag / pan / wire drag is
+        // still active: the release happened where we never saw it (outside
+        // the window, or a native drag swallowed it). Finish it at the last
+        // point seen WHILE dragging -- not where the pointer has wandered
+        // since -- instead of letting the node keep following the pointer.
+        if (
+            event.buttons === 0
+            && (isDraggingCanvasElementRef.current || isPanningRef.current || connectionInProgressRef.current)
+        ) {
+            const lastDragPoint = pendingCanvasMouseRef.current || { x: event.clientX, y: event.clientY };
+            handleMouseUp({ clientX: lastDragPoint.x, clientY: lastDragPoint.y } as unknown as React.MouseEvent<HTMLElement>);
+            return;
+        }
+
         const nextPoint = { x: event.clientX, y: event.clientY };
         pendingCanvasMouseRef.current = nextPoint;
 
@@ -7785,13 +11034,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const dx = (event.clientX - drag.startX) / zoomRef.current;
             const dy = (event.clientY - drag.startY) / zoomRef.current;
             if (dx !== 0 || dy !== 0) {
-                pushHistory(elementsRef.current, connectionsRef.current);
                 setElements((prev) => prev.map((element) => (
                     element.id === drag.elementId
                         ? { ...element, x: drag.elementX + dx, y: drag.elementY + dy }
                         : element
                 )));
-                markGraphDirty();
             }
             setDragElementDelta(null);
             dragElementDeltaRef.current = null;
@@ -7863,7 +11110,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     });
 
                     syncConnectionsAndTypes(nextConnections);
-                    markGraphDirty();
                     clearConnectionDrag(false);
                 } else {
                     showInfoNotice(`Cannot connect ${sourceValueType || 'unknown'} output to this pin.`);
@@ -7882,70 +11128,185 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         finishSidebarDrag(event.clientX, event.clientY);
         pendingCanvasMouseRef.current = nextPoint;
     };
+    // The window-level mouseup listener (registered once) ends canvas
+    // interactions released outside the canvas through the latest handler.
+    canvasMouseUpRef.current = handleMouseUp;
 
-    const isMainInputType = INPUT_MAIN_TYPES.has(mainElementType);
     return (
 
-        <div className="graph-editor">
-            {showDraftRecoveryNotice && pendingDraftRecovery && (
-                <div
-                    style={{
-                        position: 'fixed',
-                        top: '12px',
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        zIndex: 7000,
-                        width: 'min(760px, calc(100vw - 32px))',
-                        background: '#0f172a',
-                        color: '#e2e8f0',
-                        border: '1px solid #334155',
-                        borderRadius: '10px',
-                        boxShadow: '0 12px 28px rgba(2, 6, 23, 0.45)',
-                        padding: '12px 14px',
-                    }}
+        <div
+            className="graph-editor"
+            ref={editorRootRef}
+            onDragStart={(event) => {
+                const target = event.target as HTMLElement | null;
+                if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+                event.preventDefault();
+            }}
+        >
+            {persistenceEnabled && startupConflict && (
+                <PersistenceDialogFrame
+                    title="Your working copy differs from the graph saved on the page"
+                    tone="warning"
+                    actions={(
+                        <>
+                            <button type="button" style={dialogButtonStyle('secondary')} onClick={() => resolveStartupConflict('main')}>
+                                Use the page version
+                            </button>
+                            <button type="button" data-autofocus="true" style={dialogButtonStyle('primary')} onClick={() => resolveStartupConflict('work')}>
+                                Continue with my working copy
+                            </button>
+                        </>
+                    )}
                 >
-                    <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: '6px' }}>
-                        Unsaved graph draft found
+                    <p style={{ marginTop: 0 }}>
+                        {startupConflict.decision.reason === 'published-not-saved'
+                            ? 'These changes were saved to the block with Save Graph, but the page itself was not updated afterwards - or the page graph was changed since.'
+                            : 'The graph saved on the page changed after you started this working copy (for example: edited in another browser, restored from a page revision, or the page was not updated after Save Graph).'}
+                    </p>
+                    <p>
+                        Working copy stored in this browser: <strong>{formatTimestamp(startupConflict.work.createdAt)}</strong>.
+                        {' '}Page graph: <strong>{mainInfo.publishedAt ? formatTimestamp(mainInfo.publishedAt) : 'saved by an earlier editor version'}</strong>.
+                    </p>
+                    <div style={{ fontWeight: 600, margin: '8px 0 4px' }}>Your working copy compared with the page graph:</div>
+                    <DiffSummaryList diff={startupConflict.diff} />
+                    <div style={{ margin: '10px 0' }}>
+                        <GraphVersionPreview content={startupConflict.work.graph} compareTo={mainContentRef.current} height={200} />
                     </div>
-                    <div style={{ fontSize: '12px', lineHeight: '1.35', color: '#cbd5e1', marginBottom: '10px' }}>
-                        {pendingDraftLabel
-                            ? `There is an unsaved draft from ${pendingDraftLabel}.`
-                            : 'There is an unsaved draft for this graph.'}
+                    <p>
+                        Nothing is lost either way: the page graph stays on the page until you click Save Graph, and a working copy you do not continue with is kept as a local backup (Versions, import &amp; export).
+                    </p>
+                </PersistenceDialogFrame>
+            )}
+            {persistenceEnabled && !startupConflict && currentRecovery && currentRecovery.record && (
+                <PersistenceDialogFrame
+                    title="Unsaved changes found"
+                    tone="warning"
+                    actions={(
+                        <>
+                            <button type="button" style={dialogButtonStyle('secondary')} onClick={() => postponeRecovery(currentRecovery)} title="Keep the snapshot and ask again next time the editor opens">
+                                Decide later
+                            </button>
+                            <button type="button" style={dialogButtonStyle('secondary')} onClick={() => dismissRecovery(currentRecovery)}>
+                                Dismiss
+                            </button>
+                            <button type="button" data-autofocus="true" style={dialogButtonStyle('primary')} onClick={() => restoreRecovery(currentRecovery)}>
+                                Restore these changes
+                            </button>
+                        </>
+                    )}
+                >
+                    <p style={{ marginTop: 0 }}>
+                        {currentRecovery.legacy
+                            ? 'An unsaved draft left by the previous version of the editor'
+                            : 'A snapshot from an editing session that did not close normally'}
+                        {' '}(<strong>{formatTimestamp(currentRecovery.record.createdAt)}</strong>) contains changes that are not in your working copy or in the graph saved on the page.
+                    </p>
+                    <p style={{ color: '#94a3b8' }}>Why this is shown: {currentRecovery.reason}.</p>
+                    <div style={{ fontWeight: 600, margin: '8px 0 4px' }}>Compared with your working copy:</div>
+                    {currentRecovery.diffVsWork && <DiffSummaryList diff={currentRecovery.diffVsWork} />}
+                    <div style={{ fontWeight: 600, margin: '8px 0 4px' }}>Compared with the graph saved on the page:</div>
+                    {currentRecovery.diffVsMain && <DiffSummaryList diff={currentRecovery.diffVsMain} />}
+                    <div style={{ margin: '10px 0' }}>
+                        <GraphVersionPreview content={currentRecovery.record.graph} compareTo={currentWorkContent()} height={200} />
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                        <button
-                            type="button"
-                            onClick={handleDismissDraftRecovery}
-                            style={{
-                                padding: '6px 12px',
-                                background: '#334155',
-                                color: '#e2e8f0',
-                                border: 'none',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                            }}
-                        >
-                            Dismiss
+                    <p>
+                        <strong>Restore</strong> makes this snapshot your working copy; your current working copy is kept as a local backup and Undo brings it back. The page is not changed until you click Save Graph.
+                        {' '}<strong>Dismiss</strong> keeps the snapshot as a local backup and stops asking about it. <strong>Decide later</strong> changes nothing and asks again next time.
+                    </p>
+                    {recoveryQueue.length > 1 && <p>{recoveryQueue.length - 1} more snapshot{recoveryQueue.length > 2 ? 's' : ''} after this one.</p>}
+                </PersistenceDialogFrame>
+            )}
+            {persistenceDialog && persistenceDialog.kind === 'view' && (
+                <PersistenceDialogFrame
+                    title={persistenceDialog.title}
+                    onClose={() => setPersistenceDialog(null)}
+                    width={860}
+                    actions={(
+                        <>
+                            <button type="button" style={dialogButtonStyle('secondary')} onClick={() => exportGraph(persistenceDialog.exportRef)}>
+                                Export
+                            </button>
+                            {persistenceDialog.restorable && (
+                                <button type="button" style={dialogButtonStyle('secondary')} onClick={() => requestRestoreVersion(persistenceDialog.exportRef)}>
+                                    Restore…
+                                </button>
+                            )}
+                            <button type="button" data-autofocus="true" style={dialogButtonStyle('primary')} onClick={() => setPersistenceDialog(null)}>
+                                Close
+                            </button>
+                        </>
+                    )}
+                >
+                    <p style={{ marginTop: 0 }}>{persistenceDialog.subtitle} Viewing never changes anything.</p>
+                    <GraphVersionPreview content={persistenceDialog.content} compareTo={currentWorkContent()} height={320} />
+                    <div style={{ fontWeight: 600, margin: '10px 0 4px' }}>This version compared with your working copy:</div>
+                    <DiffSummaryList diff={diffGraphs(currentWorkContent(), persistenceDialog.content)} emptyText="Identical to your working copy." />
+                </PersistenceDialogFrame>
+            )}
+            {persistenceDialog && persistenceDialog.kind === 'confirm-replace' && (
+                <PersistenceDialogFrame
+                    title={persistenceDialog.title}
+                    tone="warning"
+                    onClose={() => setPersistenceDialog(null)}
+                    actions={(
+                        <>
+                            <button type="button" style={dialogButtonStyle('secondary')} onClick={() => setPersistenceDialog(null)}>
+                                Cancel
+                            </button>
+                            <button type="button" data-autofocus="true" style={dialogButtonStyle('primary')} onClick={() => confirmReplaceDialog(persistenceDialog)}>
+                                {persistenceDialog.confirmLabel}
+                            </button>
+                        </>
+                    )}
+                >
+                    {persistenceDialog.notes.filter(Boolean).map((note, index) => (
+                        <p key={index} style={{ margin: index === 0 ? '0 0 6px' : '0 0 6px' }}>{note}</p>
+                    ))}
+                    {unsavedChanges && persistenceDialog.reason !== 'discard' && (
+                        <p style={{ color: '#fbbf24', fontWeight: 600 }}>
+                            Your working copy has unpublished changes. They will be replaced (kept as a local backup; Undo brings them back).
+                        </p>
+                    )}
+                    <div style={{ fontWeight: 600, margin: '8px 0 4px' }}>What changes in your working copy:</div>
+                    <DiffSummaryList diff={diffGraphs(currentWorkContent(), persistenceDialog.content)} emptyText="Nothing - your working copy already matches." />
+                    <div style={{ margin: '10px 0' }}>
+                        <GraphVersionPreview content={persistenceDialog.content} compareTo={currentWorkContent()} height={200} />
+                    </div>
+                    <p style={{ color: '#94a3b8' }}>Your current working copy is saved as a local backup first, and Undo (Ctrl+Z) brings it back.</p>
+                </PersistenceDialogFrame>
+            )}
+            {persistenceDialog && persistenceDialog.kind === 'message' && (
+                <PersistenceDialogFrame
+                    title={persistenceDialog.title}
+                    tone={persistenceDialog.tone === 'error' ? 'error' : 'default'}
+                    onClose={() => setPersistenceDialog(null)}
+                    width={560}
+                    actions={(
+                        <button type="button" data-autofocus="true" style={dialogButtonStyle('primary')} onClick={() => setPersistenceDialog(null)}>
+                            Close
                         </button>
-                        <button
-                            type="button"
-                            onClick={handleRestoreUnsaved}
-                            style={{
-                                padding: '6px 12px',
-                                background: '#2563eb',
-                                color: '#fff',
-                                border: 'none',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                                fontWeight: 600,
-                            }}
-                        >
-                            Restore draft
-                        </button>
-                    </div>
-                </div>
+                    )}
+                >
+                    {persistenceDialog.lines.map((line, index) => (
+                        <p key={index} style={{ margin: '0 0 6px' }}>{line}</p>
+                    ))}
+                </PersistenceDialogFrame>
+            )}
+            {persistenceEnabled && (
+                <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: 'none' }}
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    onChange={(event) => {
+                        const file = event.target.files && event.target.files[0];
+                        // Reset so choosing the same file again still fires.
+                        event.target.value = '';
+                        handleImportFile(file);
+                    }}
+                />
             )}
             {floatingNotice && (
                 <div
@@ -8006,35 +11367,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                             {!templateMode && !customNodeMode && (
                                 <button
-                                    onClick={() => {
-                                        if (hasDynamicInputGapErrors) {
-                                            const firstError = Object.values(dynamicInputGapErrors)[0];
-                                            setTemplateInfo(`Save blocked: ${firstError}`);
-                                            return;
-                                        }
-                                        try {
-                                            handleSaveFormula();
-                                        } catch (err) {
-                                            // Keep graph save resilient even if formula generation fails.
-                                            console.error('Formula generation error during save:', err);
-                                        } finally {
-                                            handleSave();
-                                        }
-                                    }}
+                                    onClick={handlePublish}
+                                    disabled={Boolean(startupConflict)}
                                     style={{
                                         ...buttonStyle,
                                         backgroundColor: hasDynamicInputGapErrors ? '#9e9e9e' : '#4caf50',
                                         cursor: hasDynamicInputGapErrors ? 'not-allowed' : 'pointer',
                                         opacity: hasDynamicInputGapErrors ? 0.85 : 1
                                     }}
-                                    title={hasDynamicInputGapErrors ? 'Fix dynamic input gaps before saving.' : 'Save current graph'}
+                                    title={hasDynamicInputGapErrors ? 'Fix dynamic input gaps before saving.' : 'Save the working copy to the block (publishes it to the page when the page is updated)'}
                                 >
                                     Save Graph
                                 </button>
                             )}
 
-                            {/* Undo / Redo */}
-                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+                            {/* Undo / Redo (undoRedoVersion re-renders these when only the stacks change) */}
+                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }} data-undo-version={undoRedoVersion}>
                                 <button
                                     onClick={handleUndo}
                                     disabled={undoStackRef.current.length === 0}
@@ -8059,34 +11407,58 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                 </div>
                             )}
 
-                            {unsavedChanges && !templateMode && !customNodeMode && (
-                                <>
-                                    <div style={{ color: '#ff9800', fontSize: '11px', marginTop: '4px', marginBottom: '2px' }}>
-                                        Changes not saved
-                                    </div>
-                                    <button
-                                        onClick={handleRestore}
-                                        style={{
-                                            ...buttonStyle,
-                                            backgroundColor: '#ff9800'
-                                        }}
-                                    >
-                                        Restore Changes
-                                    </button>
-                                </>
+                            {persistenceEnabled && (
+                                <div
+                                    className="nl-work-status"
+                                    role="status"
+                                    aria-live="polite"
+                                    data-state={workStatus.state === 'error' || workStatus.state === 'conflict' ? workStatus.state : (unsavedChanges ? 'dirty' : 'clean')}
+                                    style={{ fontSize: '11px', lineHeight: '1.4', marginTop: '6px', overflowWrap: 'anywhere' }}
+                                >
+                                    {workStatus.state === 'conflict' ? (
+                                        <>
+                                            <div style={{ color: '#fbbf24', fontWeight: 600 }}>Edited in another tab</div>
+                                            <div style={{ color: '#cbd5e1' }}>{workStatus.message}</div>
+                                            <button type="button" onClick={takeOverWorkingCopy} style={{ ...buttonStyle, backgroundColor: '#b45309' }}>
+                                                Keep this tab&apos;s version
+                                            </button>
+                                        </>
+                                    ) : workStatus.state === 'error' ? (
+                                        <div style={{ color: '#f87171' }}>{workStatus.message}</div>
+                                    ) : unsavedChanges ? (
+                                        <>
+                                            <div style={{ color: '#ff9800', fontWeight: 600 }}>Unpublished changes</div>
+                                            <div style={{ color: '#94a3b8' }}>
+                                                {workStatus.savedAt ? `Working copy kept in this browser (${formatTimestamp(workStatus.savedAt)}).` : 'Working copy kept in this browser.'}
+                                                {' '}Save Graph puts it on the page.
+                                            </div>
+                                            <button type="button" onClick={requestDiscardWork} style={{ ...buttonStyle, backgroundColor: '#b45309' }}>
+                                                Discard changes…
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <div style={{ color: '#4ade80' }}>
+                                            {'✓'} Same as the graph saved on the page{mainInfo.revision > 0 ? ` (version ${mainInfo.revision})` : ''}.
+                                        </div>
+                                    )}
+                                </div>
                             )}
 
-                            {!unsavedChanges && recoverableDraftState && !showDraftRecoveryNotice && !templateMode && !customNodeMode && (
-                                <button
-                                    onClick={handleRestoreUnsaved}
-                                    style={{
-                                        ...buttonStyle,
-                                        backgroundColor: '#3b82f6',
-                                        marginTop: '6px',
-                                    }}
-                                >
-                                    Restore Unsaved Draft
-                                </button>
+                            {persistenceEnabled && (
+                                <VersionsPanel
+                                    mainInfo={mainInfo}
+                                    mainContent={mainContentRef.current}
+                                    history={historyEntries}
+                                    backups={backupEntries}
+                                    historyLimit={historyLimit}
+                                    canPersistHistory={Boolean(onPublish)}
+                                    onHistoryLimitChange={handleHistoryLimitChange}
+                                    onView={viewVersion}
+                                    onRestore={requestRestoreVersion}
+                                    onExport={exportGraph}
+                                    onImport={() => importFileInputRef.current?.click()}
+                                    onOpen={refreshBackups}
+                                />
                             )}
 
                             {templateToolsEnabled && !templateMode && !customNodeMode && (
@@ -8368,7 +11740,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#ddd', cursor: 'pointer', userSelect: 'none' }}>
                                                         <input
                                                             type="checkbox"
-                                                            checked={selEl.data?.passOnlyOnEvent === true}
+                                                            checked={selEl.data?.passOnlyOnEvent !== false}
                                                             onChange={(e) => {
                                                                 const checked = e.target.checked;
                                                                 setElements(prev =>
@@ -8417,18 +11789,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         style={{ width: '100%' }}
                                                     />
                                                 </div>
+                                                {selEl.type !== 'memory-read-boolean' && (
                                                 <div>
                                                     <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Default Value</div>
                                                     <input
                                                         type={selEl.type === 'memory-read-number' ? 'number' : 'text'}
                                                         className="input-control"
-                                                        value={selEl.data?.defaultValue ?? (selEl.type === 'memory-read-number' ? 0 : selEl.type === 'memory-read-boolean' ? false : '')}
+                                                        value={selEl.data?.defaultValue ?? (selEl.type === 'memory-read-number' ? 0 : '')}
                                                         onChange={(e) => {
-                                                            let defaultValue: number | string | boolean;
+                                                            let defaultValue: number | string;
                                                             if (selEl.type === 'memory-read-number') {
                                                                 defaultValue = parseFloat(e.target.value) || 0;
-                                                            } else if (selEl.type === 'memory-read-boolean') {
-                                                                defaultValue = e.target.value === 'true';
                                                             } else {
                                                                 defaultValue = e.target.value;
                                                             }
@@ -8442,10 +11813,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 )
                                                             );
                                                         }}
-                                                        placeholder={selEl.type === 'memory-read-number' ? '0' : selEl.type === 'memory-read-boolean' ? 'false' : 'Default value'}
+                                                        placeholder={selEl.type === 'memory-read-number' ? '0' : 'Default value'}
                                                         style={{ width: '100%' }}
                                                     />
                                                 </div>
+                                                )}
+                                                {/* memory-read-boolean uses the "Boolean Value" select below as its
+                                                    only default-value control — a separate free-text "Default Value"
+                                                    input writing the same field was redundant and let users type
+                                                    arbitrary text into a boolean-typed value. */}
                                                 {selEl.type === 'memory-read-boolean' && (
                                                     <div>
                                                         <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Boolean Value</div>
@@ -8630,6 +12006,112 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                             </div>
                                         )}
 
+                                        {selEl.type === 'memory-array-read' && (
+                                            <>
+                                                <div>
+                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Variable Key</div>
+                                                    <input
+                                                        type="text"
+                                                        className="input-control"
+                                                        value={selEl.data?.variableKey || ''}
+                                                        onChange={(e) => {
+                                                            const variableKey = e.target.value;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, variableKey } }
+                                                                            : elem
+                                                                    )
+                                                                )
+                                                            );
+                                                        }}
+                                                        placeholder="Variable key"
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                    <div style={{ color: '#888', fontSize: '10px', marginTop: '4px' }}>
+                                                        Reads the current array, or [] if it doesn't exist yet. Never mutates it.
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#aaa', cursor: 'pointer' }}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selEl.data?.persistVariable || false}
+                                                            onChange={(e) => {
+                                                                const persistVariable = e.target.checked;
+                                                                setElements(prev =>
+                                                                    updateElementValueTypes(
+                                                                        prev.map(elem =>
+                                                                            elem.id === selected
+                                                                                ? { ...elem, data: { ...elem.data, persistVariable } }
+                                                                                : elem
+                                                                        )
+                                                                    )
+                                                                );
+                                                            }}
+                                                        />
+                                                        Persist across sessions
+                                                    </label>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {selEl.type === 'json-body' && (() => {
+                                            const rawText = String(selEl.data?.jsonBodyText ?? '');
+                                            let parseError = '';
+                                            if (rawText.trim()) {
+                                                try {
+                                                    JSON.parse(rawText);
+                                                } catch (e) {
+                                                    parseError = e instanceof Error ? e.message : 'Invalid JSON';
+                                                }
+                                            }
+                                            return (
+                                                <div>
+                                                    <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>JSON Body</div>
+                                                    <textarea
+                                                        className="input-control nl-scroll-guard"
+                                                        value={rawText}
+                                                        onChange={(e) => {
+                                                            const jsonBodyText = e.target.value;
+                                                            setElements(prev =>
+                                                                updateElementValueTypes(
+                                                                    prev.map(elem =>
+                                                                        elem.id === selected
+                                                                            ? { ...elem, data: { ...elem.data, jsonBodyText } }
+                                                                            : elem
+                                                                    )
+                                                                )
+                                                            );
+                                                        }}
+                                                        placeholder={'{\n  "title": "NodeLogic Test",\n  "body": "API POST is working",\n  "userId": 99\n}'}
+                                                        spellCheck={false}
+                                                        style={{
+                                                            width: '100%',
+                                                            height: 'auto',
+                                                            minHeight: '160px',
+                                                            resize: 'vertical',
+                                                            fontFamily: 'monospace',
+                                                            fontSize: '11px',
+                                                            lineHeight: 1.4,
+                                                            whiteSpace: 'pre',
+                                                            overflowX: 'auto',
+                                                        }}
+                                                    />
+                                                    {parseError ? (
+                                                        <div style={{ color: '#ef4444', fontSize: '10px', marginTop: '4px' }}>
+                                                            Invalid JSON: {parseError}. Sends an empty object ({'{}'}) until this is fixed.
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{ color: '#888', fontSize: '10px', marginTop: '4px' }}>
+                                                            Parsed into a structured value (objects, arrays, strings, numbers, booleans, null) -- wire the output directly into API Request's Body pin.
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
+
                                         {isMemoryNodeType(selEl.type) && (
                                             <div>
                                                 <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px' }}>Scope</div>
@@ -8807,6 +12289,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'constant-boolean'
                             || el.type === 'constant-string'
                             || el.type === 'color'
+                            || el.type === 'css-color'
                             || el.type === 'math'
                             || el.type === 'event-element'
                             || el.type === 'event-id'
@@ -8815,12 +12298,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'event-page-load'
                             || el.type === 'event-timer'
                             || el.type === 'event-custom'
+                            || el.type === 'event-and'
+                            || el.type === 'event-processor'
                             || el.type === 'action-event'
                             || el.type === 'string-split'
                             || el.type === 'string-replace'
                             || el.type === 'number-parse'
                             || el.type === 'number-to-base'
                             || el.type === 'multi-concat'
+                            || el.type === 'object-build'
+                            || el.type === 'json-body'
                             || el.type === 'css-unit'
                             || el.type === 'css-margin'
                             || el.type === 'css-padding'
@@ -8841,6 +12328,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'api-status'
                             || el.type === 'api-field'
                             || el.type === 'api-list-mapper'
+                            || el.type === 'form-data'
+                            || el.type === 'send-email'
+                            || DB_NODE_TYPES.has(el.type)
+                            || PANEL_NODE_TYPES.has(el.type)
                             || isMemoryNodeType(el.type);
                         const calcSegments = el.type === 'calculation' ? (calcFlowByNode[el.id] || []) : [];
                         const calcMarkerId = `calc-flow-arrow-${el.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
@@ -9256,6 +12747,37 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </div>
                                                     );
                                                 })()
+                                            ) : el.type === 'css-color' ? (
+                                                // Mirrors the "Color Node" picker above: previously this node had NO
+                                                // canvas control at all and relayed a wired input0 verbatim, defaulting
+                                                // to "" when nothing was wired -- so "CSS Color -> Set Style" produced
+                                                // an empty value with no error, despite the palette naming it a color
+                                                // picker. A wired input still takes priority at compile time; this is
+                                                // only the fallback used when nothing is wired.
+                                                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
+                                                    <input
+                                                        type="color"
+                                                        className="input-control"
+                                                        value={String(el.data?.colorValue || '#2563eb')}
+                                                        onChange={(e) => {
+                                                            const colorValue = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, colorValue } } : elem)));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        style={{ width: '26px', minWidth: '26px', maxWidth: '26px', height: '26px', minHeight: '26px', maxHeight: '26px', padding: '1px' }}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        className="input-control"
+                                                        value={String(el.data?.colorValue || '#2563eb')}
+                                                        onChange={(e) => {
+                                                            const colorValue = e.target.value;
+                                                            setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, colorValue } } : elem)));
+                                                        }}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        placeholder="#2563eb"
+                                                    />
+                                                </div>
                                               ) : el.type === 'api-request' || el.type === 'api-status' || el.type === 'api-field' || el.type === 'api-list-mapper' ? (
                                                   renderApiNodeControls(el)
                                               ) : el.type === 'element-id' ? (
@@ -9300,9 +12822,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                           <option value="boolean">Boolean</option>
                                                       </select>
                                                   </div>
-                                            ) : el.type === 'element-ref' ? (
+                                            ) : el.type === 'element-ref' || el.type === 'form-data' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.elementUseManualId ? (
+                                                    {(!isGutenbergHost || el.data?.elementUseManualId) ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -9334,6 +12856,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
+                                                    {isGutenbergHost && (
                                                     <div style={{ marginTop: '6px', paddingTop: '6px', paddingBottom: '4px', borderTop: '1px solid rgba(255,255,255,0.28)' }}>
                                                     <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
                                                         <input
@@ -9351,12 +12874,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         Manual ID
                                                     </label>
                                                     </div>
+                                                    )}
                                                 </div>
-                                            ) : el.type === 'event-hover' || el.type === 'event-scroll' || el.type === 'event-page-load' || el.type === 'event-timer' || el.type === 'event-custom' ? (
+                                            ) : DB_NODE_TYPES.has(el.type) ? (
+                                                renderDbNodeControls(el)
+                                            ) : PANEL_NODE_TYPES.has(el.type) ? (
+                                                renderDomNodeControls(el)
+                                            ) : el.type === 'send-email' ? (
+                                                renderSendEmailControls(el)
+                                            ) : el.type === 'event-hover' || el.type === 'event-scroll' || el.type === 'event-page-load' || el.type === 'event-timer' || el.type === 'event-custom' || el.type === 'event-and' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
                                                     {(el.type === 'event-hover' || el.type === 'event-scroll') && (
                                                         <>
-                                                            {el.data?.eventUseManualId ? (
+                                                            {(!isGutenbergHost || el.data?.eventUseManualId) ? (
                                                                 <input className="input-control" value={String(el.data?.eventId || '')} placeholder="Target ID" onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventId: e.target.value } } : elem)))} />
                                                             ) : (
                                                                 <select className="input-control" value={String(el.data?.selectedElement || '')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, selectedElement: e.target.value } } : elem)))}>
@@ -9369,12 +12899,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     <option value="enter">Mouse enter</option><option value="leave">Mouse leave</option><option value="both">Both</option>
                                                                 </select>
                                                             )}
+                                                            {isGutenbergHost && (
                                                             <div style={{ marginTop: '6px', paddingTop: '6px', paddingBottom: '4px', borderTop: '1px solid rgba(255,255,255,0.28)' }}>
                                                                 <label className="reverse-toggle">
                                                                     <input type="checkbox" checked={!!el.data?.eventUseManualId} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventUseManualId: e.target.checked } } : elem)))} />
                                                                     Manual target ID
                                                                 </label>
                                                             </div>
+                                                            )}
                                                         </>
                                                     )}
                                                     {el.type === 'event-timer' && (
@@ -9385,6 +12917,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     )}
                                                     {el.type === 'event-custom' && <input className="input-control" type="text" value={String(el.data?.eventCustomName || '')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventCustomName: e.target.value } } : elem)))} placeholder="Custom event name" />}
                                                     {el.type === 'event-page-load' && <div className="input-control" style={{ padding: '8px' }}>Runs on page load</div>}
+                                                    {el.type === 'event-and' && (
+                                                        <>
+                                                            <div style={{ fontSize: '10px', color: '#94a3b8' }}>Window (ms): how long the first event waits for the other</div>
+                                                            <input className="input-control" type="number" min="0" value={String(el.data?.eventAndWindowMs ?? 5000)} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventAndWindowMs: Math.max(0, Number(e.target.value) || 0) } } : elem)))} placeholder="Window (ms)" />
+                                                        </>
+                                                    )}
                                                 </div>
                                             ) : el.type === 'element-property' ? (
                                                 (() => {
@@ -9489,44 +13027,20 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             <div style={{ fontSize: '10px', color: elementInputSource ? '#86efac' : '#94a3b8' }}>
                                                                 {elementInputSource
                                                                     ? `Element: from ${elementInputSource.name || elementInputSource.type} pin`
-                                                                    : 'Element: connect the Element pin, or pick an ID below'}
+                                                                    : 'Element: connect an element to the Element pin'}
                                                             </div>
-                                                            {!elementInputSource && (
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                                                    {data.elementUseManualId ? (
-                                                                        <input
-                                                                            type="text"
-                                                                            className="input-control"
-                                                                            value={String(data.customElementId || '')}
-                                                                            placeholder="Element ID"
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { customElementId: e.target.value })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                        />
-                                                                    ) : (
-                                                                        <select
-                                                                            className="input-control"
-                                                                            value={String(data.selectedElement || '')}
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { selectedElement: e.target.value })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                        >
-                                                                            <option value="">-- Element --</option>
-                                                                            {detectedElements.map((d) => (
-                                                                                <option key={d.id} value={d.id}>{d.id}</option>
-                                                                            ))}
-                                                                        </select>
-                                                                    )}
-                                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={!!data.elementUseManualId}
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { elementUseManualId: e.target.checked })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                            style={{ cursor: 'pointer' }}
-                                                                        />
-                                                                        Manual ID
-                                                                    </label>
-                                                                </div>
-                                                            )}
+                                                            {/* Structure-dependent controls (mode + whatever that mode
+                                                                needs) only ever appear once a WIRED Element pin has
+                                                                actually resolved to a live element and its properties
+                                                                were detected -- typing an ID manually never triggers
+                                                                detection (previewResolver.ts's structure sniffing only
+                                                                runs against a connection's resolved live element; see
+                                                                the detection effect above). Before that, this card is
+                                                                deliberately just the ID control above: nothing to
+                                                                misconfigure, nothing whose height depends on state that
+                                                                doesn't exist yet. */}
+                                                            {detected.length > 0 && (
+                                                            <>
                                                             <select
                                                                 className="input-control"
                                                                 value={mode}
@@ -9556,28 +13070,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     {currentSingle && singleType && (
                                                                         <div style={{ fontSize: '10px', color: '#64748b' }}>Type: {singleType}</div>
                                                                     )}
-                                                                    {detected.length === 0 && (
-                                                                        <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                                                                            No live preview element — type a property name above.
-                                                                        </div>
-                                                                    )}
                                                                 </>
                                                             )}
 
                                                             {mode === 'all' && (
                                                                 <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                                                                    {detected.length > 0 ? (
-                                                                        <>
-                                                                            <div>{detected.length} propert{detected.length === 1 ? 'y' : 'ies'} &rarr; {detected.length} output{detected.length === 1 ? '' : 's'}</div>
-                                                                            <div className="nl-scroll-guard" style={{ marginTop: '3px', maxHeight: '92px', overflowY: 'auto' }}>
-                                                                                {detected.map((p) => (
-                                                                                    <div key={p.key}>&#9679; {p.key} <span style={{ opacity: 0.6 }}>({p.type})</span></div>
-                                                                                ))}
-                                                                            </div>
-                                                                        </>
-                                                                    ) : (
-                                                                        <span>No properties detected. Connect an Element Reference to an element that exists in the preview.</span>
-                                                                    )}
+                                                                    <div>{detected.length} propert{detected.length === 1 ? 'y' : 'ies'} &rarr; {detected.length} output{detected.length === 1 ? '' : 's'}</div>
+                                                                    <div className="nl-scroll-guard" style={{ marginTop: '3px', maxHeight: '92px', overflowY: 'auto' }}>
+                                                                        {detected.map((p) => (
+                                                                            <div key={p.key}>&#9679; {p.key} <span style={{ opacity: 0.6 }}>({p.type})</span></div>
+                                                                        ))}
+                                                                    </div>
                                                                 </div>
                                                             )}
 
@@ -9646,6 +13149,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                         onClick={(e) => e.stopPropagation()}
                                                                     />
                                                                 </div>
+                                                            )}
+                                                            </>
                                                             )}
                                                         </div>
                                                     );
@@ -9726,44 +13231,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             <div style={{ fontSize: '10px', color: elementInputSource ? '#86efac' : '#94a3b8' }}>
                                                                 {elementInputSource
                                                                     ? `Element: from ${elementInputSource.name || elementInputSource.type} pin`
-                                                                    : 'Element: connect the Element pin, or pick an ID below'}
+                                                                    : 'Element: connect an element to the Element pin'}
                                                             </div>
-                                                            {!elementInputSource && (
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                                                    {data.elementUseManualId ? (
-                                                                        <input
-                                                                            type="text"
-                                                                            className="input-control"
-                                                                            value={String(data.customElementId || '')}
-                                                                            placeholder="Element ID"
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { customElementId: e.target.value })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                        />
-                                                                    ) : (
-                                                                        <select
-                                                                            className="input-control"
-                                                                            value={String(data.selectedElement || '')}
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { selectedElement: e.target.value })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                        >
-                                                                            <option value="">-- Element --</option>
-                                                                            {detectedElements.map((d) => (
-                                                                                <option key={d.id} value={d.id}>{d.id}</option>
-                                                                            ))}
-                                                                        </select>
-                                                                    )}
-                                                                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#cbd5e1', cursor: 'pointer', userSelect: 'none' }}>
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={!!data.elementUseManualId}
-                                                                            onChange={(e) => applyNodeDataChange(nodeId, { elementUseManualId: e.target.checked })}
-                                                                            onClick={(e) => e.stopPropagation()}
-                                                                            style={{ cursor: 'pointer' }}
-                                                                        />
-                                                                        Manual ID
-                                                                    </label>
-                                                                </div>
+                                                            {elementInputSource && detected.length === 0 && (
+                                                                <div style={{ fontSize: '10px', color: '#94a3b8' }}>Options appear once this element's children are found in the preview.</div>
                                                             )}
+                                                            {detected.length > 0 && (
+                                                            <>
                                                             <select
                                                                 className="input-control"
                                                                 value={mode}
@@ -9776,7 +13250,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             </select>
 
                                                             {mode === 'single' && (
-                                                                detected.length > 0 ? (
                                                                     <select
                                                                         className="input-control"
                                                                         value={String(singleIndex)}
@@ -9787,25 +13260,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                             <option key={option.value} value={String(option.value)}>{option.label}</option>
                                                                         ))}
                                                                     </select>
-                                                                ) : (
-                                                                    <input
-                                                                        className="input-control"
-                                                                        type="number"
-                                                                        min={0}
-                                                                        value={String(singleIndex)}
-                                                                        placeholder="Child index (no preview)"
-                                                                        onChange={(e) => setSingle(Number(e.target.value))}
-                                                                        onClick={(e) => e.stopPropagation()}
-                                                                    />
-                                                                )
                                                             )}
 
                                                             {mode === 'all' && (
                                                                 <>
                                                                     <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                                                                        {detected.length > 0
-                                                                            ? `${detected.length} child${detected.length === 1 ? '' : 'ren'} detected`
-                                                                            : 'No children detected. Connect an Element Reference to an element in the preview.'}
+                                                                        {`${detected.length} child${detected.length === 1 ? '' : 'ren'} detected`}
                                                                     </div>
                                                                     {returnAsControl}
                                                                 </>
@@ -9851,6 +13311,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                     )}
                                                                     {returnAsControl}
                                                                 </>
+                                                            )}
+                                                            </>
                                                             )}
                                                         </div>
                                                     );
@@ -10002,14 +13464,25 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     </div>
                                                 </div>
                                             ) : el.type === 'event-processor' ? (
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                                    <div className="input-control" style={{ padding: '10px', cursor: 'default' }}>
-                                                        Connect event input and payload input on the node canvas.
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={(e) => e.stopPropagation()}>
+                                                    <label className="reverse-toggle">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={el.data?.passOnlyOnEvent !== false}
+                                                            onChange={(e) => {
+                                                                const checked = e.target.checked;
+                                                                setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, passOnlyOnEvent: checked } } : elem)));
+                                                            }}
+                                                        />
+                                                        Only when event fires
+                                                    </label>
+                                                    <div style={{ fontSize: '10px', color: '#94a3b8', lineHeight: 1.35 }}>
+                                                        {el.data?.passOnlyOnEvent !== false ? 'Payload passes only when the event fires.' : 'Payload always passes (event ignored).'}
                                                     </div>
                                                 </div>
                                             ) : el.type === 'element' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.elementUseManualId ? (
+                                                    {(!isGutenbergHost || el.data?.elementUseManualId) ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -10054,9 +13527,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
-                                                    <select className="input-control" value={String(el.data?.eventType || 'click')} onChange={(e) => setElements(prev => updateElementValueTypes(prev.map(elem => elem.id === el.id ? { ...elem, data: { ...elem.data, eventType: e.target.value } } : elem)))} onClick={(e) => e.stopPropagation()}>
-                                                            <option value="click">Click</option><option value="change">Change</option><option value="input">Input</option><option value="focus">Focus</option><option value="blur">Blur</option><option value="mouseenter">Hover enter</option><option value="scroll">Scroll</option>
-                                                    </select>
+                                                    {isGutenbergHost && (
                                                     <div style={{ marginTop: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', paddingTop: '6px', paddingBottom: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
@@ -10074,6 +13545,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             Manual ID
                                                         </label>
                                                     </div>
+                                                    )}
                                                 </div>
                                             ) : el.type === 'output' ? (
                                                 (() => {
@@ -10207,8 +13679,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'string-split' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={(e) => e.stopPropagation()}>
-                                                    <input type="text" className="input-control" value={el.data?.splitDelimiter ?? ','} placeholder="Delimiter" onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, splitDelimiter: v } } : em)); }} onClick={(e) => e.stopPropagation()} />
-                                                    <input type="number" className="input-control" value={String(el.data?.splitIndex ?? 0)} placeholder="Index" min={0} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, splitIndex: Number.isFinite(v) ? v : 0 } } : em)); }} onClick={(e) => e.stopPropagation()} />
+                                                    <ConfigFieldLabel>Delimiter</ConfigFieldLabel>
+                                                    <input type="text" className="input-control" value={el.data?.splitDelimiter ?? ','} placeholder="," onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, splitDelimiter: v } } : em)); }} onClick={(e) => e.stopPropagation()} />
+                                                    <ConfigFieldLabel>Part Index</ConfigFieldLabel>
+                                                    <input type="number" className="input-control" value={String(el.data?.splitIndex ?? 0)} placeholder="0" min={0} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, splitIndex: Number.isFinite(v) ? v : 0 } } : em)); }} onClick={(e) => e.stopPropagation()} />
                                                 </div>
                                             ) : el.type === 'string-replace' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }} onClick={(e) => e.stopPropagation()}>
@@ -10217,6 +13691,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'number-parse' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
+                                                    <ConfigFieldLabel>Base of the text</ConfigFieldLabel>
                                                     <select className="input-control" value={String(el.data?.parseRadix ?? 10)} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, parseRadix: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
                                                         <option value="10">Base 10</option>
                                                         <option value="16">Base 16 (hex)</option>
@@ -10226,13 +13701,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'number-to-base' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
+                                                    <ConfigFieldLabel>Base</ConfigFieldLabel>
                                                     <select className="input-control" value={String(el.data?.parseRadix ?? 16)} onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, parseRadix: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
                                                         <option value="10">Base 10 (decimal)</option>
                                                         <option value="16">Base 16 (hex)</option>
                                                         <option value="2">Base 2 (binary)</option>
                                                         <option value="8">Base 8 (octal)</option>
                                                     </select>
-                                                    <input type="number" className="input-control" min={0} max={16} value={String(el.data?.minLength ?? 0)} placeholder="Min length (pad)" onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, minLength: Number.isFinite(v) ? v : 0 } } : em)); }} onClick={(e) => e.stopPropagation()} style={{ marginTop: '3px' }} />
+                                                    <div style={{ marginTop: '4px' }}>
+                                                        <ConfigFieldLabel>Minimum Digits (zero-padded)</ConfigFieldLabel>
+                                                        <input type="number" className="input-control" min={0} max={16} value={String(el.data?.minLength ?? 0)} placeholder="0" onChange={(e) => { const v = parseInt(e.target.value, 10); setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, minLength: Number.isFinite(v) ? v : 0 } } : em)); }} onClick={(e) => e.stopPropagation()} />
+                                                    </div>
                                                 </div>
                                             ) : el.type === 'multi-concat' ? (
                                                 <div onClick={(e) => e.stopPropagation()}>
@@ -10246,26 +13725,102 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="8">8 inputs</option>
                                                     </select>
                                                 </div>
-                                            ) : el.type === 'css-join' ? (
-                                                <div onClick={(e) => e.stopPropagation()}>
-                                                    <input
-                                                        type="number"
-                                                        className="input-control"
-                                                        min={2}
-                                                        max={8}
-                                                        step={1}
-                                                        value={String(el.data?.inputCount ?? 3)}
-                                                        onChange={(e) => {
-                                                            const raw = parseInt(e.target.value, 10);
-                                                            const next = Number.isFinite(raw) ? Math.max(2, Math.min(8, raw)) : 3;
-                                                            setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: next } } : em));
-                                                        }}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        placeholder="2-8"
-                                                    />
+                                            ) : el.type === 'object-build' ? (
+                                                (() => {
+                                                    const keyCount = Math.max(1, Math.min(8, Number(el.data?.inputCount) || 3));
+                                                    const keys = Array.isArray(el.data?.objectKeys) ? el.data.objectKeys : [];
+                                                    return (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                            <ConfigFieldLabel>Number of Keys (1-8)</ConfigFieldLabel>
+                                                            <select
+                                                                className="input-control"
+                                                                value={String(keyCount)}
+                                                                onChange={(e) => {
+                                                                    const v = parseInt(e.target.value, 10);
+                                                                    setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: v } } : em));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            >
+                                                                {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                                                                    <option key={n} value={n}>{n} key{n === 1 ? '' : 's'}</option>
+                                                                ))}
+                                                            </select>
+                                                            {Array.from({ length: keyCount }, (_, i) => (
+                                                                <input
+                                                                    key={i}
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={keys[i] ?? ''}
+                                                                    placeholder={`key${i + 1}`}
+                                                                    onChange={(e) => {
+                                                                        const val = e.target.value;
+                                                                        setElements(prev => prev.map(em => {
+                                                                            if (em.id !== el.id) return em;
+                                                                            const nextKeys = Array.isArray(em.data?.objectKeys) ? [...em.data.objectKeys] : [];
+                                                                            nextKeys[i] = val;
+                                                                            return { ...em, data: { ...em.data, objectKeys: nextKeys } };
+                                                                        }));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    );
+                                                })()
+                                            ) : el.type === 'json-body' ? (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center', justifyContent: 'center', minHeight: '40px', color: '#aaa', fontSize: '11px' }}>
+                                                    Configure in sidebar
                                                 </div>
+                                            ) : el.type === 'css-join' ? (
+                                                (() => {
+                                                    const joinCount = Math.max(2, Math.min(8, Number(el.data?.inputCount) || 3));
+                                                    const propertyNames = Array.isArray(el.data?.cssJoinPropertyNames) ? el.data.cssJoinPropertyNames : [];
+                                                    return (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                            <ConfigFieldLabel>Number of Inputs to Join (2-8)</ConfigFieldLabel>
+                                                            <input
+                                                                type="number"
+                                                                className="input-control"
+                                                                min={2}
+                                                                max={8}
+                                                                step={1}
+                                                                value={String(el.data?.inputCount ?? 3)}
+                                                                onChange={(e) => {
+                                                                    const raw = parseInt(e.target.value, 10);
+                                                                    const next = Number.isFinite(raw) ? Math.max(2, Math.min(8, raw)) : 3;
+                                                                    setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, inputCount: next } } : em));
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                placeholder="2-8"
+                                                            />
+                                                            <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                                                                Optional CSS property name per input -- fill this in to join bare values (e.g. from CSS Color / a Display value) into one real declaration list, instead of a raw literal that already includes its own "property:".
+                                                            </div>
+                                                            {Array.from({ length: joinCount }, (_, i) => (
+                                                                <input
+                                                                    key={i}
+                                                                    type="text"
+                                                                    className="input-control"
+                                                                    value={propertyNames[i] ?? ''}
+                                                                    placeholder={`Property ${i + 1} (e.g. color) -- optional`}
+                                                                    onChange={(e) => {
+                                                                        const val = e.target.value;
+                                                                        setElements(prev => prev.map(em => {
+                                                                            if (em.id !== el.id) return em;
+                                                                            const nextNames = Array.isArray(em.data?.cssJoinPropertyNames) ? [...em.data.cssJoinPropertyNames] : [];
+                                                                            nextNames[i] = val;
+                                                                            return { ...em, data: { ...em.data, cssJoinPropertyNames: nextNames } };
+                                                                        }));
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    );
+                                                })()
                                             ) : el.type === 'css-unit' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
+                                                    <ConfigFieldLabel>Value</ConfigFieldLabel>
                                                     <input
                                                         type="number"
                                                         className="input-control"
@@ -10275,7 +13830,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, cssUnitValue: next } } : em));
                                                         }}
                                                         onClick={(e) => e.stopPropagation()}
-                                                        placeholder="Value"
+                                                        placeholder="0"
                                                     />
                                                     <select className="input-control" value={el.data?.cssUnit ?? 'px'} onChange={(e) => { const v = e.target.value; setElements(prev => prev.map(em => em.id === el.id ? { ...em, data: { ...em.data, cssUnit: v } } : em)); }} onClick={(e) => e.stopPropagation()}>
                                                         <option value="px">px</option>
@@ -10382,9 +13937,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         </label>
                                                     </div>
                                                 </div>
-                                            ) : el.type === 'element-ref' ? (
+                                            ) : el.type === 'element-ref' || el.type === 'form-data' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.elementUseManualId ? (
+                                                    {(!isGutenbergHost || el.data?.elementUseManualId) ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -10416,6 +13971,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
+                                                    {isGutenbergHost && (
                                                     <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
@@ -10433,7 +13989,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             Manual ID
                                                         </label>
                                                     </div>
+                                                    )}
                                                 </div>
+                                            ) : DB_NODE_TYPES.has(el.type) ? (
+                                                renderDbNodeControls(el)
+                                            ) : PANEL_NODE_TYPES.has(el.type) ? (
+                                                renderDomNodeControls(el)
+                                            ) : el.type === 'send-email' ? (
+                                                renderSendEmailControls(el)
                                             ) : el.type === 'element-property' ? (
                                                 (() => {
                                                     const connId = connections.find(c => c.toId === el.id && c.toInput === 'input0')?.fromId;
@@ -10520,7 +14083,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 })()
                                             ) : el.type === 'action-event' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.actionUseManualId ? (
+                                                    {(!isGutenbergHost || el.data?.actionUseManualId) ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -10571,6 +14134,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keydown">keydown</option>
                                                         <option value="keyup">keyup</option>
                                                     </select>
+                                                    {isGutenbergHost && (
                                                     <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
@@ -10588,6 +14152,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             Manual ID
                                                         </label>
                                                     </div>
+                                                    )}
                                                 </div>
                                             ) : null}
                                         </div>
@@ -10754,6 +14319,60 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 </div>
             </div>
 
+            {rawHtmlEditor && (() => {
+                const rawNode = elements.find((e) => e.id === rawHtmlEditor.nodeId);
+                if (!rawNode) return null;
+                const preview = analyzeRawHtmlCached(rawHtmlEditor.draft);
+                const commit = () => {
+                    const selected = Array.isArray(rawNode.data?.rawHtmlSlots) ? rawNode.data.rawHtmlSlots.map(String) : [];
+                    if (rawHtmlEditor.draft !== String(rawNode.data?.rawHtml || '')) updateRawHtmlNode(rawNode, rawHtmlEditor.draft, selected);
+                    setRawHtmlEditor(null);
+                };
+                return (
+                    <div
+                        data-raw-html-modal="1"
+                        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 6000 }}
+                        onClick={commit}
+                    >
+                        <div
+                            style={{ width: '560px', background: '#1e1e2e', border: '1px solid #0f766e', borderRadius: '10px', padding: '16px', color: '#e2e8f0' }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '6px', color: '#5eead4' }}>HTML Editor</div>
+                            <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>
+                                Write the element's HTML (e.g. <code style={{ background: '#2d2d3f', padding: '1px 4px', borderRadius: '3px' }}>{'<div class="card"><h3>Title</h3><p style="color: red">Text</p></div>'}</code>).
+                                Its texts, attributes and inline styles become optional input pins. Scripts and event handlers are removed for safety.
+                            </div>
+                            <textarea
+                                data-raw-html-editor="1"
+                                style={{ width: '100%', minHeight: '220px', background: '#0f0f1a', color: '#5eead4', border: '1px solid #0f766e', borderRadius: '6px', padding: '10px', fontFamily: 'monospace', fontSize: '12px', resize: 'vertical', boxSizing: 'border-box', whiteSpace: 'pre' }}
+                                value={rawHtmlEditor.draft}
+                                placeholder={'<div class="card">\n  <h3>Title</h3>\n  <p>Text</p>\n</div>'}
+                                onChange={(e) => {
+                                    const draft = e.target.value;
+                                    setRawHtmlEditor((prev) => (prev ? { ...prev, draft } : prev));
+                                }}
+                                spellCheck={false}
+                            />
+                            <div style={{ fontSize: '11px', marginTop: '6px', color: preview.removed.length ? '#fbbf24' : '#94a3b8' }}>
+                                {preview.removed.length
+                                    ? `Removed for safety: ${preview.removed.join(', ')}`
+                                    : `${preview.slots.length} value${preview.slots.length === 1 ? '' : 's'} found (tick them in the node to get input pins).`}
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '10px' }}>
+                                <button
+                                    style={{ padding: '6px 14px', background: '#374151', color: '#e2e8f0', border: 'none', borderRadius: '5px', cursor: 'pointer', fontSize: '12px' }}
+                                    onClick={() => setRawHtmlEditor((prev) => (prev ? { ...prev, draft: '' } : prev))}
+                                >Clear</button>
+                                <button
+                                    style={{ padding: '6px 14px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: '5px', cursor: 'pointer', fontSize: '12px' }}
+                                    onClick={commit}
+                                >Done</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
             {cssEditorNodeId && (() => {
                 const cssNode = elements.find(e => e.id === cssEditorNodeId);
                 if (!cssNode) return null;

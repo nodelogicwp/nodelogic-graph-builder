@@ -28,7 +28,11 @@ const cn = (id, f, fo, t, ti) => ({ id, fromId: f, fromOutput: fo, toId: t, toIn
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function makeWindow() {
-  const dom = new JSDOM('<!doctype html><body><div id="host"></div></body>', { runScripts: 'dangerously', url: 'https://editor.test/', pretendToBeVisual: true });
+  // The wired element must exist in the editor preview: Element Property only
+  // renders its mode/Properties controls once the connected element's
+  // structure has actually been detected (by design -- see the Element
+  // Property redesign), so without #list there is no list to test.
+  const dom = new JSDOM('<!doctype html><body><div id="host"></div><div id="list" class="items" title="List"><a href="#a">One</a></div></body>', { runScripts: 'dangerously', url: 'https://editor.test/', pretendToBeVisual: true });
   const w = dom.window;
   w.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
   if (!w.ResizeObserver) w.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
@@ -137,7 +141,7 @@ setTimeout(() => { console.log('HARD EXIT'); process.exit(fail ? 1 : 0); }, 1200
 
     row.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
     await wait(20);
-    doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: 320, clientY: 300 }));
+    doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, buttons: 1, clientX: 320, clientY: 300 }));
     await wait(20);
     w.dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 320, clientY: 300 }));
     doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 320, clientY: 300 }));
@@ -156,7 +160,7 @@ setTimeout(() => { console.log('HARD EXIT'); process.exit(fail ? 1 : 0); }, 1200
 
     header.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: 60, clientY: 60 }));
     await wait(20);
-    doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: 140, clientY: 130 }));
+    doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, buttons: 1, clientX: 140, clientY: 130 }));
     await wait(20);
     doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 140, clientY: 130 }));
     await wait(60);
@@ -164,6 +168,68 @@ setTimeout(() => { console.log('HARD EXIT'); process.exit(fail ? 1 : 0); }, 1200
     const after = nodeXY(await saveAndRead());
     ok('B control: dragging from the node header DOES move the node',
       before !== null && after !== null && before !== after, `node did not move (${before})`);
+  }
+
+  /* ---- C. a release the canvas never sees (outside it / swallowed) ---- */
+  const press = (w, el, x, y) => el.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: x, clientY: y }));
+  const move = (w, doc, x, y, buttons) => doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, buttons, clientX: x, clientY: y }));
+  {
+    const { w, doc, saveAndRead } = await mount();
+    const before = nodeXY(await saveAndRead());
+    press(w, doc.querySelector('.canvas-element[data-element-id="prop"] .node-header'), 60, 60);
+    move(w, doc, 100, 90, 1);
+    // released over the sidebar: only the window-level listener sees it
+    doc.querySelector('.sidebar').dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 100, clientY: 90 }));
+    await wait(30);
+    const released = nodeXY(await saveAndRead());
+    move(w, doc, 420, 380, 0); // the pointer wanders back with no button held
+    await wait(30);
+    const later = nodeXY(await saveAndRead());
+    ok('C release outside the canvas ends the node drag where it was released',
+      before !== null && released !== before && later === released, `${before} -> ${released} -> ${later}`);
+  }
+  {
+    const { w, doc, saveAndRead } = await mount();
+    const before = nodeXY(await saveAndRead());
+    press(w, doc.querySelector('.canvas-element[data-element-id="prop"] .node-header'), 60, 60);
+    move(w, doc, 110, 100, 1);
+    // no mouseup at all (a native drag swallowed it); next move: no button held
+    move(w, doc, 500, 450, 0);
+    await wait(30);
+    const settled = nodeXY(await saveAndRead());
+    move(w, doc, 600, 520, 0);
+    await wait(30);
+    const later = nodeXY(await saveAndRead());
+    const [bx, by] = String(before).split(',').map(Number);
+    const [sx, sy] = String(settled).split(',').map(Number);
+    ok('C a lost release ends the drag at the last dragged point (no runaway node)',
+      sx - bx === 50 && sy - by === 40 && later === settled, `${before} -> ${settled} -> ${later}`);
+  }
+
+  /* ---- D. text selection can never hijack dragging ---- */
+  {
+    const { w, doc } = await mount();
+    const range = doc.createRange();
+    range.selectNodeContents(doc.querySelector('#list a'));
+    w.getSelection().removeAllRanges();
+    w.getSelection().addRange(range);
+    const header = doc.querySelector('.canvas-element[data-element-id="prop"] .node-header');
+    press(w, header, 60, 60);
+    doc.querySelector('.canvas').dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+    ok('D starting a node drag clears a stray text selection', w.getSelection().rangeCount === 0 || w.getSelection().isCollapsed);
+
+    const dragOnNode = new w.Event('dragstart', { bubbles: true, cancelable: true });
+    header.dispatchEvent(dragOnNode);
+    ok('D native drag-and-drop never starts from the editor surface', dragOnNode.defaultPrevented === true);
+    const field = doc.querySelector('.sidebar input');
+    const dragInField = new w.Event('dragstart', { bubbles: true, cancelable: true });
+    if (field) field.dispatchEvent(dragInField);
+    ok('D ...but text inside a field can still be dragged', Boolean(field) && dragInField.defaultPrevented === false);
+
+    const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
+    ok('D the editor surface is not text-selectable; fields, dialogs and the status stay selectable',
+      /\.graph-editor\s*\{[^}]*user-select:\s*none/.test(css)
+      && /\.graph-editor input,[\s\S]*?\.graph-editor \.nl-persistence-dialog,[\s\S]*?user-select:\s*text/.test(css));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

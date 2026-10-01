@@ -4,7 +4,7 @@ Tags: calculator, gutenberg, no-code, conditional logic, workflow builder
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.5.3
+Stable tag: 1.5.4
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -69,6 +69,12 @@ The source is included in the `src/` directory. Build artifacts are in `build/`.
 All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimized for desktop editing.
 
 == Changelog ==
+
+= 1.5.4 =
+* Fixed the Elementor Logic Editor failing to open ("mountElementorLogicEditor() is unavailable") caused by an unnecessary cross-plugin script dependency added in 1.5.3's PRO/Elementor integration fix.
+* Fixed several node editor controls in the graph editor rendering without a visible label (API request timeout, Number To Base digit padding, CSS Join input count, and others).
+* Fixed node cards (Number To Base, String Split, Output, CSS Unit) rendering too short for their own controls in some editor contexts.
+* Fixed PRO nodes (including Memory and API Status) not being available in the Elementor graph editor.
 
 = 1.5.3 =
 * Added Elementor preset widget and shared preset shortcode support for compatible builders.

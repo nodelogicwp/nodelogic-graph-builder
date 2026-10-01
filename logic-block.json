@@ -6,7 +6,9 @@
   "icon": "networking",
   "description": "Node-based logic graph that controls multiple HTML elements on the page.",
   "attributes": {
-    "editorId": { "type": "string" },
+    "editorId": {
+      "type": "string"
+    },
     "graphState": {
       "type": "object",
       "default": {
@@ -16,8 +18,22 @@
         "updatedAt": 0
       }
     },
-    "formula": { "type": "string", "default": "" },
-    "outputConfigs": { "type": "object", "default": {} }
+    "graphHistory": {
+      "type": "array",
+      "default": []
+    },
+    "graphHistoryLimit": {
+      "type": "number",
+      "default": 5
+    },
+    "formula": {
+      "type": "string",
+      "default": ""
+    },
+    "outputConfigs": {
+      "type": "object",
+      "default": {}
+    }
   },
   "editorScript": "file:./build/index.js",
   "render": "file:./logic-render.php"

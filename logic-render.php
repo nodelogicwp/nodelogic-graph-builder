@@ -14,6 +14,7 @@ $nodelogic_graph_builder_output_configs = $attributes['outputConfigs'] ?? array(
     data-editor-id="<?php echo esc_attr($nodelogic_graph_builder_editor_id); ?>"
     data-formula="<?php echo esc_attr($nodelogic_graph_builder_formula); ?>"
     data-output-configs="<?php echo esc_attr(wp_json_encode($nodelogic_graph_builder_output_configs)); ?>"
+    data-post-id="<?php echo esc_attr((string) (get_the_ID() ?: 0)); ?>"
     style="display:none;"
 ></div>
 <?php

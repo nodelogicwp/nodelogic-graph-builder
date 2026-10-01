@@ -35,15 +35,23 @@
  * re-register its listener with a fresh one, before the branch's NEXT click.
  *
  * NOTE on the literal reported formula: it reads via
- * __nodeGetElementProp(el, "textContent") but writes via a "setValue" leaf
- * action, which only ever writes a form-control's .value (setControlValue) --
- * no browser ever syncs a .value write back into .textContent, on any
- * element, with or without this fix. Section 1 below locks in that exact,
- * documented (not-a-regression) behavior for the formula AS GIVEN. Section 2
- * uses the identical Output/Action-Event/Set-Value shape with the ONE
- * property name corrected to match what "Set Value" actually writes
- * (Property: "value", target an <input>) -- the freshness fix restores the
- * exact interleaved Special/Reset/Special behavior from the original report.
+ * __nodeGetElementProp(el, "textContent") but (at the time this test was
+ * first written) "setValue" only ever wrote a form-control's .value
+ * (setControlValue) -- never .textContent -- so on a label-type target
+ * (counter_element is a <div>, not a form control) Special's read-back was
+ * permanently stuck on the never-changing textContent ("0"), independent of
+ * the freshness fix under test here. That gap has SINCE been closed (a
+ * later Output-pin -> Action-System migration pass added an isLabelEl
+ * branch to action-set-value, matching the legacy Output "Value" pin's own
+ * write logic exactly: label-type elements get real `.textContent` writes,
+ * not a silent DOM-expando `.value` assignment that happened to be
+ * `.value`-readable but never rendered or fed back into anything). Section
+ * 1 below now asserts the CORRECT, fixed behavior: reading/writing
+ * textContent on this <div> target behaves identically to Section 2's
+ * reading/writing .value on a real <input> -- both exhibit the same
+ * interleaved Special/Reset/Special freshness. Section 2 remains the
+ * primary regression guard for the freshness fix itself (a real form
+ * control, unaffected by the isLabelEl addition either way).
  */
 const fs = require('fs');
 const path = require('path');
@@ -77,10 +85,11 @@ setTimeout(() => { console.log('HARD EXIT'); process.exit(fail ? 1 : 0); }, 6000
 
 (async () => {
   /* ============================================================
-   * 1. The EXACT reported data-formula, decoded verbatim. Locks in
-   *    the documented (not-in-scope) textContent/setValue property
-   *    mismatch as known, stable behavior -- and proves the two
-   *    branches dispatch correctly and independently regardless.
+   * 1. The EXACT reported data-formula, decoded verbatim, against a
+   *    <div> (label-type) target. Now that action-set-value writes
+   *    .textContent for label-type elements (matching the legacy
+   *    Output "Value" pin), this exhibits the same correct
+   *    interleaved Special/Reset freshness as Section 2's <input>.
    * ============================================================ */
   {
     const REAL_FORMULA = '({ " nlOutTarget:1776422960909": { "__targetId": "color_r", "background": "#ff0000" }, " nlOutTarget:1776423000414": { "__targetId": "color_g", "background": "#00ff00" }, " nlOutTarget:1776423009941": { "__targetId": "color_b", "background": "#0000ff" }, " nlOutEl:1776773001727": { "__element": __nodeGetElement("counter_element"), "__executeOnLoad": true, actions: [({ type: "event", sourceId: "special_button", eventType: "click", actions: [({ type: "setValue", value: (__nodeToNumber(__nodeGetElementProp(__nodeGetElement("counter_element"), "textContent")) + 1) })] }), ({ type: "event", sourceId: "reset_btn", eventType: "click", actions: [({ type: "setValue", value: -1 })] })] } })';
@@ -101,20 +110,20 @@ setTimeout(() => { console.log('HARD EXIT'); process.exit(fail ? 1 : 0); }, 6000
     ok('1a) init: color outputs applied on load', w.document.getElementById('color_r').style.background === 'rgb(255, 0, 0)', w.document.getElementById('color_r').style.background);
 
     click('special_button'); await wait(100);
-    ok('1b) Special dispatches its own branch (0 + 1)', counter.value === '1', counter.value);
+    ok('1b) Special dispatches its own branch (0 + 1), written to textContent', counter.textContent === '1', counter.textContent);
 
     click('reset_btn'); await wait(100);
-    ok('1c) Reset dispatches independently, its own constant, unaffected by Special', counter.value === '-1', counter.value);
+    ok('1c) Reset dispatches independently, its own constant, unaffected by Special', counter.textContent === '-1', counter.textContent);
 
     click('special_button'); await wait(100);
-    // Documented, not-a-regression: __nodeGetElementProp reads .textContent,
-    // which "setValue" never writes (setControlValue only ever writes
-    // .value) -- Special's read-back is stuck on the never-changing
-    // textContent ("0") on EVERY click, independent of the freshness fix.
-    ok('1d) Special (as literally authored) always recomputes from unchanged textContent -> 1, not corrupted by Reset', counter.value === '1', counter.value);
+    // Fixed: action-set-value now writes .textContent for a label-type
+    // target, so __nodeGetElementProp(el, "textContent") reads back
+    // Reset's OWN effect (-1), not a frozen pre-Reset value -- exactly the
+    // same freshness Section 2 already demonstrates on a real <input>.
+    ok('1d) Special reads Reset\'s fresh textContent (-1 + 1 = 0), not a stale/frozen value', counter.textContent === '0', counter.textContent);
 
     click('reset_btn'); await wait(100);
-    ok('1e) Reset still independently reachable after repeated Special firing', counter.value === '-1', counter.value);
+    ok('1e) Reset still independently reachable after repeated Special firing', counter.textContent === '-1', counter.textContent);
   }
 
   /* ============================================================

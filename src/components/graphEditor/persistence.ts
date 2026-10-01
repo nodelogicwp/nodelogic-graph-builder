@@ -217,40 +217,6 @@ export const normalizeSnapshot = (raw: unknown): GraphSnapshot | null => {
     }
 };
 
-const getCompletenessScore = (snapshot: GraphSnapshot): number => {
-    const connectionsScore = snapshot.connections.length * 1000;
-    const elementsScore = Math.max(snapshot.elements.length - 1, 0) * 10;
-    const formulaScore = snapshot.mainFormula ? 1 : 0;
-    const customUiScore = snapshot.customNodeUi?.enabled ? 50 : 0;
-    const customUiNodeScore = Array.isArray(snapshot.customNodeUi?.nodes) ? snapshot.customNodeUi!.nodes.length * 5 : 0;
-    const customUiSharedVariableScore = Array.isArray(snapshot.customNodeUi?.sharedVariables) ? snapshot.customNodeUi!.sharedVariables.length * 5 : 0;
-    return connectionsScore + elementsScore + formulaScore + customUiScore + customUiNodeScore + customUiSharedVariableScore;
-};
-
-export const resolveInitialSnapshot = (...candidates: Array<GraphSnapshot | null>): GraphSnapshot | null => {
-    const valid = candidates.filter((candidate): candidate is GraphSnapshot => Boolean(candidate));
-    if (valid.length === 0) {
-        return null;
-    }
-
-    const newest = [...valid].sort((a, b) => b.updatedAt - a.updatedAt)[0];
-    const richest = [...valid].sort((a, b) => {
-        const scoreDiff = getCompletenessScore(b) - getCompletenessScore(a);
-        if (scoreDiff !== 0) {
-            return scoreDiff;
-        }
-        return b.updatedAt - a.updatedAt;
-    })[0];
-
-    const newestLooksEmpty = newest.connections.length === 0 && newest.elements.length <= 1;
-    if (newestLooksEmpty && getCompletenessScore(richest) > getCompletenessScore(newest)) {
-        return richest;
-    }
-
-    const sameFormula = newest.mainFormula === richest.mainFormula;
-    if (sameFormula && newest.connections.length === 0 && richest.connections.length > 0) {
-        return richest;
-    }
-
-    return newest;
-};
+// Which stored state to open is decided by graphStore.decideStartup and
+// evaluateRecoveryCandidates: by CONTENT, never by "newest updatedAt" or
+// "looks richer" heuristics (a former resolveInitialSnapshot did exactly that).

@@ -456,6 +456,73 @@ export const detectElementProperties = (
 };
 
 /* ===========================================================================
+ * Form field detection (for the Form Data node)
+ * ========================================================================= */
+
+/** Serializable descriptor of one detected `<form>` field. No DOM refs. */
+export interface DetectedFormField {
+    name: string;
+    type: 'string' | 'boolean' | 'array';
+}
+
+/**
+ * Enumerates the named fields of a live `<form>` element the same way the
+ * live runtime's own capture (nlCaptureFormData in frontend.js) classifies
+ * them, so the editor's per-field output pins match what the published page
+ * actually hands the graph:
+ *   - a lone checkbox with no meaningful custom `value` attribute -> boolean
+ *   - several checkboxes sharing one `name` (a real checkbox GROUP), or a
+ *     <select multiple> -> array (the runtime returns every checked value)
+ *   - everything else (text/textarea/select/radio group/a checkbox with its
+ *     own meaningful value) -> string
+ */
+export const detectFormFields = (element: Element | null | undefined): DetectedFormField[] => {
+    if (!element) return [];
+
+    let controls: Element[] = [];
+    try {
+        controls = Array.from(element.querySelectorAll('input[name], select[name], textarea[name]'));
+    } catch {
+        controls = [];
+    }
+    if (controls.length === 0) return [];
+
+    const checkboxCountByName = new Map<string, number>();
+    controls.forEach((control) => {
+        if (control.tagName === 'INPUT' && (control.getAttribute('type') || '').toLowerCase() === 'checkbox') {
+            const name = control.getAttribute('name') || '';
+            if (name) checkboxCountByName.set(name, (checkboxCountByName.get(name) || 0) + 1);
+        }
+    });
+
+    const fields: DetectedFormField[] = [];
+    const seen = new Set<string>();
+    controls.forEach((control) => {
+        const name = control.getAttribute('name') || '';
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+
+        if (control.tagName === 'SELECT' && control.hasAttribute('multiple')) {
+            fields.push({ name, type: 'array' });
+            return;
+        }
+        if (control.tagName === 'INPUT' && (control.getAttribute('type') || '').toLowerCase() === 'checkbox') {
+            if ((checkboxCountByName.get(name) || 0) > 1) {
+                fields.push({ name, type: 'array' });
+                return;
+            }
+            const value = control.getAttribute('value');
+            const hasCustomValue = value !== null && value !== 'on' && value !== '';
+            fields.push({ name, type: hasCustomValue ? 'string' : 'boolean' });
+            return;
+        }
+        fields.push({ name, type: 'string' });
+    });
+
+    return fields;
+};
+
+/* ===========================================================================
  * Direct-child detection (for the Get Children node)
  * ========================================================================= */
 

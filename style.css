@@ -426,6 +426,26 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     position: relative;
 }
 
+/* The graph editor is a drawing surface. Dragging nodes, wires or the canvas
+   must never start a native text selection: a stray selection turns the next
+   press on it into a native drag-and-drop that swallows the mouseup, so the
+   node keeps following the pointer and the selection is hard to clear.
+   Text stays selectable where it is edited or worth copying. */
+.graph-editor {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.graph-editor input,
+.graph-editor textarea,
+.graph-editor select,
+.graph-editor [contenteditable="true"],
+.graph-editor .nl-persistence-dialog,
+.graph-editor .nl-work-status {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
 .canvas-element {
     position: absolute;
     width: 200px;
@@ -487,11 +507,41 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
 .editor-styles-wrapper .slider-container--field {
     align-items: center !important;
 }
+/* Gutenberg's editor-styles-wrapper re-applies WP core/theme form-control
+   styling (font-size, padding, intrinsic select sizing) on top of our own
+   input/select rules. Node height in the JS layer (getNodeHeight) assumes
+   every .input-control is a fixed 32px row, so any inherited inflation here
+   makes node cards too short for their own controls in Gutenberg while the
+   same node looks fine in Elementor's unthemed editor panel. Pin this back
+   to the same box the JS math assumes, in both editors. */
+.editor-styles-wrapper .canvas-element .input-control {
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    padding: 6px 10px !important;
+    font-size: 12px !important;
+    line-height: 1.25 !important;
+    box-sizing: border-box !important;
+}
+.editor-styles-wrapper .canvas-element select.input-control {
+    -webkit-appearance: none;
+    appearance: none;
+}
 
+/* The title badge sits on the card's top edge. A long (custom) node name used
+   to run past the card's right edge with no limit; it is now capped to the
+   card width and WRAPS -- never clipped -- growing upward (anchored by its
+   bottom edge) so extra lines don't cover the node's own controls. */
 .node-header {
     position: absolute;
-    top: -8px;
+    top: auto;
+    bottom: calc(100% - 11px);
     left: 12px;
+    max-width: calc(100% - 24px);
+    box-sizing: border-box;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
     background-color: #2a2a2a;
     padding: 2px 8px;
     font-size: 11px;
@@ -614,6 +664,15 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
 .reverse-toggle input[type="checkbox"] {
     width: 14px;
     height: 14px;
+    /* .reverse-toggle is flex-nowrap (no flex-wrap set) with no shrink
+       override on either child: a long label ("Allow anonymous visitors to
+       trigger this") makes the row wider than the card, and by default BOTH
+       flex items -- the checkbox and the text run -- shrink to fit it,
+       squashing the checkbox into a narrow vertical rectangle instead of
+       staying a 14x14 square. flex-shrink:0 keeps it fixed size regardless;
+       the text (the only remaining shrinkable/wrappable item) absorbs all
+       of the width constraint on its own, wrapping normally. */
+    flex-shrink: 0;
     margin: 0;
     accent-color: #38bdf8;
 }
@@ -964,9 +1023,54 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
 .canvas-element.type-action-scroll-to,
 .canvas-element.type-action-notify,
 .canvas-element.type-action-redirect,
-.canvas-element.type-action-trigger-event {
+.canvas-element.type-action-trigger-event,
+.canvas-element.type-action-event-gate {
     background-color: #5b21b6;
     border-color: #c084fc;
+}
+
+.canvas-element.type-event-or,
+.canvas-element.type-event-and,
+.canvas-element.type-fallback-event {
+    background-color: #7c2d12;
+    border-color: #ea580c;
+}
+
+/* DOM: create / move / copy / find elements */
+.canvas-element.type-raw-html,
+.canvas-element.type-set-parent,
+.canvas-element.type-clone-element,
+.canvas-element.type-elements-by-class {
+    background-color: #134e4a;
+    border-color: #14b8a6;
+}
+
+/* Debug */
+.canvas-element.type-debug-console-log,
+.canvas-element.type-debug-message-log {
+    background-color: #1e3a5f;
+    border-color: #60a5fa;
+}
+
+.canvas-element.type-debug-console-warn,
+.canvas-element.type-debug-message-warn {
+    background-color: #713f12;
+    border-color: #f59e0b;
+}
+
+/* Database (PRO) */
+.canvas-element.type-db-connect,
+.canvas-element.type-db-table,
+.canvas-element.type-db-fields,
+.canvas-element.type-db-join,
+.canvas-element.type-db-filter,
+.canvas-element.type-db-sort,
+.canvas-element.type-db-select,
+.canvas-element.type-db-insert,
+.canvas-element.type-db-update,
+.canvas-element.type-db-delete {
+    background-color: #713f12;
+    border-color: #eab308;
 }
 
 .canvas-element.type-array,
@@ -1494,6 +1598,40 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     box-sizing: border-box;
 }
 
+/* getNodeHeight() (graphEditor.tsx) computes each node card's pixel height
+   from fixed assumptions: every .input-control is a 32px row, every
+   .input-row/.output-row/.label-row is a 34px row, 8px gaps between them.
+   Any host page's own CSS cascade (a builder's admin panel chrome, a theme's
+   form-control reset, an inherited font-size/line-height) can inflate these
+   past what the JS math assumes -- the card is a fixed inline height with no
+   overflow clipping (deliberately, so a real undersize is visible rather
+   than silently clipped), so any such inflation makes controls visibly spill
+   past the bottom edge. A prior fix pinned this back only inside Gutenberg's
+   `.editor-styles-wrapper` (below), leaving every other host -- including
+   Elementor's own editor panel -- unguarded. Harden the base rules
+   themselves instead of only guarding known contexts, so no current or
+   future host page can drift these values. */
+.canvas-element .input-control {
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    padding: 6px 10px !important;
+    font-size: 12px !important;
+    line-height: 1.25 !important;
+    box-sizing: border-box !important;
+}
+.canvas-element select.input-control {
+    -webkit-appearance: none;
+    appearance: none;
+}
+.canvas-element .input-row,
+.canvas-element .output-row,
+.canvas-element .label-row,
+.canvas-element .input-row-special,
+.canvas-element .output-row-special {
+    min-height: 34px !important;
+}
+
 .canvas-element input[type="text"].input-control,
 .canvas-element input[type="number"].input-control,
 .canvas-element textarea.input-control {
@@ -1501,6 +1639,17 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     max-width: 100%;
     min-width: 0;
     field-sizing: auto;
+}
+/* A <select> was never included above -- without min-width:0 a flex column
+   item defaults to min-width:auto (its content's intrinsic width), so a
+   dropdown can render noticeably narrower than a sibling text input even
+   though both share .input-control and the same width:100% rule (e.g.
+   Action Event Node's target <select> vs its Manual-ID <input>, which
+   visibly halves in width toggling between the two). */
+.canvas-element select.input-control {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
 }
 
 .canvas-element .input-label,

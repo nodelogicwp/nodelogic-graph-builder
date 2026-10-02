@@ -232,7 +232,11 @@ const minHeightForRenderedControls = (w, id) => {
         // adjacency issue as the "Value" check below.
         ok('number-to-base has a "Base" label', text.includes('Base'));
         ok('number-to-base has a "Minimum Digits" label', /Minimum Digits/.test(text));
-        ok('css-join has a "Number of Inputs to Join" label', /Number of Inputs to Join/.test(text));
+        // Short one-line labels (the old wrapping explanation paragraph pushed
+        // the property inputs out of the node; it is now the label's tooltip).
+        ok('css-join has an "Inputs to join (2-8)" label', /Inputs to join \(2-8\)/.test(text));
+        ok('css-join has a "CSS property per input (optional)" label', /CSS property per input \(optional\)/.test(text));
+        ok('css-join no longer renders the long wrapping explanation', !/fill this in to join bare values/.test(text));
         // Not \bValue\b: React's flattened textContent has no whitespace
         // between adjacent elements, so this label sits directly against the
         // preceding pin label ("...NumberValuepx...") with no word boundary.

@@ -1241,6 +1241,8 @@ const DB_OPERATOR_OPTIONS: Array<[string, string]> = [
     ['notempty', 'is not empty'],
     ['in', 'in list (a,b,c)'],
 ];
+// Math Function node choices (the runtime allow-lists exactly these Math members).
+const MATH_FUNCTION_NAMES: ReadonlySet<string> = new Set(['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sqrt', 'abs', 'log', 'exp', 'floor', 'ceil', 'round']);
 // Nodes whose job is a side effect (not a value): always compiled as their
 // own formula root, whether or not anything reads their Status output.
 const SIDE_EFFECT_NODE_TYPES: ReadonlySet<string> = new Set(['send-email', 'db-insert', 'db-update', 'db-delete', 'set-parent', 'clone-element', 'debug-console-log', 'debug-console-warn', 'debug-message-log', 'debug-message-warn']);
@@ -3834,13 +3836,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'string-replace') {
             return NL_CTRL_H + 3 + NL_CTRL_H;
         }
-        // "Number of Inputs to Join" label + input + hint line + one
-        // optional-property-name input per joined slot (gap:4px column,
-        // same layout as object-build's per-key inputs).
+        // "Inputs to join" label + input, "CSS property per input" label, one
+        // optional property-name input per joined slot (gap:4px column, same
+        // layout as object-build's per-key inputs). Both labels are kept to
+        // one line (nowrap + ellipsis, full text in the tooltip): a wrapping
+        // explanation paragraph here used to push the inputs out of the node.
         if (element.type === 'css-join') {
             const joinCount = Math.max(2, Math.min(8, Number(element.data?.inputCount) || 3));
-            const hintLineHeight = 14;
-            return NL_LABEL_ROW_H + NL_CTRL_H + 4 + hintLineHeight + (joinCount + 1) * 4 + joinCount * NL_CTRL_H;
+            return NL_LABEL_ROW_H + NL_CTRL_H + 4 + NL_LABEL_ROW_H + (joinCount + 1) * 4 + joinCount * NL_CTRL_H;
         }
         // "Value" label + value input, gap:4px + unit select
         if (element.type === 'css-unit') {
@@ -4051,6 +4054,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return Math.max(120, Math.min(800, explicitWidth));
         }
         if (element.type === 'css-text') return 240;
+        // Room for the one-line labels and the per-input property fields
+        // (at 200 the config column was 124px and its text wrapped).
+        if (element.type === 'css-join') return 240;
         if (element.type === 'array' || element.type.startsWith('array-')) return 220;
         if (element.type === 'chart-data' && element.data?.chartDataTypeCarrier) return 160;
         // Same config shape (target select/input + event-type select + Manual
@@ -6447,9 +6453,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         case 'action-disable': return `({ type: "disable" })`;
                         case 'action-focus': return `({ type: "focus" })`;
                         case 'action-scroll-to': return `({ type: "scrollTo" })`;
-                        case 'action-notify': return `({ type: "notify", message: ${serializeGraphFormulaLiteral(String(element.data?.actionNotifyMessage || ''))}, duration: ${serializeGraphFormulaLiteral(Number(element.data?.actionNotifyDuration || 3000))} })`;
+                        // A wired Value replaces the typed message / event name
+                        // (the node hides that field once the pin is wired); it
+                        // used to be ignored, so the text could never be dynamic.
+                        case 'action-notify': return `({ type: "notify", message: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionNotifyMessage || ''))}, duration: ${serializeGraphFormulaLiteral(Number(element.data?.actionNotifyDuration || 3000))} })`;
                         case 'action-redirect': return `({ type: "redirect", target: ${serializeGraphFormulaLiteral(element.data?.actionRedirectTarget || '_self')}, url: ${valueExpression} })`;
-                        case 'action-trigger-event': return `({ type: "triggerEvent", name: ${serializeGraphFormulaLiteral(String(element.data?.actionEventName || ''))} })`;
+                        case 'action-trigger-event': return `({ type: "triggerEvent", name: ${getConnectedExpression(element.id, 'input1') || serializeGraphFormulaLiteral(String(element.data?.actionEventName || ''))} })`;
                         default: return null;
                     }
                 }
@@ -6804,12 +6813,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 // no API-specific handling needed here.
                 case 'json-body':
                     return `__nodeJsonParse(${serializeGraphFormulaLiteral(String(element.data?.jsonBodyText ?? ''))})`;
+                // The node's Reverse checkbox (data.reverse) selects the kept
+                // part. The rewrite had passed a non-existent pin instead, so
+                // Reverse did nothing and an unwired Text became "0".
                 case 'cut-a':
-                    return `__nodeCutA(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                    return `__nodeCutA(${connectedInputExpression(0, '')}, ${connectedInputExpression(1, '')}, ${element.data?.reverse ? 'true' : 'false'})`;
                 case 'cut-b':
-                    return `__nodeCutB(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                    return `__nodeCutB(${connectedInputExpression(0, '')}, ${connectedInputExpression(1, 0)}, ${element.data?.reverse ? 'true' : 'false'})`;
                 case 'cut-c':
-                    return `__nodeCutC(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${connectedInputExpression(2)})`;
+                    return `__nodeCutC(${connectedInputExpression(0, '')}, ${connectedInputExpression(1, 0)}, ${connectedInputExpression(2, 0)}, ${element.data?.reverse ? 'true' : 'false'})`;
                 case 'string-trim':
                     return `${connectedInputExpression(0)}.trim()`;
                 case 'string-upper':
@@ -6824,8 +6836,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     return `__nodeParseRadix(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(Number(element.data?.parseRadix ?? 10))})`;
                 case 'number-to-base':
                     return `__nodeToBase(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(Number(element.data?.parseRadix ?? 16))}, ${serializeGraphFormulaLiteral(Number(element.data?.minLength ?? 0))})`;
-                case 'math':
-                    return connectedInputExpression(0);
+                case 'math': {
+                    // Math Function: the chosen function applied to Value.
+                    // The buildNodeExpression rewrite had dropped this case, so
+                    // the node silently passed its input through unchanged.
+                    // Exactly these Math members are allow-listed by the runtime.
+                    const fn = String(element.data?.mathFunction || 'sin');
+                    const safeFn = MATH_FUNCTION_NAMES.has(fn) ? fn : 'sin';
+                    return `Math.${safeFn}(Number(${connectedInputExpression(0, 0)}))`;
+                }
                 case 'calculation': {
                     const defaultOperation = String(element.data?.operation || '+');
                     const operations = element.data?.inputOperations || {};
@@ -6996,8 +7015,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 // (__nodeCssJoin, __nodeGradient, __nodeEventProcessor) and the
                 // node config UIs already exist; the formula-gen cases were lost
                 // in a generator rewrite. Restored here — no new runtime code.
-                case 'css-unit':
-                    return `(__nodeToString(${connectedInputExpression(0, 0)}) + ${serializeGraphFormulaLiteral(String(element.data?.cssUnit || 'px'))})`;
+                case 'css-unit': {
+                    // Number pin when wired, else the node's own Value field
+                    // (which used to be ignored: a standalone CSS Unit was "0px").
+                    const ownValue = Number(String(element.data?.cssUnitValue ?? '0').replace(',', '.'));
+                    return `(__nodeToString(${connectedInputExpression(0, Number.isFinite(ownValue) ? ownValue : 0)}) + ${serializeGraphFormulaLiteral(String(element.data?.cssUnit || 'px'))})`;
+                }
                 case 'css-display':
                     return serializeGraphFormulaLiteral(String(element.data?.cssDisplay || 'block'));
                 case 'css-text':
@@ -7206,7 +7229,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'array-merge': return `__nodeArrayMerge(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(element.data?.arrayMergeMode || 'concat')})`;
                 case 'array-unique': return `__nodeArrayUnique(${connectedInputExpression(0)})`;
                 case 'image-from-link':
-                    return `__nodeImageFromLink(${connectedInputExpression(0)})`;
+                    // URL pin when wired, else the node's own URL field (which
+                    // used to be ignored: the node returned "0").
+                    return `__nodeImageFromLink(${connectedInputExpression(0, String(element.data?.imageUrl || ''))})`;
                 case 'image-from-element':
                     // Element input pin when wired, else its own elementSelector
                     // text field (previously ignored whenever nothing was wired).
@@ -13777,7 +13802,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     const propertyNames = Array.isArray(el.data?.cssJoinPropertyNames) ? el.data.cssJoinPropertyNames : [];
                                                     return (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                            <ConfigFieldLabel>Number of Inputs to Join (2-8)</ConfigFieldLabel>
+                                                            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title="Number of inputs to join (2-8)">
+                                                                Inputs to join (2-8)
+                                                            </div>
                                                             <input
                                                                 type="number"
                                                                 className="input-control"
@@ -13793,8 +13820,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 onClick={(e) => e.stopPropagation()}
                                                                 placeholder="2-8"
                                                             />
-                                                            <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                                                                Optional CSS property name per input -- fill this in to join bare values (e.g. from CSS Color / a Display value) into one real declaration list, instead of a raw literal that already includes its own "property:".
+                                                            <div
+                                                                style={{ color: '#aaa', fontSize: '11px', marginBottom: '3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                                                                title={'Optional CSS property name per input: fill it in to join bare values (e.g. from CSS Color or a Display value) into one declaration list, e.g. "color: red; display: block". Leave it empty when the input already contains "property: value".'}
+                                                            >
+                                                                CSS property per input (optional)
                                                             </div>
                                                             {Array.from({ length: joinCount }, (_, i) => (
                                                                 <input

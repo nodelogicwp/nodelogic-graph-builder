@@ -84,6 +84,26 @@ async function scenario(label, nodeType, nodeData, sources, check) {
   await scenario('COUNT CHARS', 'string-count-chars', {}, [{ t: 'constant-string', d: { value: 'abcde' }, in: 'input0' }], { d: '"abcde".length = 5', fn: (s) => s === '5' });
   await scenario('COUNT CHARS empty (unwired)', 'string-count-chars', {}, [], { d: 'no input -> "".length = 0', fn: (s) => s === '0' });
   await scenario('NOT unwired', 'not', {}, [], { d: '!(false fallback) = true', fn: (s) => s === 'true' });
+  // Math Function (PRO palette): the chosen function used to be dropped by the
+  // compiler (the node passed its input through unchanged).
+  await scenario('MATH sqrt 81', 'math', { mathFunction: 'sqrt' }, [{ t: 'number', d: { value: 81 }, in: 'input0' }], { d: 'sqrt(81) = 9', fn: (s) => s === '9' });
+  await scenario('MATH round 2.6', 'math', { mathFunction: 'round' }, [{ t: 'number', d: { value: 2.6 }, in: 'input0' }], { d: 'round(2.6) = 3', fn: (s) => s === '3' });
+  await scenario('MATH floor -1.5', 'math', { mathFunction: 'floor' }, [{ t: 'number', d: { value: -1.5 }, in: 'input0' }], { d: 'floor(-1.5) = -2', fn: (s) => s === '-2' });
+  await scenario('MATH abs -7', 'math', { mathFunction: 'abs' }, [{ t: 'number', d: { value: -7 }, in: 'input0' }], { d: 'abs(-7) = 7', fn: (s) => s === '7' });
+  // Settings that the compiler used to ignore (visible in the node, no effect).
+  const txt = (value, input) => ({ t: 'constant-string', d: { value }, in: input });
+  const num = (value, input) => ({ t: 'number', d: { value }, in: input });
+  await scenario('CUT A remove found text', 'cut-a', {}, [txt('hello world', 'input0'), txt(' world', 'input1')], { d: 'removes " world" -> "hello"', fn: (s) => s === 'hello' });
+  await scenario('CUT A reverse keeps found text', 'cut-a', { reverse: true }, [txt('hello world', 'input0'), txt('world', 'input1')], { d: 'reverse -> "world"', fn: (s) => s === 'world' });
+  await scenario('CUT A unwired text is empty, not "0"', 'cut-a', {}, [], { d: 'no input -> ""', fn: (s) => s === '' });
+  await scenario('CUT B text before index', 'cut-b', {}, [txt('abcdef', 'input0'), num(2, 'input1')], { d: '"abcdef" before 2 -> "ab"', fn: (s) => s === 'ab' });
+  await scenario('CUT B reverse keeps text from index', 'cut-b', { reverse: true }, [txt('abcdef', 'input0'), num(2, 'input1')], { d: 'reverse -> "cdef"', fn: (s) => s === 'cdef' });
+  await scenario('CUT C removes the part between', 'cut-c', {}, [txt('abcdef', 'input0'), num(1, 'input1'), num(4, 'input2')], { d: '-> "aef"', fn: (s) => s === 'aef' });
+  await scenario('CUT C reverse keeps the part between', 'cut-c', { reverse: true }, [txt('abcdef', 'input0'), num(1, 'input1'), num(4, 'input2')], { d: 'reverse -> "bcd"', fn: (s) => s === 'bcd' });
+  await scenario('CSS UNIT own Value field', 'css-unit', { cssUnitValue: '12', cssUnit: 'rem' }, [], { d: 'standalone -> "12rem" (was "0px")', fn: (s) => s === '12rem' });
+  await scenario('CSS UNIT wired Number wins', 'css-unit', { cssUnitValue: '12', cssUnit: 'px' }, [num(30, 'input0')], { d: 'wired 30 -> "30px"', fn: (s) => s === '30px' });
+  await scenario('IMAGE FROM LINK own URL field', 'image-from-link', { imageUrl: 'https://example.test/a.png' }, [], { d: 'standalone -> the URL (was "0")', fn: (s) => s === 'https://example.test/a.png' });
+  await scenario('MATH unknown function falls back to sin', 'math', { mathFunction: 'constructor' }, [{ t: 'number', d: { value: 0 }, in: 'input0' }], { d: 'sin(0) = 0 (no unsafe member reachable)', fn: (s) => s === '0' });
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

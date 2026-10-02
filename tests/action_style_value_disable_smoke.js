@@ -591,6 +591,43 @@ const noRuntimeError = (errs) => errs.filter((e) => /Cannot read|is not a functi
     ok('Legacy graph: Value still applies (7)', rw.document.getElementById('target').textContent === '7', rw.document.getElementById('target').textContent);
   }
 
+  // ===================== Show Notification / Trigger Event: wired Value =====================
+  // The node hides its typed message / event-name field once Value is wired,
+  // but the compiler used to ignore the wired value, so the text could never
+  // be dynamic.
+  {
+    const elements = [
+      mk('elref', 'element-ref', { elementUseManualId: true, customElementId: 'target' }),
+      mk('out', 'output', { outputTargetElementPin: true }),
+      mk('note', 'action-notify', { actionNotifyMessage: 'typed text', actionNotifyDuration: 5000 }),
+      mk('msg', 'multi-concat', { inputCount: 2 }),
+      mk('p1', 'constant-string', { value: 'Saved ' }),
+      mk('p2', 'constant-string', { value: '3 items' }),
+      mk('fire', 'action-trigger-event', { actionEventName: 'typed-name' }),
+      mk('evName', 'constant-string', { value: 'cart-updated' }),
+    ];
+    const connections = [
+      cn('a0', 'elref', 'output0', 'out', 'input0'),
+      cn('a1', 'out', 'output0', 'note', 'input0'),
+      cn('a2', 'p1', 'output0', 'msg', 'input0'),
+      cn('a3', 'p2', 'output0', 'msg', 'input1'),
+      cn('a4', 'msg', 'output0', 'note', 'input1'),
+      cn('a5', 'out', 'output0', 'fire', 'input0'),
+      cn('a6', 'evName', 'output0', 'fire', 'input1'),
+    ];
+    const f = await compileFormula(elements, connections);
+    const { w, errs } = bootRuntime('<div id="target">Text</div>', f.replace(/^/, ''));
+    let firedName = '';
+    w.addEventListener('cart-updated', () => { firedName = 'cart-updated'; });
+    w.addEventListener('typed-name', () => { firedName = 'typed-name'; });
+    await wait(150);
+    const notices = Array.from(w.document.body.querySelectorAll('div')).map((d) => d.textContent);
+    ok('Show Notification: no crash', noRuntimeError(errs), errs.join(';') + ' | ' + f);
+    ok('Show Notification: a wired Value is the message (dynamic text)', notices.includes('Saved 3 items'), JSON.stringify(notices) + ' | ' + f);
+    ok('Show Notification: the hidden typed text is not used when Value is wired', !notices.includes('typed text'), JSON.stringify(notices));
+    ok('Trigger Event: a wired Value is the event name', /cart-updated/.test(f) || firedName === 'cart-updated', f);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

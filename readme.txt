@@ -4,7 +4,7 @@ Tags: calculator, gutenberg, no-code, conditional logic, workflow builder
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.5.4
+Stable tag: 1.6.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,11 +70,23 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 
 == Changelog ==
 
-= 1.5.4 =
-* Fixed the Elementor Logic Editor failing to open ("mountElementorLogicEditor() is unavailable") caused by an unnecessary cross-plugin script dependency added in 1.5.3's PRO/Elementor integration fix.
-* Fixed several node editor controls in the graph editor rendering without a visible label (API request timeout, Number To Base digit padding, CSS Join input count, and others).
-* Fixed node cards (Number To Base, String Split, Output, CSS Unit) rendering too short for their own controls in some editor contexts.
-* Fixed PRO nodes (including Memory and API Status) not being available in the Elementor graph editor.
+= 1.6.0 =
+* New: version history for every logic graph. Save Graph keeps 0-10 previous versions (set per block / widget) that you can preview, compare and restore.
+* New: automatic working copy. Your edits are stored in the browser while you work; the page keeps its current graph until you click Save Graph, and unsaved work survives closing the editor or a browser crash (recovery is offered only when the content really differs).
+* New: export and import graphs as JSON files, with validation and a summary of the changes before anything is replaced.
+* New nodes: Raw HTML Element, Set Parent, Clone Element and Elements by Class (create and arrange page elements), Event OR, Event AND, Fallback Event and Event Trigger Action, and Debug nodes (Console Log, Console Warning, Message Log, Message Warning).
+* Improved: Undo / Redo works per action (typing a word is one step) and keyboard shortcuts only affect the active editor.
+* Improved: Set Parent, Clone Element and Debug nodes fed by a For Each item run once per item (e.g. one element per database row).
+* Improved: a part of a graph that fails is skipped and reported in the browser console instead of stopping the whole logic block.
+* Improved: several logic blocks on one page no longer take over each other's events, and elements without an HTML ID can be used as event targets.
+* Fixed: two Output nodes targeting the same element no longer cancel each other.
+* Fixed: Get Element Property and live values used by actions now always read the current state of the page.
+* Fixed: Math Function now applies the selected function, Cut A / B / C respect Reverse, CSS Unit uses the value typed in the node, Image From Link uses the typed URL, and Show Notification / Trigger Event use a connected Value.
+* Fixed: changing node settings was not saved unless a node was also moved; an emptied graph kept the previous logic running after Save Graph; restoring a draft could overwrite work without asking.
+* Fixed: accidental text selection while dragging nodes, drags released outside the canvas, long node titles, CSS Join property fields overflowing the node, and node controls without a visible label or cut off.
+* Fixed: the Elementor Logic Editor failing to open ("mountElementorLogicEditor() is unavailable") and not releasing its resources when closed.
+* Fixed: PRO nodes (including Memory and API Status) missing in the Elementor graph editor.
+* Changed: the CSS Text node is now called CSS Custom.
 
 = 1.5.3 =
 * Added Elementor preset widget and shared preset shortcode support for compatible builders.
@@ -106,6 +118,9 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 * Added/kept readable source files in `src/` and documented source location
 
 == Upgrade Notice ==
+
+= 1.6.0 =
+Adds version history, an automatic working copy with crash recovery, and JSON import / export to the graph editor, plus new element, event and debug nodes and fixes for nodes that ignored their settings. Existing graphs keep working.
 
 = 1.4.3 =
 This release adds the Actions system to the graph editor and fixes several runtime issues related to action nodes, formula evaluation, and connection line alignment.

@@ -1,12 +1,22 @@
 import { useState, useEffect, useCallback } from '@wordpress/element';
 import { useBlockProps, InspectorControls } from '@wordpress/block-editor';
-import { PanelBody, TextControl, Button, Modal } from '@wordpress/components';
+import { PanelBody, TextControl, Button } from '@wordpress/components';
 import GraphEditor from './components/graphEditor';
 import { v4 as uuid } from 'uuid';
 
 export default function Edit({ attributes, setAttributes }) {
     const { editorId, formula = '', mainFormula = '', eventFormulas = {}, label = 'Result:', resultUnit = '', graphState = null } = attributes;
     const [isModalOpen, setIsModalOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isModalOpen) return;
+        try {
+            const dispatch = window.wp?.data?.dispatch?.('core/block-editor');
+            if (typeof dispatch?.clearSelectedBlock === 'function') dispatch.clearSelectedBlock();
+            else if (typeof dispatch?.selectBlock === 'function') dispatch.selectBlock(null);
+            document.activeElement?.blur?.();
+        } catch { /* Gutenberg versions differ in their selection API. */ }
+    }, [isModalOpen]);
 
     useEffect(() => {
         if (!editorId) {
@@ -65,12 +75,8 @@ export default function Edit({ attributes, setAttributes }) {
                 <strong>{label}</strong>
             </div>
             {isModalOpen && editorId && (
-                <Modal
-                    title="Formula Editor"
-                    onRequestClose={() => setIsModalOpen(false)}
-                    shouldCloseOnClickOutside={false}
-                    style={{ width: '100vw', height: '100vh', 'max-height': 'calc(100vh - 16px)', 'max-width': 'calc(100vw - 12px)' }}
-                >
+                <div className="nodelogic-gutenberg-overlay">
+                    <div className="nodelogic-gutenberg-shell">
                     <GraphEditor
                         editorId={editorId}
                         initialState={graphState}
@@ -80,8 +86,10 @@ export default function Edit({ attributes, setAttributes }) {
                         mainElementType="info"
                         onFormulaChange={handleFormulaChange}
                         onStateChange={handleGraphStateChange}
+                        onRequestClose={() => setIsModalOpen(false)}
                     />
-                </Modal>
+                    </div>
+                </div>
             )}
         </>
     );

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from '@wordpress/element';
 import { useBlockProps } from '@wordpress/block-editor';
-import { Button, Modal } from '@wordpress/components';
+import { Button } from '@wordpress/components';
 import { select } from '@wordpress/data';
 import GraphEditor from './components/graphEditor';
 import { v4 as uuid } from 'uuid';
@@ -45,7 +45,7 @@ const extractOutputConfigs = (state) => {
 };
 
 export default function LogicEdit({ attributes = {}, setAttributes, clientId }) {
-    const { editorId, graphState, graphHistory, graphHistoryLimit } = attributes;
+    const { editorId, graphState, graphHistory, graphHistoryLimit, compiledGraphHash = '' } = attributes;
     const [isModalOpen, setIsModalOpen] = useState(false);
     const hasUnpublishedRef = useRef(false);
 
@@ -88,6 +88,33 @@ export default function LogicEdit({ attributes = {}, setAttributes, clientId }) 
         setAttributes({ graphHistoryLimit: limit });
     }, [setAttributes]);
 
+    const handleCompile = useCallback(async ({ state }) => {
+        const postId = select('core/editor')?.getCurrentPostId?.();
+        const api = window.wpApiSettings || {};
+        const root = api.root || `${window.location.origin}/wp-json/`;
+        if (!postId || !window.fetch) return false;
+        const response = await fetch(`${root.replace(/\/$/, '')}/nodelogic/v1/logic`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                ...(api.nonce ? { 'X-WP-Nonce': api.nonce } : {}),
+            },
+            body: JSON.stringify({
+                post_id: postId,
+                graph_id: editorId,
+                formula: state.formula || '',
+                graphState: state,
+                outputConfigs: extractOutputConfigs(state),
+            }),
+        });
+        if (!response.ok) return false;
+        const result = await response.json();
+        if (result?.hash) setAttributes({ compiledGraphHash: String(result.hash) });
+        return true;
+    }, [editorId, setAttributes]);
+
     const handleUnsavedChange = useCallback((hasUnpublished) => {
         hasUnpublishedRef.current = hasUnpublished;
     }, []);
@@ -122,26 +149,26 @@ export default function LogicEdit({ attributes = {}, setAttributes, clientId }) 
             </div>
 
             {isModalOpen && editorId && (
-                <Modal
-                    title="Logic Graph Editor"
-                    onRequestClose={requestClose}
-                    shouldCloseOnClickOutside={false}
-                    style={{ width: '100vw', height: '100vh', maxHeight: 'calc(100vh - 16px)', maxWidth: 'calc(100vw - 12px)' }}
-                >
+                <div className="nodelogic-gutenberg-overlay">
+                    <div className="nodelogic-gutenberg-shell">
                     <GraphEditor
                         editorId={editorId}
                         initialState={graphState}
                         initialHistory={graphHistory}
                         historyLimit={graphHistoryLimit}
+                        initialCompileStatus={compiledGraphHash ? 'compiled' : 'not-compiled'}
                         forceInitialState
                         liveStateSync={false}
                         showTemplateTools={true}
                         mainElementType="logic"
                         onPublish={handlePublish}
+                        onCompile={handleCompile}
                         onHistoryLimitChange={handleHistoryLimitChange}
                         onUnsavedChange={handleUnsavedChange}
+                        onRequestClose={requestClose}
                     />
-                </Modal>
+                    </div>
+                </div>
             )}
         </>
     );

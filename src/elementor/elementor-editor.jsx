@@ -11,9 +11,12 @@ export function mountElementorLogicEditor(
         historyLimit,
         onStateChange,
         onPublish,
+        onCompile,
+        initialCompileStatus,
         onHistoryLimitChange,
         onFormulaChange,
         onUnsavedChange,
+        onRequestClose,
     }
 ) {
 
@@ -32,9 +35,12 @@ export function mountElementorLogicEditor(
             mainElementType="logic"
             onStateChange={onStateChange}
             onPublish={onPublish}
+            onCompile={onCompile}
+            initialCompileStatus={initialCompileStatus}
             onHistoryLimitChange={onHistoryLimitChange}
             onFormulaChange={onFormulaChange}
             onUnsavedChange={onUnsavedChange}
+            onRequestClose={onRequestClose}
         />
     );
 

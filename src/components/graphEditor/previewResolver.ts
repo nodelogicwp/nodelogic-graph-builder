@@ -531,6 +531,8 @@ export interface DetectedChild {
     index: number;
     tag: string;
     id: string;
+    className: string;
+    classes?: string[];
     label: string;
 }
 
@@ -668,11 +670,20 @@ export const detectElementChildren = (
         directElementChildren(element).forEach((child, index) => {
             const tag = (child.tagName || '').toLowerCase();
             const id = typeof child.id === 'string' ? child.id : '';
+            const className = typeof child.className === 'string'
+                ? child.className.trim().split(/\s+/).filter(Boolean).map((name) => `.${name}`).join('')
+                : '';
+            const classes = typeof child.className === 'string'
+                ? child.className.trim().split(/\s+/).filter(Boolean)
+                : [];
+            const lastClass = classes[classes.length - 1] || '';
             children.push({
                 index,
                 tag,
                 id,
-                label: `${index}: ${tag || 'element'}${id ? `#${id}` : ''}`,
+                className,
+                classes,
+                label: `${index}: ${tag || 'element'}${id ? `#${id}` : ''}${lastClass ? `.${lastClass}` : ''}`,
             });
         });
     } catch {

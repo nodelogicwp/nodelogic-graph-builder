@@ -33,6 +33,10 @@
     "outputConfigs": {
       "type": "object",
       "default": {}
+    },
+    "compiledGraphHash": {
+      "type": "string",
+      "default": ""
     }
   },
   "editorScript": "file:./build/index.js",

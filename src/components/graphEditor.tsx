@@ -36,6 +36,7 @@ import {
     type BackupEntry,
     type ExportSourceKind,
     type GraphContent,
+    type GraphGroupLike,
     type GraphDiff,
     type GraphStorage,
     type MainHistoryEntry,
@@ -64,6 +65,7 @@ import {
     type ElementPropertyMode,
     type ElementPropertySelectedEntry,
     type DetectedElementProperty,
+    type DetectedPropertyType,
 } from './graphEditor/elementPropertyModel';
 import {
     detectElementProperties,
@@ -118,10 +120,19 @@ const normalizeArrayItemType = (value: unknown): ArrayItemType =>
     value === 'string' || value === 'boolean' || value === 'color' || value === 'zip' || value === 'element'
         ? value
         : 'number';
+type ArrayContextMode = 'current' | 'current-next' | 'current-previous' | 'current-previous-next';
+const getArrayContextOffsets = (mode: unknown): number[] => {
+    switch (mode as ArrayContextMode) {
+        case 'current-next': return [0, 1];
+        case 'current-previous': return [0, -1];
+        case 'current-previous-next': return [0, -1, 1];
+        default: return [0];
+    }
+};
 type ArrayItemSchemaField = {
     id: string;
     label: string;
-    type: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case';
+    type: 'number' | 'string' | 'boolean' | 'color' | 'zip' | 'case' | 'element';
     sourceNodeId?: string;
     sourcePin?: string;
     // Custom-node input schema pins carry a default value; read at runtime,
@@ -141,6 +152,7 @@ interface TreeItem {
         | 'element-ref'
         | 'element-property'
         | 'get-children'
+        | 'find-child'
         | 'raw-html'
         | 'set-parent'
         | 'debug-console-log'
@@ -251,18 +263,26 @@ interface TreeItem {
         | 'event-or'
         | 'event-and'
         | 'fallback-event'
+        | 'wait'
         | 'action-event-gate'
         // New array nodes
         | 'array-map'
         | 'array-filter'
         | 'array-reduce'
+        | 'array-sum'
+        | 'array-product'
         | 'array-find'
         | 'array-for-each'
+        | 'array-for-each-context'
+        | 'array-for-each-multi'
         | 'array-collect'
         | 'array-contains'
         | 'array-length'
         | 'array-merge'
         | 'array-unique'
+        | 'array-get-index'
+        | 'array-first-event'
+        | 'array-event-aggregate'
         // Forms & Email (PRO palette; runtime lives here like api-request)
         | 'form-data'
         | 'send-email'
@@ -291,6 +311,7 @@ interface CanvasElement {
         | 'element-ref'
         | 'element-property'
         | 'get-children'
+        | 'find-child'
         | 'raw-html'
         | 'set-parent'
         | 'debug-console-log'
@@ -401,6 +422,7 @@ interface CanvasElement {
         | 'event-id'
         | 'event-processor'
         | 'fallback'
+        | 'wait'
         // New action nodes
         | 'action-set-text'
         | 'action-set-html'
@@ -430,13 +452,20 @@ interface CanvasElement {
         | 'array-map'
         | 'array-filter'
         | 'array-reduce'
+        | 'array-sum'
+        | 'array-product'
         | 'array-find'
         | 'array-for-each'
+        | 'array-for-each-context'
+        | 'array-for-each-multi'
         | 'array-collect'
         | 'array-contains'
         | 'array-length'
         | 'array-merge'
         | 'array-unique'
+        | 'array-get-index'
+        | 'array-first-event'
+        | 'array-event-aggregate'
         // Forms & Email (PRO palette; runtime lives here like api-request)
         | 'form-data'
         | 'send-email'
@@ -612,6 +641,8 @@ interface CanvasElement {
         cssText?: string;
         // Array nodes
         arrayItemType?: ArrayItemType;
+        arrayContextMode?: 'current' | 'current-next' | 'current-previous' | 'current-previous-next';
+        arrayContextBoundaryMode?: 'empty' | 'skip';
         arrayTypeCarrier?: boolean;
         // Chart Data node
         chartDataLabel?: string;
@@ -670,6 +701,7 @@ interface CanvasElement {
         // matching pin (input1 / input2) is not wired
         fallbackEventValue?: string;
         fallbackEventDurationMs?: number;
+        arrayMultiCount?: number;
         // For-each / collect loop
         forEachArraySchemaItem?: ArrayItemSchemaField[];
         // array-reduce
@@ -703,6 +735,7 @@ interface CanvasElement {
         setParentPosition?: 'start' | 'end';
         clonePlacement?: 'after' | 'detached';
         classNames?: string;
+        childSelector?: string;
         dbTable?: string;
         dbFields?: string[];
         dbJoinType?: 'inner' | 'left' | 'right';
@@ -769,6 +802,7 @@ interface SavedState {
     // logic-mode graph but persisted for round-trip fidelity.
     eventFormulas?: Record<string, string>;
     customNodeUi?: CustomNodeUiState | null;
+    groups?: GraphGroupLike[];
     updatedAt?: number;
     // MAIN metadata (format 2+). Metadata only: never used to decide whether
     // two graphs differ -- see graphStore.semanticEqual.
@@ -1180,11 +1214,16 @@ interface GraphEditorProps {
      * reverse). Return false if it could not be applied.
      */
     onPublish?: (payload: GraphPublishPayload) => boolean | void;
+    /** Compile the current working graph into the server-side runtime artifact. */
+    onCompile?: (payload: GraphPublishPayload) => boolean | Promise<boolean>;
+    initialCompileStatus?: 'not-compiled' | 'compiled';
     onHistoryLimitChange?: (limit: number) => void;
     /** Legacy publish callback (state only, no history). */
     onStateChange?: (state: SavedState) => void;
     /** WORK differs from MAIN (unpublished changes). */
     onUnsavedChange?: (hasUnsaved: boolean) => void;
+    /** Close the host modal/overlay. Rendered in the graph toolbar. */
+    onRequestClose?: () => void;
     forceInitialState?: boolean;
     templateMode?: boolean;
     customNodeMode?: boolean;
@@ -1248,7 +1287,7 @@ const MATH_FUNCTION_NAMES: ReadonlySet<string> = new Set(['sin', 'cos', 'tan', '
 const SIDE_EFFECT_NODE_TYPES: ReadonlySet<string> = new Set(['send-email', 'db-insert', 'db-update', 'db-delete', 'set-parent', 'clone-element', 'debug-console-log', 'debug-console-warn', 'debug-message-log', 'debug-message-warn']);
 // Free DOM nodes (create / move / copy / find elements). They use the special
 // (labels | config | outputs) layout with renderDomNodeControls.
-const DOM_NODE_TYPES: ReadonlySet<string> = new Set(['raw-html', 'set-parent', 'clone-element', 'elements-by-class']);
+const DOM_NODE_TYPES: ReadonlySet<string> = new Set(['raw-html', 'set-parent', 'clone-element', 'elements-by-class', 'find-child']);
 // Debug folder: show whatever reaches them in the console / a closable message.
 const DEBUG_NODE_TYPES: ReadonlySet<string> = new Set(['debug-console-log', 'debug-console-warn', 'debug-message-log', 'debug-message-warn']);
 const DEBUG_KIND_BY_TYPE: Record<string, string> = {
@@ -1305,9 +1344,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     initialHistory = null,
     historyLimit: historyLimitProp,
     onPublish,
+    onCompile,
+    initialCompileStatus = 'not-compiled',
     onHistoryLimitChange,
     onStateChange,
     onUnsavedChange,
+    onRequestClose,
     forceInitialState = false,
     templateMode = false,
     customNodeMode = false,
@@ -1336,7 +1378,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [runtimeConfigState, setRuntimeConfigState] = useState<NonNullable<GraphEditorRuntimeWindow['nodelogicGraphBuilderConfig']>>({});
 
     const [unsavedChanges, setUnsavedChanges] = useState(false);
+    const [compileStatus, setCompileStatus] = useState<'not-compiled' | 'new' | 'compiled' | 'error'>(initialCompileStatus);
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [groupPanelOpen, setGroupPanelOpen] = useState(false);
+    const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+    const [selectionTool, setSelectionTool] = useState<'box' | 'lasso' | 'group' | null>(null);
+    const [selectionGesture, setSelectionGesture] = useState<{ type: 'box' | 'lasso'; points: Array<{ x: number; y: number }> } | null>(null);
     const [sidebarSearch, setSidebarSearch] = useState('');
     const [zoom, setZoom] = useState(1);
     const [offsetX, setOffsetX] = useState(0);
@@ -1651,6 +1698,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         shouldRenderMainBlock ? [createDefaultMainBlock()] : []
     ));
     const [selected, setSelected] = useState<string | null>(shouldRenderMainBlock ? 'main-block' : null);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(shouldRenderMainBlock ? ['main-block'] : []));
+    const selectedIdsRef = useRef<Set<string>>(new Set(shouldRenderMainBlock ? ['main-block'] : []));
     const [draggedItem, setDraggedItem] = useState<TreeItem | null>(null);
     const [isPanning, setIsPanning] = useState(false);
     const [isDraggingFromSidebar, setIsDraggingFromSidebar] = useState(false);
@@ -1672,6 +1721,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         && typeof (window as any).wp?.data?.select === 'function'
         && !!(window as any).wp.data.select('core/block-editor')?.getBlocks;
     const [connections, setConnectionsState] = useState<Connection[]>([]);
+    const [groups, setGroupsState] = useState<GraphGroupLike[]>([]);
     const [connectionInProgress, setConnectionInProgress] = useState<{
         elementId: string;
         pinType: 'input' | 'output';
@@ -1710,8 +1760,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [customPropertyListExpanded, setCustomPropertyListExpanded] = useState<Set<string>>(new Set());
     // UI-only: in-progress "add custom property" text per node id.
     const [customPropertyDraft, setCustomPropertyDraft] = useState<Record<string, string>>({});
+    // UI-only type choice used while adding a custom Element Property.
+    const [customPropertyDraftType, setCustomPropertyDraftType] = useState<Record<string, DetectedPropertyType>>({});
     // Get Children: live-detected direct children per get-children node id.
     const [elementChildrenDetections, setElementChildrenDetections] = useState<Record<string, DetectedChild[]>>({});
+    const [expandedChildClasses, setExpandedChildClasses] = useState<Record<string, boolean>>({});
     const [formFieldDetections, setFormFieldDetections] = useState<Record<string, DetectedFormField[]>>({});
     // PRO Database nodes: admin-only schema (connections -> enabled tables ->
     // columns), loaded lazily once a DB node is on the canvas.
@@ -1836,10 +1889,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const canvasMouseUpRef = useRef<(event: React.MouseEvent<HTMLElement>) => void>(() => {});
     const elementDragRef = useRef<{
         elementId: string;
+        elementIds: string[];
         startX: number;
         startY: number;
-        elementX: number;
-        elementY: number;
+        positions: Record<string, { x: number; y: number }>;
     } | null>(null);
     const sidebarDragRef = useRef<{
         startX: number;
@@ -1851,6 +1904,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const draggedItemRef = useRef<TreeItem | null>(draggedItem);
     const canvasMouseMoveRafRef = useRef<number | null>(null);
     const pendingCanvasMouseRef = useRef<{ x: number; y: number } | null>(null);
+    const lastCanvasPointRef = useRef({ x: 80, y: 80 });
     const detectedElementsSignatureRef = useRef('');
     const calculationOperatorCountRef = useRef<Record<string, number>>({});
     const elementPropertyDetectionsRef = useRef<Record<string, DetectedElementProperty[]>>({});
@@ -1888,12 +1942,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const connectionsRef = useRef(connections);
     const formulaRef = useRef(formula);
     const customNodeUiRef = useRef(customNodeUi);
+    const groupsRef = useRef<GraphGroupLike[]>(groups);
     const hasInitializedRef = useRef(false);
     // Host callbacks, always the latest (a host may pass new closures).
     const onStateChangeRef = useRef<GraphEditorProps['onStateChange']>(onStateChange);
     onStateChangeRef.current = onStateChange;
     const onPublishRef = useRef<GraphEditorProps['onPublish']>(onPublish);
     onPublishRef.current = onPublish;
+    const onCompileRef = useRef<GraphEditorProps['onCompile']>(onCompile);
+    onCompileRef.current = onCompile;
     const onUnsavedChangeRef = useRef<GraphEditorProps['onUnsavedChange']>(onUnsavedChange);
     onUnsavedChangeRef.current = onUnsavedChange;
     const onFormulaChangeRef = useRef<GraphEditorProps['onFormulaChange']>(onFormulaChange);
@@ -2201,6 +2258,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     // setters (see "Working graph" above): re-assigning them from the render
     // value here could roll them back to a stale projection.
     selectedRef.current = selected;
+    selectedIdsRef.current = selectedIds;
+    groupsRef.current = groups;
     detectedElementsRef.current = detectedElements;
     elementPropertyDetectionsRef.current = elementPropertyDetections;
     formFieldDetectionsRef.current = formFieldDetections;
@@ -2258,6 +2317,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             || item.type === 'color'
             || item.type === 'zip'
             || item.type === 'case'
+            || item.type === 'element'
             ? item.type
             : 'string';
         const label = typeof item.label === 'string' && item.label.trim().length > 0
@@ -2439,7 +2499,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             (element.type === 'event-element' || element.type === 'event-id' || element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'form-data')
             && inputIndex === 0
         ) {
-            return ['element'];
+            // Find Child may return Array<Element> when a Context loop has
+            // different matches in different iterations. Runtime event
+            // helpers accept both one live element and an element array.
+            return element.type === 'form-data' ? ['element'] : ['element', 'array'];
         }
         if (
             element.type === 'action-event'
@@ -2494,7 +2557,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const schemaPin = schema[inputIndex];
             if (!schemaPin) return ['number'];
             const pinType = schemaPin.type;
-            return (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'zip' || pinType === 'case')
+            return (pinType === 'string' || pinType === 'boolean' || pinType === 'color' || pinType === 'zip' || pinType === 'case' || pinType === 'element')
                 ? [pinType]
                 : ['number'];
         }
@@ -2601,6 +2664,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'get-children') {
             return ['element'];
         }
+        if (element.type === 'find-child') {
+            return inputIndex === 0 ? ['element'] : ['string'];
+        }
         if (element.type === 'raw-html') {
             // One pin per checked slot of the HTML structure.
             const slot = selectedRawHtmlSlots(analyzeRawHtmlCached(String(element.data?.rawHtml || '')).slots, element.data?.rawHtmlSlots)[inputIndex];
@@ -2637,23 +2703,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'case-range': [
                 ['number'],
                 ['number'],
-                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css', 'element'],
             ],
             'case-value': [
                 ['number', 'string', 'boolean'],
-                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css', 'element'],
             ],
             'case-default': [
-                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css', 'element'],
             ],
             switch: [
-                ['number', 'string', 'boolean'],
+                ['number', 'string', 'boolean', 'element'],
                 ['case'],
             ],
             node: [
                 ['boolean'],
-                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
-                ['number', 'string', 'boolean', 'color', 'zip', 'css'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css', 'element'],
+                ['number', 'string', 'boolean', 'color', 'zip', 'css', 'element'],
             ],
             regex: [['string']],
             concat: [['string'], ['string']],
@@ -2698,8 +2764,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             not: [['boolean']],
             and: [['boolean'], ['boolean']],
             or: [['boolean'], ['boolean']],
-            fallback: [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array']],
-            'fallback-event': [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array'], ['number']],
+            // Fallback is type-preserving, so DOM Element references must be
+            // accepted on both value inputs as well as the existing scalar /
+            // structured types.  Without this, the output type could already
+            // be inferred as `element`, but the editor rejected the wire at
+            // the input compatibility check.
+            fallback: [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array', 'element'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array', 'element']],
+            'fallback-event': [['number', 'string', 'boolean', 'color', 'zip', 'css', 'array', 'element'], ['number', 'string', 'boolean', 'color', 'zip', 'css', 'array', 'element'], ['number']],
+            wait: [['number', 'string', 'boolean', 'case', 'color', 'zip', 'css', 'css-unit', 'array', 'element', 'event', 'action', 'query', 'dbconn'], ['number']],
             clamp: [['number'], ['number'], ['number']],
             'min-val': [['number'], ['number']],
             'max-val': [['number'], ['number']],
@@ -2721,7 +2793,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             'memory-array-read': [],
             'event-element': [],
             'event-id': [],
-            'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array']],
+            'event-processor': [['event'], ['string', 'number', 'boolean', 'color', 'zip', 'array', 'element']],
             'action-required': [['action'], ['boolean']],
             'action-min': [['action'], ['number']],
             'action-max': [['action'], ['number']],
@@ -2758,26 +2830,36 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // event-or/event-and combinator), not a DOM eventType + target
             // like action-event
             'action-event-gate': [['action'], ['event']],
-            'node-branch': [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array']],
-            'switch-branch': [['number', 'string', 'boolean', 'color', 'zip', 'array'], ['number', 'string', 'boolean', 'color', 'zip', 'array'], ['case']],
+            'node-branch': [['boolean'], ['number', 'string', 'boolean', 'color', 'zip', 'array', 'element'], ['number', 'string', 'boolean', 'color', 'zip', 'array', 'element']],
+            'switch-branch': [['number', 'string', 'boolean', 'color', 'zip', 'array', 'element'], ['number', 'string', 'boolean', 'color', 'zip', 'array', 'element'], ['case']],
             // New array nodes. `element` is a first-class array item type
             // (Array<element> from Get Children), so every pin that carries an
             // array *item* accepts it alongside the primitive item types.
             'array-map': [['array'], ['number', 'string', 'boolean', 'color', 'zip', 'element']],
             'array-filter': [['array'], ['boolean']],
             'array-reduce': [['array']],
+            'array-sum': [['number']],
+            'array-product': [['number']],
             'array-find': [['array'], ['number', 'string', 'boolean', 'element']],
             'array-for-each': [['array']],
+            'array-for-each-context': [['array']],
+            'array-for-each-multi': [['array']],
             'array-collect': [['number', 'string', 'boolean', 'color', 'zip', 'element']],
             'array-contains': [['array'], ['number', 'string', 'boolean', 'element']],
             'array-length': [['array']],
             'array-merge': [['array'], ['array']],
             'array-unique': [['array']],
+            'array-get-index': [['array'], ['number']],
+            'array-first-event': [['event'], ['number', 'string', 'boolean', 'color', 'zip', 'element']],
+            'array-event-aggregate': [['event']],
             // form-data's only pin (Element, input0) is handled by the
             // Element-pin special case above, not this table.
             'send-email': [['string'], ['string'], ['string'], ['event']],
         };
 
+        if (element.type === 'array-for-each-multi') {
+            return inputIndex < Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 1)) ? ['array'] : ['number'];
+        }
         const accepted = acceptedByIndex[element.type] || [];
         const resolved = accepted[inputIndex] || accepted[accepted.length - 1] || ['number'];
         return resolved as Array<'number' | 'string' | 'boolean' | 'case' | 'color' | 'zip' | 'css' | 'css-unit' | 'event' | 'array' | 'action' | 'element' | 'query' | 'dbconn'>;
@@ -2796,6 +2878,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'element-ref') return 0;
         if (element.type === 'element-property') return 1;
         if (element.type === 'get-children') return 1;
+        if (element.type === 'find-child') return 2; // Element + Selector
         if (element.type === 'raw-html') {
             return selectedRawHtmlSlots(analyzeRawHtmlCached(String(element.data?.rawHtml || '')).slots, element.data?.rawHtmlSlots).length;
         }
@@ -2823,6 +2906,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'or') return 2;
         if (element.type === 'fallback') return 2;
         if (element.type === 'fallback-event') return 3; // Main, Fallback, Hold (ms)
+        if (element.type === 'wait') return 2; // Value, milliseconds
         if (element.type === 'condition') return 2;
         if (element.type === 'regex') return 1;
         if (element.type === 'concat') return 2;
@@ -2958,6 +3042,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-sort') return 1;
         if (element.type === 'array-remove-index') return 2;
         if (element.type === 'array-replace-index') return 3;
+        if (element.type === 'array-get-index') return 2;
+        if (element.type === 'array-first-event') return 2;
+        if (element.type === 'array-event-aggregate') return 1;
         if (element.type === 'action-event') return 2; // input0: attach-to-parent ('action'); input1: optional Element pin
         if (element.type === 'action-block') return 1;
         if (element.type === 'action-if') return 2;
@@ -2995,8 +3082,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'array-map') return 2;        // array + formula/value
         if (element.type === 'array-filter') return 2;     // array + condition
         if (element.type === 'array-reduce') return 1;     // array
+        if (element.type === 'array-sum' || element.type === 'array-product') return 1; // loop value
         if (element.type === 'array-find') return 2;       // array + condition value
         if (element.type === 'array-for-each') return 1;   // array
+        if (element.type === 'array-for-each-context') return 1; // array
+        if (element.type === 'array-for-each-multi') return Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 1));
         if (element.type === 'array-collect') return 1;    // single item to collect
         if (element.type === 'array-contains') return 2;   // array + search value
         if (element.type === 'array-length') return 1;     // array
@@ -3051,6 +3141,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         key: string
     ): 'number' | 'string' | 'boolean' => {
         if (!key) return 'string';
+        const selectedEntry = Array.isArray(element.data?.elementPropertySelected)
+            ? element.data.elementPropertySelected.find((entry) => entry?.key === key)
+            : null;
+        if (selectedEntry?.type === 'number' || selectedEntry?.type === 'string' || selectedEntry?.type === 'boolean') {
+            return selectedEntry.type;
+        }
         const detected = (elementPropertyDetectionsRef.current[element.id] || []).find(
             (property) => property.key === key
         );
@@ -3067,6 +3163,64 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     // ── Get Children helpers (Single / All / Custom + Child / Children) ────────
     const getGetChildrenDetectedChildren = (nodeId: string): DetectedChild[] =>
         elementChildrenDetectionsRef.current[nodeId] || [];
+    
+    const getGetChildrenCommonality = (nodeId: string): Map<number, 'common' | 'partial'> => {
+        const commonality = new Map<number, 'common' | 'partial'>();
+        const node = elements.find(el => el.id === nodeId);
+        if (!node || node.type !== 'get-children') return commonality;
+        
+        // Check if connected to For Each
+        const inputConn = connections.find(c => c.toId === nodeId && c.toInput === 'input0');
+        const inputSource = inputConn ? elements.find(e => e.id === inputConn.fromId) : null;
+        if (!inputSource || (inputSource.type !== 'array-for-each' && inputSource.type !== 'array-for-each-context' && inputSource.type !== 'array-for-each-multi')) return commonality;
+        
+        // Get For Each array source
+        const arrayConn = connections.find(c => c.toId === inputSource.id && c.toInput === 'input0');
+        const arraySource = arrayConn ? elements.find(e => e.id === arrayConn.fromId) : null;
+        if (!arraySource) return commonality;
+        
+        // Collect all source elements
+        const sourceElements: HTMLElement[] = [];
+        if (arraySource.type === 'array-push') {
+            // Get all pushed elements (input2, input3, input4...)
+            connections
+                .filter(c => c.toId === arraySource.id && c.toInput.startsWith('input') && getInputIndex(c.toInput) >= 2)
+                .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput))
+                .forEach(conn => {
+                    const sourceEl = elements.find(e => e.id === conn.fromId);
+                    const preview = resolveNodeOutputPreviewElement(sourceEl, parsePinIndex(conn.fromOutput), 0);
+                    if (preview) sourceElements.push(preview);
+                });
+        }
+        
+        if (sourceElements.length < 2) return commonality;
+        
+        // Analyze children from all elements
+        const childrenByElement = sourceElements.map(el => {
+            const children = Array.from(el.children).filter(child => child.nodeType === 1) as HTMLElement[];
+            return children.map(child => ({
+                tag: child.tagName.toLowerCase(),
+                id: child.id,
+                classes: Array.from(child.classList).sort().join(' ')
+            }));
+        });
+        
+        // Build index map for first element
+        const firstChildren = childrenByElement[0] || [];
+        firstChildren.forEach((child, index) => {
+            // Check if this child structure exists in ALL other elements at same index
+            const isCommon = childrenByElement.slice(1).every(otherChildren => {
+                const otherChild = otherChildren[index];
+                return otherChild &&
+                    otherChild.tag === child.tag &&
+                    otherChild.id === child.id &&
+                    otherChild.classes === child.classes;
+            });
+            commonality.set(index, isCommon ? 'common' : 'partial');
+        });
+        
+        return commonality;
+    };
 
     const getGetChildrenDetectedCount = (nodeId: string): number =>
         getGetChildrenDetectedChildren(nodeId).length;
@@ -3079,6 +3233,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const DYNAMIC_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
         'element-property',
         'get-children',
+        'find-child',
         'unzip',
     ] as CanvasElement['type'][]);
 
@@ -3087,6 +3242,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     // keeps count-only pruning (its scalar type is lenient by design).
     const TYPE_FLIP_OUTPUT_NODE_TYPES: ReadonlySet<CanvasElement['type']> = new Set([
         'get-children',
+        'find-child',
         'unzip',
     ] as CanvasElement['type'][]);
 
@@ -3389,6 +3545,19 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 : base;
         }
         if (element.type === 'clone-element' || element.type === 'elements-by-class') return 2;
+        if (element.type === 'find-child') {
+            // Keep an already-created wire alive while preview detection is
+            // temporarily unavailable (For Each subgraphs can be detected a
+            // render later, and the live page has no editor preview DOM).
+            // Without this floor the system-pruning pass sees zero matches,
+            // removes the Find Child -> next-node connection, and the saved
+            // graph loses the user's logic before it can run on the page.
+            const detectedCount = (elementChildrenDetectionsRef.current[element.id] || []).length;
+            return Math.max(detectedCount > 0 ? 1 : 0, connectedOutputPinFloor(element.id));
+        }
+        if (element.type === 'event-element' || element.type === 'event-id') {
+            return 1;
+        }
         if (element.type === 'get-children') {
             const base = getChildrenOutputCount(element.data, getGetChildrenDetectedCount(element.id));
             return isDetectionDrivenOutputCount(element)
@@ -3420,7 +3589,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-array-append':
             case 'memory-array-remove':
             case 'memory-array-read':
-            case 'event-element':
             case 'event-id':
             case 'event-processor':
             case 'number':
@@ -3491,7 +3659,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-collect':
             case 'array-merge':
             case 'array-unique':
+            case 'array-get-index':
+            case 'array-first-event':
+            case 'array-event-aggregate':
                 return element.type === 'array-for-each' ? 2 : 1;
+            case 'array-for-each-context':
+                return getArrayContextOffsets(element.data?.arrayContextMode).length;
+            case 'array-for-each-multi':
+                // One item output per input array, plus the final Index output.
+                return Math.min(6, Math.max(2, (Number(element.data?.arrayMultiCount) || 1) + 1));
+            case 'array-sum':
+            case 'array-product':
+                return 1;
             case 'node-branch':
                 return 2;
             case 'switch-branch': {
@@ -3588,6 +3767,68 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
     };
 
+    const getArrayItemTypeFromSource = (
+        source: CanvasElement | null | undefined,
+        depth = 0,
+        seen = new Set<string>()
+    ): ArrayItemType => {
+        if (!source || depth > 12 || seen.has(source.id)) return 'number';
+        seen.add(source.id);
+        if (source.type === 'get-children' && getChildrenOutputsArray(source.data)) return 'element';
+        if (source.type === 'elements-by-class' || source.type === 'clone-element') return 'element';
+        if (source.type === 'event-processor') {
+            const payloadConnection = connections.find((connection) => connection.toId === source.id && connection.toInput === 'input1');
+            const payloadSource = payloadConnection ? elementsById.get(payloadConnection.fromId) : null;
+            return getArrayItemTypeFromSource(payloadSource, depth + 1, seen);
+        }
+        if (source.data?.arrayItemType !== undefined) return normalizeArrayItemType(source.data.arrayItemType);
+        if (source.type === 'node-branch' || source.type === 'switch-branch' || source.type === 'fallback') {
+            const valueInput = source.type === 'node-branch' ? 'input1' : 'input0';
+            const valueConnection = connections.find((connection) => connection.toId === source.id && connection.toInput === valueInput);
+            const valueSource = valueConnection ? elementsById.get(valueConnection.fromId) : null;
+            return getArrayItemTypeFromSource(valueSource, depth + 1, seen);
+        }
+        if (source.type === 'node') {
+            const branchSources = [1, 2]
+                .map((index) => connections.find((connection) => connection.toId === source.id && connection.toInput === `input${index}`))
+                .map((connection) => connection ? elementsById.get(connection.fromId) : null)
+                .filter((candidate): candidate is CanvasElement => Boolean(candidate));
+            for (const branchSource of branchSources) {
+                const itemType = getArrayItemTypeFromSource(branchSource, depth + 1, new Set(seen));
+                if (itemType !== 'number') return itemType;
+            }
+            return 'number';
+        }
+        const input = connections.find((connection) => connection.toId === source.id && connection.toInput === 'input0');
+        if (!input) return 'number';
+        const upstream = elementsById.get(input.fromId);
+        return getArrayItemTypeFromSource(upstream, depth + 1, seen);
+    };
+
+    // Resolve the type carried through control-flow nodes from the actual
+    // source pin, rather than trusting the branch node's previously inferred
+    // valueType. Element-producing nodes (Find Child, Get Children, Element
+    // Reference) otherwise become the default number type after an If/Switch
+    // and can no longer feed Event Element.
+    const resolveForwardedOutputType = (
+        node: CanvasElement | null | undefined,
+        inputIndex: number,
+        depth = 0,
+        seen = new Set<string>()
+    ): CanvasElement['valueType'] | null => {
+        if (!node || depth > 12 || seen.has(node.id)) return null;
+        seen.add(node.id);
+        const connection = connections.find(
+            (candidate) => candidate.toId === node.id && candidate.toInput === `input${inputIndex}`
+        );
+        if (!connection) return null;
+        const source = elementsById.get(connection.fromId);
+        if (!source) return null;
+        const outputMatch = /output(\d+)/i.exec(String(connection.fromOutput || 'output0'));
+        const sourceIndex = outputMatch ? Number(outputMatch[1]) : 0;
+        return getOutputPinType(source, Number.isFinite(sourceIndex) ? sourceIndex : 0);
+    };
+
     const getOutputPinType = (element: CanvasElement, index: number): CanvasElement['valueType'] => {
         if (element.type === 'unzip' || (element.type === 'custom-node' && !element.data?.zipOutput && !element.data?.customNodeTypeCarrier)) {
             const schema = getUnzipKnownSchema(element)?.fields || (
@@ -3604,30 +3845,80 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'custom-node' && element.data?.customNodeTypeCarrier) return 'zip';
         if (element.type === 'array') return 'array';
         if (element.type === 'array-push' || element.type === 'array-pop' || element.type === 'array-sort' || element.type === 'array-remove-index' || element.type === 'array-replace-index') return 'array';
+        if (element.type === 'array-get-index') {
+            const input = connections.find((connection) => connection.toId === element.id && connection.toInput === 'input0');
+            const source = input ? elementsById.get(input.fromId) : null;
+            return getArrayItemTypeFromSource(source);
+        }
         if (element.type === 'array-for-each') {
             if (index === 1) return 'number';
             // Loop item type = the array's element type (e.g. 'element' for
             // Array<element> from Get Children). No longer clamped to 'number'.
             return normalizeArrayItemType(element.data?.arrayItemType);
         }
+        if (element.type === 'array-for-each-context') {
+            const input = connections.find((connection) => connection.toId === element.id && connection.toInput === 'input0');
+            const source = input ? elementsById.get(input.fromId) : null;
+            return getArrayItemTypeFromSource(source) || normalizeArrayItemType(element.data?.arrayItemType);
+        }
+        if (element.type === 'array-for-each-multi') {
+            if (index === Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 1))) return 'number';
+            return getArrayItemTypeFromSource(elementsById.get(connections.find((c) => c.toId === element.id && c.toInput === `input${Math.min(index, 4)}`)?.fromId || '')) || normalizeArrayItemType(element.data?.arrayItemType);
+        }
         if (element.type === 'array-map' || element.type === 'array-filter' || element.type === 'array-collect' || element.type === 'array-merge' || element.type === 'array-unique') return 'array';
         if (element.type === 'array-find') return index === 0 ? 'array' : 'number';
         if (element.type === 'array-contains') return 'boolean';
         if (element.type === 'array-length') return 'number';
+        if (element.type === 'array-sum' || element.type === 'array-product') return 'number';
         if (element.type === 'raw-html' || element.type === 'set-parent') return 'element';
         if (DEBUG_NODE_TYPES.has(element.type)) return element.valueType || 'string'; // pass-through
         if (element.type === 'clone-element') return index === 1 ? 'array' : 'element';
         if (element.type === 'elements-by-class') return index === 1 ? 'number' : 'array';
+        if (element.type === 'find-child') {
+            const detected = (elementChildrenDetectionsRef.current[element.id] || []).length;
+            return detected > 1 ? 'array' : 'element';
+        }
         if (element.type === 'get-children') {
             // Single, or Child return-as -> individual element pin(s).
             // Children return-as -> one array pin.
             return getChildrenOutputsArray(element.data) ? 'array' : 'element';
         }
+        if (element.type === 'event-element' || element.type === 'event-id') return 'event';
+        if (element.type === 'event-processor') {
+            // Payload is a pass-through value. Preserve array and its item
+            // metadata instead of falling back to the node's stale scalar
+            // valueType when this output feeds For Each.
+            return element.valueType || 'string';
+        }
         if (element.type === 'array-reduce') return element.valueType || 'number';
+        if (element.type === 'node') {
+            return resolveForwardedOutputType(element, 1)
+                || resolveForwardedOutputType(element, 2)
+                || element.valueType
+                || 'number';
+        }
         if (element.type === 'node-branch') {
-            return element.valueType || 'number';
+            return resolveForwardedOutputType(element, 1) || element.valueType || 'number';
         }
         if (element.type === 'switch-branch') {
+            return resolveForwardedOutputType(element, 0) || element.valueType || 'number';
+        }
+        if (element.type === 'switch') {
+            const caseConnections = connections
+                .filter((connection) => connection.toId === element.id && getInputIndex(connection.toInput) > 0)
+                .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+            for (const connection of caseConnections) {
+                const caseElement = elementsById.get(connection.fromId);
+                if (!caseElement) continue;
+                const resultInput = caseElement.type === 'case-range' ? 2 : caseElement.type === 'case-value' ? 1 : 0;
+                const resultType = resolveForwardedOutputType(caseElement, resultInput);
+                if (resultType) return resultType;
+                if (caseElement.type === 'case-default' || caseElement.type === 'case-value' || caseElement.type === 'case-range') {
+                    const literal = caseElement.data?.out;
+                    if (typeof literal === 'boolean') return 'boolean';
+                    if (typeof literal === 'string' && literal.trim() !== '' && !Number.isFinite(Number(literal))) return 'string';
+                }
+            }
             return element.valueType || 'number';
         }
         if (element.type === 'event-hover' || element.type === 'event-scroll' || element.type === 'event-page-load' || element.type === 'event-timer' || element.type === 'event-custom' || element.type === 'event-or' || element.type === 'event-and') return 'event';
@@ -3803,6 +4094,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const classWired = connectionsRef.current.some((c) => c.toId === element.id && c.toInput === 'input0');
                 return classWired ? HINT_3 : stack([label, ctrl, HINT_3]);
             }
+            case 'find-child': {
+                const selectorWired = connectionsRef.current.some((c) => c.toId === element.id && c.toInput === 'input1');
+                return selectorWired ? HINT_3 : stack([label, ctrl, HINT_3]);
+            }
             case 'debug-console-log':
             case 'debug-console-warn':
             case 'debug-message-log':
@@ -3878,6 +4173,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'event-processor') {
             return NL_CHECKBOX_ROW_H + 3 + 28;
         }
+        if (element.type === 'array-for-each-context') {
+            return (NL_CTRL_H * 2) + 3;
+        }
         return 0;
     };
 
@@ -3943,13 +4241,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const rows = Math.max(1, Math.min(8, Math.max(selectedCount, detectedKeys.length)));
                     configHeight += rows * 24 + 8;
                 }
-                configHeight += 34; // add-custom input
+                // Add-custom input + custom-property type select (both are
+                // stacked controls inside the same flex column).
+                configHeight += 34 + 34 + 4;
             }
             return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16 + NL_HEIGHT_SAFETY_MARGIN;
         }
         if (element.type === 'get-children') {
             const outCount = getOutputCount(element);
-            const outputsHeight = outCount > 0 ? outCount * 34 + (outCount - 1) * 8 : 22;
+            let expandedLabelHeight = 0;
+            for (let outputIndex = 0; outputIndex < outCount; outputIndex += 1) {
+                const childIndex = readGetChildrenMode(element.data) === 'single'
+                    ? readGetChildrenSingleIndex(element.data)
+                    : getChildrenPinChildIndex(element.data, outputIndex);
+                const child = childIndex === null
+                    ? undefined
+                    : getGetChildrenDetectedChildren(element.id).find((item) => item.index === childIndex);
+                const classes = child?.classes || [];
+                if (classes.length > 1) {
+                    expandedLabelHeight += 16 + (expandedChildClasses[`${element.id}:${outputIndex}`] ? (classes.length - 1) * 14 : 0);
+                }
+            }
+            const outputsHeight = outCount > 0
+                ? outCount * 34 + (outCount - 1) * 8 + expandedLabelHeight
+                : 22;
             const mode = readGetChildrenMode(element.data);
             const hintLineHeight = 14; // "Element: ..." line, always shown
             if (getGetChildrenDetectedCount(element.id) === 0) {
@@ -3980,6 +4295,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }
             return 2 + 2 + 16 + 8 + Math.max(outputsHeight, configHeight, 34) + 16;
         }
+        if (element.type === 'find-child') return 44 + getConfigContentHeight(element) + NL_HEIGHT_SAFETY_MARGIN;
         // action-required/min/max/regex/add-class/remove-class/toggle-class,
         // action-set-text/html/value/attr/style, action-set-visibility,
         // action-enable/disable/focus/scroll-to, action-trigger-event/notify/
@@ -4073,6 +4389,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (element.type === 'get-children') {
             return readGetChildrenMode(element.data) === 'single' ? 220 : 240;
         }
+        if (element.type === 'find-child') return 240;
         if (element.type === 'action-block') return 220;
         if (element.type === 'action-required'
             || element.type === 'action-min'
@@ -4144,9 +4461,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const isTallActionInput = type === 'input' && index === 0 && (
             element.type === 'action-length'
         );
+        const isTallArrayContextInput = type === 'input' && index === 0 && element.type === 'array-for-each-context';
         const rowHeight = isTallActionInput
             ? ((32 * 2) + 4)
-            : 34;
+            : isTallArrayContextInput
+                ? ((32 * 2) + 3)
+                : 34;
 
         // Y = border(2) + padding(16) + rowHeight/2 + index * (rowHeight + gap(8))
         const rowGap = 8;
@@ -4170,7 +4490,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         let elementX = element.x;
         let elementY = element.y;
 
-        if (applyDelta && dragElementDeltaRef.current && dragElementDeltaRef.current.elementId === element.id) {
+        if (
+            applyDelta
+            && dragElementDeltaRef.current
+            && elementDragRef.current?.elementIds.includes(element.id)
+        ) {
             elementX += dragElementDeltaRef.current.deltaX;
             elementY += dragElementDeltaRef.current.deltaY;
         }
@@ -4672,7 +4996,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             }
             case 'case-default': {
                 const hasOutConnection = connections.some((c) => c.toId === element.id && c.toInput === 'input0');
+                // Check if connected to switch-branch
+                const connectedToSwitchBranch = connections.some((c) => {
+                    if (c.fromId !== element.id || c.fromOutput !== 'output0') return false;
+                    const targetEl = elements.find(el => el.id === c.toId);
+                    return targetEl?.type === 'switch-branch';
+                });
                 if (index !== 0) return null;
+                // Hide control when connected to switch-branch, but keep placeholder for layout
+                if (connectedToSwitchBranch) {
+                    return <div className="input-placeholder" style={{ visibility: 'hidden' }} />;
+                }
                 return !hasOutConnection ? (
                     <input
                         type="text"
@@ -4940,6 +5274,64 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         <option value="zip">Zip</option>
                         <option value="element">Element</option>
                     </select>
+                );
+            }
+            case 'array-for-each-multi': {
+                if (index !== 0) return null;
+                const count = Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 2));
+                return (
+                    <select
+                        className="input-control"
+                        value={String(count)}
+                        onChange={(e) => setElements((prev) => updateElementValueTypes(prev.map((elem) =>
+                            elem.id === element.id ? { ...elem, data: { ...elem.data, arrayMultiCount: Math.min(5, Math.max(1, Number(e.target.value) || 1)) } } : elem
+                        )))}
+                        onClick={(e) => e.stopPropagation()}
+                        title="Number of arrays processed in parallel"
+                    >
+                        {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} arrays</option>)}
+                    </select>
+                );
+            }
+            case 'array-for-each-context': {
+                if (index !== 0) return null;
+                const mode = (element.data?.arrayContextMode || 'current') as ArrayContextMode;
+                const boundaryMode = element.data?.arrayContextBoundaryMode || 'empty';
+                return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                        <select
+                            className="input-control"
+                            value={mode}
+                            onChange={(e) => {
+                                const arrayContextMode = e.target.value as ArrayContextMode;
+                                setElements((prev) => updateElementValueTypes(prev.map((elem) =>
+                                    elem.id === element.id ? { ...elem, data: { ...elem.data, arrayContextMode } } : elem
+                                )));
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Elements available in each iteration"
+                        >
+                            <option value="current">i</option>
+                            <option value="current-next">i, i+1</option>
+                            <option value="current-previous">i, i-1</option>
+                            <option value="current-previous-next">i, i-1, i+1</option>
+                        </select>
+                        <select
+                            className="input-control"
+                            value={boundaryMode}
+                            onChange={(e) => {
+                                const arrayContextBoundaryMode = e.target.value as 'empty' | 'skip';
+                                setElements((prev) => updateElementValueTypes(prev.map((elem) =>
+                                    elem.id === element.id ? { ...elem, data: { ...elem.data, arrayContextBoundaryMode } } : elem
+                                )));
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="What to do when a neighbour index is outside the array"
+                        >
+                            <option value="empty">Keep iteration (empty item)</option>
+                            <option value="skip">Skip iteration</option>
+                        </select>
+                    </div>
                 );
             }
             case 'chart-data': {
@@ -5618,6 +6010,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return ['Element', 'Trigger'][index] || '';
             case 'elements-by-class':
                 return ['Class', 'Scope'][index] || '';
+            case 'find-child':
+                return ['Element', 'Selector'][index] || '';
             case 'debug-console-log':
             case 'debug-console-warn':
             case 'debug-message-log':
@@ -5749,6 +6143,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'switch-branch':
                 if (index === 0) return 'Value';
                 if (index === 1) return 'Compare';
+                // Check if a case-default is connected to this exact pin index
+                const defaultConnSwitchBranch = connections.find((c) => {
+                    if (c.toId !== element.id || getInputIndex(c.toInput) !== index) return false;
+                    return elements.find((el) => el.id === c.fromId)?.type === 'case-default';
+                });
+                if (defaultConnSwitchBranch) return 'Default';
                 return `Case ${index - 2}`;
             case 'css-unit':
                 return 'Number';
@@ -5774,6 +6174,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'Primary' : 'Fallback';
             case 'fallback-event':
                 return ['Main', 'Fallback', 'Hold (ms)'][index] || '';
+            case 'wait':
+                return index === 0 ? 'Value' : 'Wait (ms)';
             case 'clamp':
                 if (index === 0) return 'Value';
                 if (index === 1) return 'Min';
@@ -5904,10 +6306,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'Array' : 'Condition';
             case 'array-reduce':
                 return 'Array';
+            case 'array-sum':
+            case 'array-product':
+                return 'Value';
             case 'array-find':
                 return index === 0 ? 'Array' : 'Value';
             case 'array-for-each':
                 return index === 0 ? 'Array' : 'Index';
+            case 'array-for-each-context':
+                return 'Array';
+            case 'array-for-each-multi':
+                return `Array ${index + 1}`;
             case 'array-collect':
                 return 'Item';
             case 'array-contains':
@@ -5918,6 +6327,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return index === 0 ? 'Array A' : 'Array B';
             case 'array-unique':
                 return 'Array';
+            case 'array-get-index':
+                return index === 0 ? 'Array' : 'Index';
+            case 'array-first-event':
+                return index === 0 ? 'Event' : 'Value';
+            case 'array-event-aggregate':
+                return 'Event';
             default:
                 return `Input ${index + 1}`;
         }
@@ -5973,7 +6388,6 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'memory-array-remove':
             case 'memory-array-read':
             case 'json-body':
-            case 'event-element':
             case 'event-id':
             case 'event-processor':
             case 'element':
@@ -5993,6 +6407,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'fallback-event':
             case 'clamp':
                 return 'Value';
+            case 'wait':
+                return 'Value';
+            case 'event-element':
+                return 'Event';
             case 'element-property': {
                 const keys = resolveElementPropertyOrderedKeys(element);
                 if (getElementPropertyMode(element) === 'single') {
@@ -6036,14 +6454,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-merge':
             case 'array-unique':
                 return 'Array';
+            case 'array-sum':
+            case 'array-product':
+                return 'Result';
             case 'array-for-each':
                 return index === 0 ? 'Item' : 'Index';
+            case 'array-for-each-context':
+                {
+                    const offset = getArrayContextOffsets(element.data?.arrayContextMode)[index] ?? 0;
+                    return offset < 0 ? 'Previous' : offset > 0 ? 'Next' : 'Item';
+                }
+            case 'array-for-each-multi':
+                return index === Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 1)) ? 'Index' : `Item ${index + 1}`;
             case 'array-find':
                 return index === 0 ? 'Indexes' : 'Count';
             case 'array-contains':
                 return 'Result';
             case 'array-length':
                 return 'Length';
+            case 'array-get-index':
+                return 'Item';
+            case 'array-first-event':
+                return 'First Value';
+            case 'array-event-aggregate':
+                return 'Event';
             case 'get-children': {
                 const mode = readGetChildrenMode(element.data);
                 if (mode === 'single') return 'Child';
@@ -6056,6 +6490,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     (child) => child.index === childIndex
                 );
                 return detected ? detected.label : `Child ${childIndex}`;
+            }
+            case 'find-child': {
+                const detected = getGetChildrenDetectedChildren(element.id);
+                return detected.length > 1 ? `Matches (${detected.length})` : 'Child';
             }
             case 'array-reduce':
                 return 'Value';
@@ -6123,6 +6561,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-remove-index':
             case 'array-replace-index':
                 return 'Array';
+            case 'array-get-index':
+                return 'Item';
             case 'image-from-link':
             case 'image-from-element':
                 return 'Image';
@@ -6155,6 +6595,45 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             default:
                 return `Output-${index + 1}`;
         }
+    };
+
+    const renderOutputLabel = (element: CanvasElement, index: number): React.ReactNode => {
+        if (element.type !== 'get-children') return getOutputLabel(element, index);
+        const mode = readGetChildrenMode(element.data);
+        const detected = getGetChildrenDetectedChildren(element.id);
+        const childIndex = mode === 'single' ? readGetChildrenSingleIndex(element.data) : getChildrenPinChildIndex(element.data, index);
+        const child = childIndex === null ? undefined : detected.find((item) => item.index === childIndex);
+        if (!child) return getOutputLabel(element, index);
+
+        const classes = child.classes && child.classes.length > 0
+            ? child.classes
+            : child.className.replace(/^\./, '').split('.').filter(Boolean);
+        const tag = child.tag ? child.tag.toLowerCase() : 'element';
+        const lastClass = classes[classes.length - 1];
+        const shortLabel = `${tag}${lastClass ? `.${lastClass}` : ''}`;
+        const key = `${element.id}:${index}`;
+        const expanded = !!expandedChildClasses[key];
+        if (classes.length <= 1) return shortLabel;
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', lineHeight: 1.2 }}>
+                {!expanded ? shortLabel : (
+                    <>
+                        <div>{shortLabel}</div>
+                        {classes.slice(0, -1).map((className) => <div key={className}>.{className}</div>)}
+                    </>
+                )}
+                <button
+                    type="button"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setExpandedChildClasses((previous) => ({ ...previous, [key]: !expanded }));
+                    }}
+                    style={{ border: 0, padding: 0, marginTop: 2, background: 'transparent', color: '#86efac', fontSize: '10px', cursor: 'pointer' }}
+                >
+                    {expanded ? 'Show less' : 'Show all classes'}
+                </button>
+            </div>
+        );
     };
 
     const getConnectedInputIndexesForElement = (
@@ -6300,6 +6779,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
         return JSON.stringify(String(value));
     };
+
+    // Loop bodies are formulas inside formulas. Encoding the body as UTF-16
+    // code units avoids a second/third layer of quote escaping when nested
+    // For Each Multi / Context loops contain object payloads and actions.
+    const serializeGraphLoopBody = (value: string): string => (
+        `__nodeFormulaBody([${Array.from(String(value)).map((char) => char.charCodeAt(0)).join(',')}])`
+    );
 
     const buildGraphFormulaFromState = (
         allElements: CanvasElement[],
@@ -6474,11 +6960,51 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             for (const connection of incoming) {
                 const source = elementMap.get(connection.fromId);
                 if (!source) continue;
-                if (source.type === 'array-for-each') return source;
+                if (source.type === 'array-for-each' || source.type === 'array-for-each-context' || source.type === 'array-for-each-multi') return source;
+                // These nodes intentionally leave the per-item subgraph and
+                // produce one aggregate value/event. Do not resurrect the
+                // upstream loop while resolving anything after them.
+                if (source.type === 'array-collect'
+                    || source.type === 'array-first-event'
+                    || source.type === 'array-event-aggregate'
+                    || source.type === 'array-sum'
+                    || source.type === 'array-product'
+                    || source.type === 'array-map'
+                    || source.type === 'array-filter') continue;
                 const loopStart = findLoopStart(source.id, visited);
                 if (loopStart) return loopStart;
             }
             return null;
+        };
+        const findLoopChain = (elementId: string, visited = new Set<string>()): CanvasElement[] => {
+            if (visited.has(elementId)) return [];
+            const nextVisited = new Set(visited);
+            nextVisited.add(elementId);
+            let best: CanvasElement[] = [];
+            for (const connection of allConnections.filter((candidate) => candidate.toId === elementId)) {
+                const source = elementMap.get(connection.fromId);
+                if (!source) continue;
+                const parentChain = findLoopChain(source.id, nextVisited);
+                // A collector/map/filter closes its own loop. When another
+                // outer collector consumes that result, retain only the
+                // parent loop context instead of reopening the inner loop.
+                const closesLoop = source.type === 'array-collect'
+                    || source.type === 'array-map'
+                    || source.type === 'array-filter'
+                    || source.type === 'array-reduce'
+                    || source.type === 'array-sum'
+                    || source.type === 'array-product'
+                    || source.type === 'array-first-event'
+                    || source.type === 'array-event-aggregate';
+                const parent = closesLoop ? parentChain.slice(1) : parentChain;
+                const candidate = source.type === 'array-for-each'
+                    || source.type === 'array-for-each-context'
+                    || source.type === 'array-for-each-multi'
+                    ? [source, ...parent]
+                    : parent;
+                if (candidate.length > best.length) best = candidate;
+            }
+            return best;
         };
         const connectedInputExpressionFor = (
             targetElement: CanvasElement,
@@ -6619,7 +7145,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         ? (propKeys[0] || '')
                         : (propKeys[outputIndex] || '');
                     if (!propKey) return '0';
-                    return `__nodeGetElementProp(${sourceExpr}, ${serializeGraphFormulaLiteral(propKey)})`;
+                    const propType = getElementPropertyKeyType(element, propKey);
+                    return `__nodeCoerceElementProperty(__nodeGetElementProp(${sourceExpr}, ${serializeGraphFormulaLiteral(propKey)}), ${serializeGraphFormulaLiteral(propType)})`;
                 }
                 case 'get-children': {
                     // Direct child elements of the connected element reference.
@@ -6652,6 +7179,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const childIndex = getChildrenPinChildIndex(element.data, outputIndex);
                     if (childIndex === null) return 'null';
                     return `__nodeGetChildAt(${ref}, ${childIndex})`;
+                }
+                case 'find-child': {
+                    const parent = buildElementSourceExpr(element, 0, '');
+                    const selector = connectedInputExpression(1, String(element.data?.childSelector || ''));
+                    return `__nodeFindChild(${parent}, ${selector})`;
                 }
                 case 'event-element': {
                     // Element input pin wins when wired -- __nodeEvent accepts a
@@ -6769,6 +7301,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const holdExpr = getConnectedExpression(element.id, 'input2') || serializeGraphFormulaLiteral(Math.max(0, Number(element.data?.fallbackEventDurationMs ?? 3000)));
                     return `__nodeFallbackEvent(${serializeGraphFormulaLiteral(element.id)}, ${mainExpr}, ${fallbackExpr}, ${holdExpr})`;
                 }
+                case 'wait':
+                    return `__nodeWait(${serializeGraphFormulaLiteral(element.id)}, ${connectedInputExpression(0)}, ${connectedInputExpression(1, 0)})`;
                 case 'concat':
                 case 'multi-concat': {
                     const inputCount = Math.max(2, getInputCount(element));
@@ -7093,7 +7627,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     // "pass always" (false) relays it unconditionally -- an
                     // unset option used to mean "always", which made
                     // Event -> Payload -> Value fire without any event.
-                    return `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${element.data?.passOnlyOnEvent === false ? 'false' : 'true'})`;
+                    // Pass node ID to create unique consumption key per processor instance
+                    return `__nodeEventProcessor(${eventExpr}, ${payloadExpr}, ${element.data?.passOnlyOnEvent === false ? 'false' : 'true'}, ${JSON.stringify(element.id)})`;
                 }
                 case 'node': {
                     const condition = connectedInputExpression(0, true);
@@ -7161,17 +7696,40 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const branchValue = connectedInputExpression(0, undefined);
                     const compareValue = connectedInputExpression(1, undefined);
                     const cases = allConnections
-                        .filter(connection => connection.toId === element.id && getInputIndex(connection.toInput) > 0)
+                        // input0 = value, input1 = compare; only input2+
+                        // are actual Case/Default branch selectors.
+                        .filter(connection => connection.toId === element.id && getInputIndex(connection.toInput) >= 2)
                         .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
                     const selected = cases[outputIndex];
                     if (!selected) return 'undefined';
                     const caseElement = elementMap.get(selected.fromId);
                     if (!caseElement) return 'undefined';
+                    const buildCaseCondition = (candidate: CanvasElement): string => {
+                        if (candidate.type === 'case-range') {
+                            const min = connectedInputExpressionFor(candidate, 0, 0);
+                            const max = connectedInputExpressionFor(candidate, 1, 0);
+                            return `(${compareValue} >= Math.min(${min}, ${max}) && ${compareValue} <= Math.max(${min}, ${max}))`;
+                        }
+                        return `__nodeCaseEquals(${compareValue}, ${connectedInputExpressionFor(candidate, 0, candidate.data?.caseValue ?? 0)})`;
+                    };
                     const caseValue = caseElement.type === 'case-default'
-                        ? 'true'
-                        : caseElement.type === 'case-range'
-                        ? `(${compareValue} >= Math.min(${connectedInputExpressionFor(caseElement, 0, 0)}, ${connectedInputExpressionFor(caseElement, 1, 0)}) && ${compareValue} <= Math.max(${connectedInputExpressionFor(caseElement, 0, 0)}, ${connectedInputExpressionFor(caseElement, 1, 0)}))`
-                        : `__nodeCaseEquals(${compareValue}, ${connectedInputExpressionFor(caseElement, 0, caseElement.data?.caseValue ?? 0)})`;
+                        ? `!(${cases
+                            .map((connection) => elementMap.get(connection.fromId))
+                            .filter((candidate): candidate is CanvasElement => Boolean(candidate) && candidate.type !== 'case-default')
+                            .map(buildCaseCondition)
+                            .join(' || ') || 'false'})`
+                        : (() => {
+                            const selectedCondition = buildCaseCondition(caseElement);
+                            const selectedIndex = cases.findIndex((connection) => connection === selected);
+                            const previousConditions = cases
+                                .slice(0, selectedIndex)
+                                .map((connection) => elementMap.get(connection.fromId))
+                                .filter((candidate): candidate is CanvasElement => Boolean(candidate) && candidate.type !== 'case-default')
+                                .map(buildCaseCondition);
+                            return previousConditions.length > 0
+                                ? `(${selectedCondition} && !(${previousConditions.join(' || ')}))`
+                                : selectedCondition;
+                        })();
                     return `((${caseValue}) ? (${branchValue}) : undefined)`;
                 }
                 case 'array': {
@@ -7192,42 +7750,150 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     buildingLoopBody = true;
                     const mappedExpression = connectedInputExpression(1);
                     buildingLoopBody = previousLoopMode;
-                    return `__nodeArrayMapGraph(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(mappedExpression)})`;
+                    return `__nodeArrayMapGraph(${connectedInputExpression(0)}, ${serializeGraphLoopBody(mappedExpression)})`;
                 }
                 case 'array-filter': {
                     const previousLoopMode = buildingLoopBody;
                     buildingLoopBody = true;
                     const predicateExpression = connectedInputExpression(1);
                     buildingLoopBody = previousLoopMode;
-                    return `__nodeArrayFilterGraph(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(predicateExpression)})`;
+                    return `__nodeArrayFilterGraph(${connectedInputExpression(0)}, ${serializeGraphLoopBody(predicateExpression)})`;
                 }
                 case 'array-reduce': return `__nodeArrayReduce(${connectedInputExpression(0)}, ${serializeGraphFormulaLiteral(element.data?.arrayReduceOperation || 'sum')}, ${serializeGraphFormulaLiteral(element.data?.arrayReduceInitial || '0')})`;
+                case 'array-sum':
+                case 'array-product': {
+                    const sourceConnection = getConnectionForInput(element.id, 'input0');
+                    const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                    const loopStart = sourceElement?.type === 'array-for-each' || sourceElement?.type === 'array-for-each-context' || sourceElement?.type === 'array-for-each-multi'
+                        ? sourceElement
+                        : sourceElement ? findLoopStart(sourceElement.id) : null;
+                    const operation = element.type === 'array-product' ? 'product' : 'sum';
+                    if (!loopStart || !sourceElement) {
+                        return `__nodeArrayReduceGraph([${connectedInputExpression(0)}], ${serializeGraphFormulaLiteral('__nodeLoopItem')}, ${serializeGraphFormulaLiteral(operation)})`;
+                    }
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    const sourceOutputIndex = Number.parseInt(String(sourceConnection?.fromOutput || 'output0').replace(/^output/i, ''), 10);
+                    const valueExpression = buildNodeExpression(sourceElement, Number.isFinite(sourceOutputIndex) ? sourceOutputIndex : 0, currentDepth + 1);
+                    buildingLoopBody = previousLoopMode;
+                    if (loopStart.type === 'array-for-each-multi') {
+                        const count = Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2));
+                        const arrays = Array.from({ length: count }, (_, index) => connectedInputExpressionFor(loopStart, index, []));
+                        return `__nodeArrayMultiReduceGraph([${arrays.join(', ')}], ${serializeGraphLoopBody(valueExpression)}, ${serializeGraphFormulaLiteral(operation)})`;
+                    }
+                    const arrayExpression = connectedInputExpressionFor(loopStart, 0, []);
+                    return `__nodeArrayReduceGraph(${arrayExpression}, ${serializeGraphLoopBody(valueExpression)}, ${serializeGraphFormulaLiteral(operation)})`;
+                }
                 case 'array-find': return `__nodeUnzip(__nodeArrayFind(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(element.data?.arraySearchField || '')}), ${outputIndex})`;
                 case 'array-for-each':
                     if (buildingLoopBody) return outputIndex === 1 ? '__nodeLoopIndex' : '__nodeLoopItem';
                     return `__nodeArrayForEach(${connectedInputExpression(0)})`;
+                case 'array-for-each-context': {
+                    const offsets = getArrayContextOffsets(element.data?.arrayContextMode);
+                    if (buildingLoopBody) {
+                        return `__nodeLoopItemAt(${offsets[outputIndex] ?? offsets[0] ?? 0})`;
+                    }
+                    return `__nodeArrayForEach(${connectedInputExpression(0)})`;
+                }
+                case 'array-for-each-multi': {
+                    const arrayCount = Math.min(5, Math.max(1, Number(element.data?.arrayMultiCount) || 2));
+                    if (buildingLoopBody) {
+                        return outputIndex === arrayCount
+                            ? '__nodeLoopIndex'
+                            : `__nodeLoopMultiItemAt(${outputIndex})`;
+                    }
+                    const arrays = Array.from({ length: arrayCount }, (_, index) => connectedInputExpression(index, '[]'));
+                    return `__nodeArrayForEachMulti([${arrays.join(', ')}])`;
+                }
                 case 'array-collect': {
                     const sourceConnection = getConnectionForInput(element.id, 'input0');
                     const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
-                    const loopStart = sourceElement?.type === 'array-for-each'
+                    const loopChain = findLoopChain(element.id).reverse();
+                    const loopStart = sourceElement?.type === 'array-for-each' || sourceElement?.type === 'array-for-each-context' || sourceElement?.type === 'array-for-each-multi'
                         ? sourceElement
                         : sourceElement
                             ? findLoopStart(sourceElement.id)
                             : null;
                     if (!loopStart || !sourceElement) return `__nodeArrayCollect(${connectedInputExpression(0)})`;
 
-                    const arrayExpression = connectedInputExpressionFor(loopStart, 0, []);
                     const previousLoopMode = buildingLoopBody;
                     buildingLoopBody = true;
                     const sourceOutputIndex = Number.parseInt(String(sourceConnection?.fromOutput || '').replace(/^output/i, ''), 10);
                     const bodyExpression = buildNodeExpression(sourceElement, Number.isFinite(sourceOutputIndex) ? sourceOutputIndex : 0, currentDepth + 1);
                     buildingLoopBody = previousLoopMode;
-                    return `__nodeArrayMapGraph(${arrayExpression}, ${serializeGraphFormulaLiteral(bodyExpression)})`;
+                    if (loopChain.length > 0) {
+                        return buildNestedLoopMapExpression(loopChain, bodyExpression);
+                    }
+                    if (loopStart.type === 'array-for-each-multi') {
+                        const arrayCount = Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2));
+                        const arrays = Array.from({ length: arrayCount }, (_, index) => connectedInputExpressionFor(loopStart, index, []));
+                        return `__nodeArrayMultiMapGraph([${arrays.join(', ')}], ${serializeGraphLoopBody(bodyExpression)})`;
+                    }
+                    const arrayExpression = loopStart.type === 'array-for-each-multi'
+                        ? `[${Array.from({ length: Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2)) }, (_, index) => connectedInputExpressionFor(loopStart, index, [])).join(', ')}]`
+                        : connectedInputExpressionFor(loopStart, 0, []);
+                    return loopStart.type === 'array-for-each-context'
+                        ? `__nodeArrayContextMapGraph(${arrayExpression}, ${serializeGraphLoopBody(bodyExpression)}, ${JSON.stringify(getArrayContextOffsets(loopStart.data?.arrayContextMode))}, ${JSON.stringify(loopStart.data?.arrayContextBoundaryMode || 'empty')})`
+                        : `__nodeArrayMapGraph(${arrayExpression}, ${serializeGraphLoopBody(bodyExpression)})`;
                 }
                 case 'array-contains': return `__nodeArrayContains(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
                 case 'array-length': return `__nodeArrayLength(${connectedInputExpression(0)})`;
                 case 'array-merge': return `__nodeArrayMerge(${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${serializeGraphFormulaLiteral(element.data?.arrayMergeMode || 'concat')})`;
                 case 'array-unique': return `__nodeArrayUnique(${connectedInputExpression(0)})`;
+                case 'array-get-index': return `__nodeArrayGetIndex(${connectedInputExpression(0)}, ${connectedInputExpression(1)})`;
+                case 'array-first-event': {
+                    // Detect For Each loop like Collect Results
+                    const eventConnection = getConnectionForInput(element.id, 'input0');
+                    const eventElement = eventConnection ? elementMap.get(eventConnection.fromId) : null;
+                    const loopStart = eventElement?.type === 'array-for-each' || eventElement?.type === 'array-for-each-context' || eventElement?.type === 'array-for-each-multi'
+                        ? eventElement
+                        : eventElement ? findLoopStart(eventElement.id) : null;
+                    
+                    if (!loopStart || !eventElement) return `__nodeArrayFirstEvent(undefined, ${connectedInputExpression(0)}, ${connectedInputExpression(1)}, ${JSON.stringify(element.id)})`;
+                    
+                    const arrayExpression = loopStart.type === 'array-for-each-multi'
+                        ? `[${Array.from({ length: Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2)) }, (_, index) => connectedInputExpressionFor(loopStart, index, [])).join(', ')}]`
+                        : connectedInputExpressionFor(loopStart, 0, []);
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    
+                    // Build event expression from input0
+                    const eventOutputIndex = Number.parseInt(String(eventConnection?.fromOutput || '').replace(/^output/i, ''), 10);
+                    const eventExpression = buildNodeExpression(eventElement, Number.isFinite(eventOutputIndex) ? eventOutputIndex : 0, currentDepth + 1);
+                    
+                    // Build value expression from input1
+                    const valueExpression = connectedInputExpression(1);
+                    
+                    buildingLoopBody = previousLoopMode;
+                    return loopStart.type === 'array-for-each-multi'
+                        ? `__nodeArrayFirstEventMulti(${arrayExpression}, ${serializeGraphLoopBody(eventExpression)}, ${serializeGraphLoopBody(valueExpression)}, ${JSON.stringify(element.id)})`
+                        : `__nodeArrayFirstEvent(${arrayExpression}, ${serializeGraphLoopBody(eventExpression)}, ${serializeGraphLoopBody(valueExpression)}, ${JSON.stringify(element.id)})`;
+                }
+                case 'array-event-aggregate': {
+                    // Detect For Each loop like Collect Results
+                    const eventConnection = getConnectionForInput(element.id, 'input0');
+                    const eventElement = eventConnection ? elementMap.get(eventConnection.fromId) : null;
+                    const loopStart = eventElement?.type === 'array-for-each' || eventElement?.type === 'array-for-each-context' || eventElement?.type === 'array-for-each-multi'
+                        ? eventElement
+                        : eventElement ? findLoopStart(eventElement.id) : null;
+                    
+                    if (!loopStart || !eventElement) return `__nodeArrayEventAggregate(undefined, ${connectedInputExpression(0)}, ${JSON.stringify(element.id)})`;
+                    
+                    const arrayExpression = loopStart.type === 'array-for-each-multi'
+                        ? `[${Array.from({ length: Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2)) }, (_, index) => connectedInputExpressionFor(loopStart, index, [])).join(', ')}]`
+                        : connectedInputExpressionFor(loopStart, 0, []);
+                    const previousLoopMode = buildingLoopBody;
+                    buildingLoopBody = true;
+                    
+                    // Build event expression from input0
+                    const eventOutputIndex = Number.parseInt(String(eventConnection?.fromOutput || '').replace(/^output/i, ''), 10);
+                    const eventExpression = buildNodeExpression(eventElement, Number.isFinite(eventOutputIndex) ? eventOutputIndex : 0, currentDepth + 1);
+                    
+                    buildingLoopBody = previousLoopMode;
+                    return loopStart.type === 'array-for-each-multi'
+                        ? `__nodeArrayEventAggregateMulti(${arrayExpression}, ${serializeGraphLoopBody(eventExpression)}, ${JSON.stringify(element.id)})`
+                        : `__nodeArrayEventAggregate(${arrayExpression}, ${serializeGraphLoopBody(eventExpression)}, ${JSON.stringify(element.id)})`;
+                }
                 case 'image-from-link':
                     // URL pin when wired, else the node's own URL field (which
                     // used to be ignored: the node returned "0").
@@ -7494,13 +8160,143 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // Filter) is self-contained and must NOT trigger this.
             const elConn = allConnections.find((c) => c.toId === outNode.id && c.toInput === 'input0');
             const src = elConn ? elementMap.get(elConn.fromId) : null;
-            if (!src) return null;
-            return src.type === 'array-for-each' ? src : findLoopStart(src.id);
+            if (src) {
+                const elementLoop = src.type === 'array-for-each' || src.type === 'array-for-each-context' || src.type === 'array-for-each-multi'
+                    ? src
+                    : findLoopStart(src.id);
+                if (elementLoop) return elementLoop;
+            }
+
+            // Event graphs commonly use a fixed Output target and put the
+            // per-item value on Output's Value pin instead:
+            // Context Item -> Find Child -> Event Element -> Event Processor.
+            // In that shape input0 is not looped, so the old detector compiled
+            // the event expression once against the whole array. Ordinary For
+            // Each happened to work through another path, while For Each
+            // Context lost the live item before Find Child could search it.
+            // Detect a loop only through an event input path; ordinary array
+            // values (Collect/Map/Filter) remain self-contained arrays.
+            const eventTypes = new Set([
+                'event-element', 'event-id', 'event-hover', 'event-scroll',
+                'event-page-load', 'event-timer', 'event-custom', 'event-or',
+                'event-and', 'event-fallback', 'event-processor',
+            ]);
+            const closingTypes = new Set([
+                'array-collect', 'array-first-event', 'array-event-aggregate',
+                'array-map', 'array-filter', 'array-reduce', 'array-sum', 'array-product',
+            ]);
+            const findEventLoopStart = (nodeId: string, visited = new Set<string>(), inEventPath = false): CanvasElement | null => {
+                if (visited.has(nodeId)) return null;
+                visited.add(nodeId);
+                const node = elementMap.get(nodeId);
+                if (!node) return null;
+                if (node.type === 'array-for-each' || node.type === 'array-for-each-context' || node.type === 'array-for-each-multi') return node;
+                if (closingTypes.has(node.type)) return null;
+                const eventPath = inEventPath || eventTypes.has(node.type);
+
+                const inputNames = node.type === 'event-processor'
+                    ? ['input0']
+                    : node.type === 'event-or' || node.type === 'event-and'
+                        ? ['input0', 'input1']
+                        : Array.from(new Set(
+                            allConnections
+                                .filter((connection) => connection.toId === node.id && connection.toInput.startsWith('input'))
+                                .map((connection) => connection.toInput)
+                        ));
+                for (const inputName of inputNames) {
+                    const connection = getConnectionForInput(node.id, inputName);
+                    const upstream = connection ? elementMap.get(connection.fromId) : null;
+                    if (!upstream) continue;
+                    if (upstream.type === 'array-for-each' || upstream.type === 'array-for-each-context' || upstream.type === 'array-for-each-multi') return upstream;
+                    if (eventPath || eventTypes.has(upstream.type)) {
+                        const loop = findEventLoopStart(upstream.id, visited, eventPath || eventTypes.has(upstream.type));
+                        if (loop) return loop;
+                    }
+                }
+                return null;
+            };
+
+            const valueConnections = allConnections.filter((connection) =>
+                connection.toId === outNode.id && connection.toInput !== 'input0'
+            );
+            for (const valueConnection of valueConnections) {
+                const valueSource = elementMap.get(valueConnection.fromId);
+                if (!valueSource) continue;
+                const eventLoop = findEventLoopStart(valueSource.id)
+                    || findLoopStart(valueSource.id);
+                if (eventLoop) return eventLoop;
+            }
+
+            // The same shape can live in the Action tree instead of Output's
+            // Value pin: Output -> Action Event, with Event Element wired to
+            // the Action Event's Element input. Follow that target path too;
+            // otherwise the listener is compiled once against the whole
+            // Context array and never binds to each child.
+            const visitedActions = new Set<string>();
+            const findActionEventLoop = (nodeId: string): CanvasElement | null => {
+                if (visitedActions.has(nodeId)) return null;
+                visitedActions.add(nodeId);
+                const node = elementMap.get(nodeId);
+                if (!node) return null;
+                const genericLoop = findLoopStart(node.id);
+                if (genericLoop) return genericLoop;
+                if (node.type === 'action-event' || node.type === 'action-event-gate') {
+                    const targetConnection = getConnectionForInput(node.id, 'input1');
+                    const targetSource = targetConnection ? elementMap.get(targetConnection.fromId) : null;
+                    if (targetSource) {
+                        const loop = findEventLoopStart(targetSource.id);
+                        if (loop) return loop;
+                    }
+
+                    // Event Trigger Action has no Element target pin; its
+                    // iteration dependency is the Trigger Event input.
+                    if (node.type === 'action-event-gate') {
+                        const triggerConnection = getConnectionForInput(node.id, 'input1');
+                        const triggerSource = triggerConnection ? elementMap.get(triggerConnection.fromId) : null;
+                        if (triggerSource) {
+                            const loop = findEventLoopStart(triggerSource.id);
+                            if (loop) return loop;
+                        }
+                    }
+                }
+                for (const childConnection of getOutgoingConnections(node.id)) {
+                    const loop = findActionEventLoop(childConnection.toId);
+                    if (loop) return loop;
+                }
+                return null;
+            };
+            for (const actionConnection of getOutgoingConnections(outNode.id)) {
+                const actionLoop = findActionEventLoop(actionConnection.toId);
+                if (actionLoop) return actionLoop;
+            }
+            return null;
+        };
+        const buildLoopMapExpression = (loopStart: CanvasElement, arrayExpression: string, bodyExpression: string): string => (
+            loopStart.type === 'array-for-each-multi'
+                ? `__nodeArrayMultiMapGraph([${Array.from({ length: Math.min(5, Math.max(1, Number(loopStart.data?.arrayMultiCount) || 2)) }, (_, index) => connectedInputExpressionFor(loopStart, index, [])).join(', ')}], ${serializeGraphLoopBody(bodyExpression)})`
+                : loopStart.type === 'array-for-each-context'
+                        ? `__nodeArrayContextMapGraph(${arrayExpression}, ${serializeGraphLoopBody(bodyExpression)}, ${JSON.stringify(getArrayContextOffsets(loopStart.data?.arrayContextMode))}, ${JSON.stringify(loopStart.data?.arrayContextBoundaryMode || 'empty')})`
+                        : `__nodeArrayMapGraph(${arrayExpression}, ${serializeGraphLoopBody(bodyExpression)})`
+        );
+        const buildNestedLoopMapExpression = (loopChain: CanvasElement[], bodyExpression: string): string => {
+            let expression = bodyExpression;
+            for (let index = loopChain.length - 1; index >= 0; index -= 1) {
+                const loopStart = loopChain[index];
+                const previousLoopMode = buildingLoopBody;
+                // The input of an inner loop is evaluated in its parent loop;
+                // the outermost loop starts from the normal graph context.
+                buildingLoopBody = index > 0;
+                const arrayExpression = connectedInputExpressionFor(loopStart, 0, []);
+                expression = buildLoopMapExpression(loopStart, arrayExpression, expression);
+                buildingLoopBody = previousLoopMode;
+            }
+            return expression;
         };
 
         const payloadEntries = outputElements
             .map((element) => {
-                const loopStart = findOutputLoopStart(element);
+                const loopChain = findLoopChain(element.id).reverse();
+                const loopStart = loopChain[loopChain.length - 1] || findOutputLoopStart(element);
                 const prevLoopMode = buildingLoopBody;
                 if (loopStart) buildingLoopBody = true;
 
@@ -7583,9 +8379,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const entryKey = elementInstanceExpr ? ` nlOutEl:${element.id}` : ` nlOutTarget:${element.id}`;
                 const bodyObject = `{ ${payloadParts.join(', ')} }`;
 
-                if (loopStart && elementInstanceExpr) {
+                if (loopChain.length > 0 && (elementInstanceExpr || actionPairs.length > 0)) {
+                    return `${JSON.stringify(entryKey)}: ${buildNestedLoopMapExpression(loopChain, `(${bodyObject})`)}`;
+                }
+                if (loopStart && (elementInstanceExpr || actionPairs.length > 0)) {
                     const arrayExpr = connectedInputExpressionFor(loopStart, 0, []);
-                    return `${JSON.stringify(entryKey)}: __nodeArrayMapGraph(${arrayExpr}, ${serializeGraphFormulaLiteral(`(${bodyObject})`)})`;
+                    return `${JSON.stringify(entryKey)}: ${buildLoopMapExpression(loopStart, arrayExpr, `(${bodyObject})`)}`;
                 }
                 return `${JSON.stringify(entryKey)}: ${bodyObject}`;
             })
@@ -7616,7 +8415,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         // roots (an entry that cannot evaluate is skipped and reported by the
         // runtime, never taking the rest of the block down).
         const LOOP_AWARE_SIDE_EFFECT_TYPES: ReadonlySet<string> = new Set(['set-parent', 'clone-element', ...DEBUG_NODE_TYPES]);
-        const LOOP_CLOSING_NODE_TYPES = new Set(['array-collect', 'array-map', 'array-filter']);
+        const LOOP_CLOSING_NODE_TYPES = new Set([
+            'array-collect', 'array-first-event', 'array-event-aggregate',
+            'array-map', 'array-filter', 'array-reduce', 'array-sum', 'array-product',
+        ]);
         const findOpenLoopStart = (elementId: string, visited = new Set<string>()): CanvasElement | null => {
             if (visited.has(elementId)) return null;
             visited.add(elementId);
@@ -7624,9 +8426,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (connection.toId !== elementId) continue;
                 const source = elementMap.get(connection.fromId);
                 if (!source) continue;
-                if (source.type === 'array-for-each') return source;
-                // Collect / Map / Filter close their loop: what they output is
-                // a whole array, not a per-item value.
+                if (source.type === 'array-for-each' || source.type === 'array-for-each-context' || source.type === 'array-for-each-multi') return source;
+                // Collect / Map / Filter / Reduce / Sum / Product close their
+                // loop: what they output is an aggregate value, not a
+                // per-item value. Do not reopen the upstream loop for a debug
+                // node or Output connected after one of these nodes.
                 if (LOOP_CLOSING_NODE_TYPES.has(source.type)) continue;
                 const loopStart = findOpenLoopStart(source.id, visited);
                 if (loopStart) return loopStart;
@@ -7639,6 +8443,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 .filter((element) => SIDE_EFFECT_NODE_TYPES.has(element.type))
                 .map((element) => {
                     const entryKey = JSON.stringify(` nlSide:${element.id}`);
+                    const loopChain = findLoopChain(element.id).reverse();
+                    if (LOOP_AWARE_SIDE_EFFECT_TYPES.has(element.type) && loopChain.length > 0) {
+                        const previousLoopMode = buildingLoopBody;
+                        buildingLoopBody = true;
+                        const bodyExpression = buildNodeExpression(element, 0, depth + 1);
+                        buildingLoopBody = previousLoopMode;
+                        return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: ${buildNestedLoopMapExpression(loopChain, bodyExpression)} }`;
+                    }
                     const loopStart = LOOP_AWARE_SIDE_EFFECT_TYPES.has(element.type) ? findOpenLoopStart(element.id) : null;
                     if (loopStart) {
                         const arrayExpr = connectedInputExpressionFor(loopStart, 0, []);
@@ -7646,7 +8458,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         buildingLoopBody = true;
                         const bodyExpression = buildNodeExpression(element, 0, depth + 1);
                         buildingLoopBody = previousLoopMode;
-                        return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: __nodeArrayMapGraph(${arrayExpr}, ${serializeGraphFormulaLiteral(bodyExpression)}) }`;
+                        return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: ${buildLoopMapExpression(loopStart, arrayExpr, bodyExpression)} }`;
                     }
                     return `${entryKey}: { ${JSON.stringify('__nlSideEffect')}: true, ${JSON.stringify('value')}: ${buildNodeExpression(element, 0, depth + 1)} }`;
                 });
@@ -7672,7 +8484,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const conn = nextConnections.find((connection) => connection.toId === toId && connection.toInput === toInput);
             if (!conn) return null;
             const fromElement = elementMap.get(conn.fromId);
-            return fromElement?.valueType || null;
+            if (!fromElement) return null;
+            const outputMatch = /output(\d+)/i.exec(String(conn.fromOutput || 'output0'));
+            const outputIndex = outputMatch ? Number(outputMatch[1]) : 0;
+            // During a connection update the React `connections` closure can
+            // still contain the previous graph. Resolve For Each Multi item
+            // outputs against the incoming connection set being processed;
+            // otherwise the last newly-connected array falls back to number
+            // and cannot be wired into Element nodes.
+            if (fromElement.type === 'array-for-each-multi') {
+                const multiCount = Math.min(5, Math.max(1, Number(fromElement.data?.arrayMultiCount) || 1));
+                if (outputIndex < multiCount) {
+                    const itemInput = nextConnections.find((candidate) => candidate.toId === fromElement.id && candidate.toInput === `input${outputIndex}`);
+                    const itemSource = itemInput ? elementMap.get(itemInput.fromId) : null;
+                    if (itemSource?.type === 'get-children' && getChildrenOutputsArray(itemSource.data)) return 'element';
+                    if (itemSource?.type === 'elements-by-class' || itemSource?.type === 'clone-element') return 'element';
+                    if (itemSource?.data?.arrayItemType !== undefined) return normalizeArrayItemType(itemSource.data.arrayItemType);
+                }
+                if (outputIndex === multiCount) return 'number';
+            }
+            // Prefer the live pin resolver: a branch may carry a DOM Element
+            // even when its persisted valueType is still the old default
+            // number. Keep the stored type as a fallback for nodes whose type
+            // is not represented by a special output resolver.
+            return getOutputPinType(fromElement, outputIndex) || fromElement.valueType || null;
         };
 
         // Effective array *item* type of a source node, resolved from its
@@ -7686,7 +8521,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const ARRAY_ITEM_INHERITING_TYPES: ReadonlySet<string> = new Set([
             'array-push', 'array-pop', 'array-sort', 'array-remove-index',
             'array-replace-index', 'array-map', 'array-filter', 'array-collect',
-            'array-merge', 'array-unique', 'array-for-each',
+            'array-merge', 'array-unique', 'array-for-each', 'array-for-each-multi', 'array-sum', 'array-product',
         ]);
         const resolveSourceArrayItemType = (
             node: CanvasElement | null | undefined,
@@ -7700,8 +8535,36 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (node.type === 'elements-by-class' || node.type === 'clone-element') {
                 return 'element';
             }
+            if (node.type === 'event-processor') {
+                const payloadConnection = nextConnections.find(
+                    (connection) => connection.toId === node.id && connection.toInput === 'input1'
+                );
+                const payloadSource = payloadConnection ? elementMap.get(payloadConnection.fromId) : null;
+                return resolveSourceArrayItemType(payloadSource, seen);
+            }
             if (node.data?.arrayItemType !== undefined) {
                 return normalizeArrayItemType(node.data.arrayItemType);
+            }
+            if (node.type === 'node-branch' || node.type === 'switch-branch' || node.type === 'fallback') {
+                const valueInput = node.type === 'node-branch' ? 'input1' : 'input0';
+                const valueConnection = nextConnections.find(
+                    (connection) => connection.toId === node.id && connection.toInput === valueInput
+                );
+                return valueConnection
+                    ? resolveSourceArrayItemType(elementMap.get(valueConnection.fromId), seen)
+                    : undefined;
+            }
+            if (node.type === 'node') {
+                for (const valueInput of ['input1', 'input2']) {
+                    const valueConnection = nextConnections.find(
+                        (connection) => connection.toId === node.id && connection.toInput === valueInput
+                    );
+                    const itemType = valueConnection
+                        ? resolveSourceArrayItemType(elementMap.get(valueConnection.fromId), new Set(seen))
+                        : undefined;
+                    if (itemType) return itemType;
+                }
+                return undefined;
             }
             if (ARRAY_ITEM_INHERITING_TYPES.has(node.type)) {
                 const upstream = nextConnections.find(
@@ -7736,6 +8599,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         const selectedElement = detectedElementsRef.current.find((detected) => detected.id === el.data?.selectedElement);
                         valueType = selectedElement?.outputs?.[0]?.type || 'number';
                     }
+                    break;
+                }
+                case 'wait': {
+                    valueType = getConnectedType(el.id, 'input0') || el.valueType || 'number';
                     break;
                 }
                 case 'node-branch': {
@@ -7868,9 +8735,31 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'event-id':
                     valueType = 'event';
                     break;
+                case 'find-child': {
+                    const detectedCount = (elementChildrenDetectionsRef.current[el.id] || []).length;
+                    valueType = detectedCount > 1 ? 'array' : 'element';
+                    break;
+                }
+                case 'get-children':
+                    valueType = getChildrenOutputsArray(el.data) ? 'array' : 'element';
+                    break;
                 case 'event-processor': {
                     const payloadType = getConnectedType(el.id, 'input1');
                     valueType = payloadType || 'string';
+                    if (payloadType === 'array') {
+                        const payloadConnection = nextConnections.find(
+                            (connection) => connection.toId === el.id && connection.toInput === 'input1'
+                        );
+                        const payloadSource = payloadConnection ? elementMap.get(payloadConnection.fromId) : null;
+                        const inheritedItemType = payloadSource
+                            ? (resolveSourceArrayItemType(payloadSource) ?? normalizeArrayItemType(payloadSource.data?.arrayItemType))
+                            : undefined;
+                        nextData = {
+                            ...el.data,
+                            arrayItemType: inheritedItemType || 'number',
+                            arrayItemSchema: payloadSource ? getArrayItemSchemaFromElement(payloadSource) : [],
+                        };
+                    }
                     break;
                 }
                 case 'unzip':
@@ -8065,6 +8954,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     };
                     break;
                 }
+                case 'array-for-each-context': {
+                    const sourceConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
+                    const sourceElement = sourceConnection ? elementMap.get(sourceConnection.fromId) : null;
+                    const normalizedItemType = normalizeArrayItemType(
+                        resolveSourceArrayItemType(sourceElement)
+                        ?? sourceElement?.data?.arrayItemType
+                        ?? el.data?.arrayItemType
+                    );
+                    valueType = normalizedItemType;
+                    nextData = {
+                        ...el.data,
+                        arrayItemType: normalizedItemType,
+                        arrayItemSchema: getArrayItemSchemaFromElement(sourceElement),
+                        arrayContextMode: (el.data?.arrayContextMode || 'current') as ArrayContextMode,
+                        arrayContextBoundaryMode: el.data?.arrayContextBoundaryMode || 'empty',
+                    };
+                    break;
+                }
                 case 'image-from-link':
                 case 'image-from-element':
                     valueType = 'string';
@@ -8075,6 +8982,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'event-page-load':
                 case 'event-timer':
                 case 'event-custom':
+                case 'array-event-aggregate':
                     valueType = 'event';
                     break;
                 // New array nodes with non-array output
@@ -8082,6 +8990,24 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 case 'array-reduce':
                     valueType = el.valueType || 'number';
                     break;
+                case 'array-get-index': {
+                    const arrayConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input0');
+                    const arraySource = arrayConnection ? elementMap.get(arrayConnection.fromId) : null;
+                    valueType = getArrayItemTypeFromSource(arraySource);
+                    break;
+                }
+                case 'array-first-event': {
+                    // Infer type from Value input (input1)
+                    const valueConnection = nextConnections.find((connection) => connection.toId === el.id && connection.toInput === 'input1');
+                    const valueElement = valueConnection ? elementMap.get(valueConnection.fromId) : null;
+                    if (valueElement) {
+                        // Use the connected element's value type
+                        valueType = valueElement.valueType || 'number';
+                    } else {
+                        valueType = el.valueType || 'number';
+                    }
+                    break;
+                }
                 case 'array-contains':
                     valueType = 'boolean';
                     break;
@@ -8432,6 +9358,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connections: migrated.connections,
             formula: typeof snapshot.formula === 'string' ? snapshot.formula : '',
             customNodeUi: snapshot.customNodeUi ? normalizeCustomNodeUiState(snapshot.customNodeUi) : null,
+            groups: Array.isArray(snapshot.groups) ? snapshot.groups : [],
             updatedAt: Number.isFinite(Number(snapshot.updatedAt)) ? Number(snapshot.updatedAt) : Date.now(),
         };
     };
@@ -8524,7 +9451,15 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         elements: elementsRef.current as unknown as GraphContent['elements'],
         connections: connectionsRef.current as unknown as GraphContent['connections'],
         customNodeUi: customNodeUiRef.current ?? null,
+        groups: groupsRef.current,
     });
+
+    const updateGroups = (next: GraphGroupLike[] | ((prev: GraphGroupLike[]) => GraphGroupLike[])) => {
+        const resolved = typeof next === 'function' ? next(groupsRef.current) : next;
+        groupsRef.current = resolved;
+        setGroupsState(resolved);
+        schedulePersistRef.current('user', 'soon');
+    };
 
     const setCustomNodeUiValue = (next: CustomNodeUiState | null) => {
         customNodeUiRef.current = next;
@@ -8535,6 +9470,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (unsavedChangesRef.current === dirty) return;
         unsavedChangesRef.current = dirty;
         setUnsavedChanges(dirty);
+        if (dirty) setCompileStatus('new');
         onUnsavedChangeRef.current?.(dirty);
     };
 
@@ -8558,6 +9494,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         connections: content.connections as unknown as Connection[],
         formula: '',
         customNodeUi: (content.customNodeUi as CustomNodeUiState | null) ?? null,
+        groups: Array.isArray(content.groups) ? content.groups : [],
     }));
 
     // Emergency snapshot of the in-memory graph (page hide / crash / a WORK
@@ -8713,6 +9650,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         setConnectionsSystem(nextConnections);
         setElementsSystem(nextElements);
         setCustomNodeUiValue(normalized.customNodeUi ? normalizeCustomNodeUiState(normalized.customNodeUi) : null);
+        const loadedGroups = Array.isArray(normalized.groups) ? normalized.groups : [];
+        groupsRef.current = loadedGroups;
+        setGroupsState(loadedGroups);
         setSelected((current) => (
             current && nextElements.some((element) => element.id === current)
                 ? current
@@ -9333,6 +10273,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         return Number.isFinite(n) && n >= 0 ? n : 0;
     };
 
+    const resolveNodeOutputPreviewString = (
+        node: CanvasElement | null | undefined,
+        depth = 0
+    ): string => {
+        if (!node || depth > 12) return '';
+        if (node.type === 'constant-string') {
+            return String(node.data?.valueText ?? node.data?.value ?? '');
+        }
+        if (node.type === 'element-id') {
+            return String(node.data?.elementId || '');
+        }
+        if (node.type === 'string-trim' || node.type === 'string-upper' || node.type === 'string-lower') {
+            const input = connectionsRef.current.find(
+                (connection) => connection.toId === node.id && connection.toInput === 'input0'
+            );
+            const source = input ? elementsRef.current.find((element) => element.id === input.fromId) : null;
+            const value = resolveNodeOutputPreviewString(source, depth + 1);
+            if (node.type === 'string-upper') return value.toUpperCase();
+            if (node.type === 'string-lower') return value.toLowerCase();
+            return value.trim();
+        }
+        return String(node.data?.valueText ?? node.data?.value ?? '');
+    };
+
     // Editor-side mirror of the runtime element-resolution chain: given a node
     // and one of its output pins, return the concrete live preview Element that
     // pin represents (or null). Per-node-type dispatch, exactly like
@@ -9373,7 +10337,41 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (childIndex === null) return null;
                 return getPreviewChildAt(resolveInput0Element(), childIndex);
             }
-            case 'array-for-each': {
+            case 'find-child': {
+                if (outputIndex !== 0) return null;
+                const parent = resolveInput0Element();
+                const selectorConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === node.id && candidate.toInput === 'input1'
+                );
+                const selectorSource = selectorConnection
+                    ? elementsRef.current.find((element) => element.id === selectorConnection.fromId)
+                    : null;
+                const selector = (selectorSource
+                    ? resolveNodeOutputPreviewString(selectorSource)
+                    : String(node.data?.childSelector || '')).trim();
+                if (!parent || (!/^#[A-Za-z0-9_-]+$/.test(selector) && !/^\.[A-Za-z0-9_-]+$/.test(selector))) return null;
+                try {
+                    const matches = Array.from(parent.querySelectorAll(selector));
+                    return matches.length === 1 ? matches[0] : null;
+                } catch {
+                    return null;
+                }
+            }
+            case 'array-first-event': {
+                // The collector returns the value from input1. Preserve the
+                // concrete preview element when that value is Element-typed so
+                // Get Children can inspect its children in the editor.
+                if (outputIndex !== 0) return null;
+                const valueConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === node.id && candidate.toInput === 'input1'
+                );
+                if (!valueConnection) return null;
+                const valueSource = elementsRef.current.find((element) => element.id === valueConnection.fromId);
+                return resolveNodeOutputPreviewElement(valueSource, parsePinIndex(valueConnection.fromOutput), depth + 1);
+            }
+            case 'array-for-each':
+            case 'array-for-each-context':
+            case 'array-for-each-multi': {
                 // Editor-time representative for the loop item: the first element
                 // of the source array (best effort — runtime iterates all).
                 if (outputIndex !== 0) return null;
@@ -9406,6 +10404,30 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     }
                     return null;
                 }
+                // Array Push chain: walk back to find first element value
+                if (source.type === 'array-push') {
+                    // Try input2 first (first pushed value)
+                    let firstValueConn = connectionsRef.current.find(
+                        (candidate) => candidate.toId === source.id && candidate.toInput === 'input2'
+                    );
+                    if (firstValueConn) {
+                        const firstValueSource = elementsRef.current.find((element) => element.id === firstValueConn.fromId);
+                        const preview = resolveNodeOutputPreviewElement(
+                            firstValueSource,
+                            parsePinIndex(firstValueConn.fromOutput),
+                            depth + 1
+                        );
+                        if (preview) return preview;
+                    }
+                    // Fallback: check if input1 (Array) is connected to another push - walk chain
+                    const arrayInputConn = connectionsRef.current.find(
+                        (candidate) => candidate.toId === source.id && candidate.toInput === 'input1'
+                    );
+                    if (arrayInputConn) {
+                        const chainSource = elementsRef.current.find((element) => element.id === arrayInputConn.fromId);
+                        return resolveNodeOutputPreviewElement(chainSource, parsePinIndex(arrayInputConn.fromOutput), depth + 1);
+                    }
+                }
                 return null;
             }
             case 'raw-html': {
@@ -9416,11 +10438,41 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'clone-element':
                 // A copy looks like its source.
                 return outputIndex === 0 ? resolveInput0Element() : null;
+            case 'node': {
+                // If: the value is carried by either branch input, never by
+                // input0 (which is the boolean condition). Prefer the true
+                // branch when it has a concrete preview and fall back to the
+                // false branch for graphs whose condition is currently false.
+                const branchInputs = [1, 2];
+                for (const inputIndex of branchInputs) {
+                    const connection = connectionsRef.current.find(
+                        (candidate) => candidate.toId === node.id && candidate.toInput === `input${inputIndex}`
+                    );
+                    const source = connection ? elementsRef.current.find((element) => element.id === connection.fromId) : null;
+                    const preview = source
+                        ? resolveNodeOutputPreviewElement(source, parsePinIndex(connection?.fromOutput), depth + 1)
+                        : null;
+                    if (preview) return preview;
+                }
+                return null;
+            }
+            case 'node-branch': {
+                // If Branch input0 is the condition; its value is input1 and
+                // both output pins carry that same value conditionally.
+                const valueConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === node.id && candidate.toInput === 'input1'
+                );
+                const valueSource = valueConnection
+                    ? elementsRef.current.find((element) => element.id === valueConnection.fromId)
+                    : null;
+                return valueSource
+                    ? resolveNodeOutputPreviewElement(valueSource, parsePinIndex(valueConnection?.fromOutput), depth + 1)
+                    : null;
+            }
             case 'set-parent':
             case 'fallback':
-            case 'node-branch':
             case 'switch-branch': {
-                // Pass-through nodes that can carry an element value: follow input0.
+                // Pass-through nodes that carry an element value through input0.
                 return resolveInput0Element();
             }
             default:
@@ -9430,7 +10482,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     // Refresh detection when the editor preview DOM mutates (Gutenberg / Elementor).
     const hasElementPropertyNode = elements.some((element) => element.type === 'element-property');
-    const hasGetChildrenNode = elements.some((element) => element.type === 'get-children');
+    const hasGetChildrenNode = elements.some((element) => element.type === 'get-children' || element.type === 'find-child');
     const hasFormDataNode = elements.some((element) => element.type === 'form-data');
     const needsPreviewDetection = hasElementPropertyNode || hasGetChildrenNode || hasFormDataNode;
     useEffect(() => {
@@ -9472,7 +10524,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // Array<element> loop item from For Each. O(1): a pin-type lookup,
             // never any iteration over the runtime array. Drives only which
             // fallback property list the editor offers; runtime is untouched.
+            const sourceHasConcreteFindChild = sourceNode?.type !== 'find-child'
+                || (elementChildrenDetectionsRef.current[sourceNode.id] || []).length === 1;
             const sourceIsElementTyped = !!sourceNode
+                && sourceHasConcreteFindChild
                 && getOutputPinType(sourceNode, parsePinIndex(connection?.fromOutput ?? 'output0')) === 'element';
 
             if (!liveElement && !staticId) {
@@ -9908,6 +10963,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     {hint('Every element with ALL these classes (inside Scope, if wired). Use For Each to go through them.')}
                 </>);
             }
+            case 'find-child': {
+                const selectorWired = connectionsRef.current.some((c) => c.toId === el.id && c.toInput === 'input1');
+                return wrap(<>
+                    {!selectorWired && <ConfigFieldLabel>Selector</ConfigFieldLabel>}
+                    {!selectorWired && (
+                        <input
+                            className="input-control"
+                            value={String(el.data?.childSelector || '')}
+                            placeholder="#id or .class"
+                            onChange={(e) => update({ childSelector: e.target.value })}
+                            onClick={stop}
+                            onKeyDown={stop}
+                        />
+                    )}
+                    {hint('Searches descendants. #id returns one element; .class returns an element or Array when multiple match.')}
+                </>);
+            }
             default:
                 return null;
         }
@@ -10137,7 +11209,104 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     // Recompute detected direct children for every get-children node.
     useEffect(() => {
-        const childNodes = elementsRef.current.filter((element) => element.type === 'get-children');
+        const resolvePreviewArrayItems = (
+            source: CanvasElement | null | undefined,
+            depth = 0,
+            seen = new Set<string>()
+        ): Element[] => {
+            if (!source || depth > 12 || seen.has(source.id)) return [];
+            seen.add(source.id);
+            if (source.type === 'get-children') {
+                const parentConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === source.id && candidate.toInput === 'input0'
+                );
+                const parentSource = parentConnection
+                    ? elementsRef.current.find((element) => element.id === parentConnection.fromId)
+                    : null;
+                const parent = parentSource
+                    ? resolveNodeOutputPreviewElement(parentSource, parsePinIndex(parentConnection?.fromOutput), depth + 1)
+                    : null;
+                if (!parent) return [];
+                const children = detectElementChildren('', { element: parent }).children;
+                return children
+                    .map((child) => getPreviewChildAt(parent, child.index))
+                    .filter((child): child is Element => !!child);
+            }
+            if (source.type === 'elements-by-class') {
+                const classNames = String(source.data?.classNames || '').trim();
+                const tokens = classNames.split(/\s+/).filter((token) => /^[A-Za-z0-9_-]+$/.test(token));
+                if (!tokens.length) return [];
+                const selector = tokens.map((token) => `.${token}`).join('');
+                const scopeConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === source.id && candidate.toInput === 'input1'
+                );
+                const scopeSource = scopeConnection
+                    ? elementsRef.current.find((element) => element.id === scopeConnection.fromId)
+                    : null;
+                const scope = scopeSource
+                    ? resolveNodeOutputPreviewElement(scopeSource, parsePinIndex(scopeConnection?.fromOutput), depth + 1)
+                    : null;
+                try {
+                    const documents = scope ? [scope.ownerDocument] : getPreviewDocuments();
+                    return documents.flatMap((doc) => Array.from((scope || doc).querySelectorAll(selector)));
+                } catch {
+                    return [];
+                }
+            }
+            if (source.type === 'array-push') {
+                return connectionsRef.current
+                    .filter((candidate) => candidate.toId === source.id && getInputIndex(candidate.toInput) >= 2)
+                    .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput))
+                    .map((candidate) => {
+                        const itemSource = elementsRef.current.find((element) => element.id === candidate.fromId);
+                        return itemSource
+                            ? resolveNodeOutputPreviewElement(itemSource, parsePinIndex(candidate.fromOutput), depth + 1)
+                            : null;
+                    })
+                    .filter((item): item is Element => !!item);
+            }
+            if (source.type === 'node-branch') {
+                // input0 is the condition; the element/array value is input1.
+                const valueConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === source.id && candidate.toInput === 'input1'
+                );
+                const valueSource = valueConnection
+                    ? elementsRef.current.find((element) => element.id === valueConnection.fromId)
+                    : null;
+                return valueSource ? resolvePreviewArrayItems(valueSource, depth + 1, seen) : [];
+            }
+            if (source.type === 'node') {
+                // An If node can forward either branch. Merge both preview
+                // structures so common/partial child detection sees the union
+                // instead of inspecting the boolean condition input0.
+                const branchSources = [1, 2].map((inputIndex) => {
+                    const connection = connectionsRef.current.find(
+                        (candidate) => candidate.toId === source.id && candidate.toInput === `input${inputIndex}`
+                    );
+                    return connection ? elementsRef.current.find((element) => element.id === connection.fromId) : null;
+                }).filter((item): item is CanvasElement => !!item);
+                const merged = branchSources.flatMap((branch) => resolvePreviewArrayItems(branch, depth + 1, new Set(seen)));
+                return Array.from(new Set(merged));
+            }
+            if (source.type === 'switch-branch' || source.type === 'fallback') {
+                const valueConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === source.id && candidate.toInput === 'input0'
+                );
+                const valueSource = valueConnection
+                    ? elementsRef.current.find((element) => element.id === valueConnection.fromId)
+                    : null;
+                return valueSource ? resolvePreviewArrayItems(valueSource, depth + 1, seen) : [];
+            }
+            const arrayConnection = connectionsRef.current.find(
+                (candidate) => candidate.toId === source.id && candidate.toInput === 'input0'
+            );
+            const upstream = arrayConnection
+                ? elementsRef.current.find((element) => element.id === arrayConnection.fromId)
+                : null;
+            return upstream ? resolvePreviewArrayItems(upstream, depth + 1, seen) : [];
+        };
+
+        const childNodes = elementsRef.current.filter((element) => element.type === 'get-children' || element.type === 'find-child');
         const nextDetections: Record<string, DetectedChild[]> = {};
 
         childNodes.forEach((node) => {
@@ -10148,6 +11317,50 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 ? elementsRef.current.find((element) => element.id === connection.fromId)
                 : null;
             const targetId = resolveElementRefTargetId(refNode);
+            if (node.type === 'find-child') {
+                const selectorConnection = connectionsRef.current.find(
+                    (candidate) => candidate.toId === node.id && candidate.toInput === 'input1'
+                );
+                const selectorSource = selectorConnection
+                    ? elementsRef.current.find((element) => element.id === selectorConnection.fromId)
+                    : null;
+                const selector = (selectorSource
+                    ? resolveNodeOutputPreviewString(selectorSource)
+                    : String(node.data?.childSelector || '')).trim();
+                const previewElement = targetId
+                    ? resolvePreviewElement(targetId, { unwrapControl: false })
+                    : (connection ? resolveNodeOutputPreviewElement(refNode, parsePinIndex(connection.fromOutput)) : null);
+                const resolvedArrayParents = refNode ? resolvePreviewArrayItems(refNode) : [];
+                const previewParents = resolvedArrayParents.length > 0
+                    ? resolvedArrayParents
+                    : (previewElement ? [previewElement] : []);
+                let matches: Element[] = [];
+                if (/^#[A-Za-z0-9_-]+$/.test(selector) || /^\.[A-Za-z0-9_-]+$/.test(selector)) {
+                    previewParents.forEach((parent) => {
+                        try {
+                            const current = Array.from(parent.querySelectorAll(selector));
+                            // Keep a representative result from the parent with
+                            // the most matches. This handles common/partial
+                            // For Each inputs without falsely turning one
+                            // per-item element into Array<Element>.
+                            if (current.length > matches.length) matches = current;
+                        } catch { /* invalid selector */ }
+                    });
+                }
+                nextDetections[node.id] = matches.filter((match) => match.nodeType === 1).map((child, index) => {
+                    const tag = (child.tagName || '').toLowerCase();
+                    const id = typeof child.id === 'string' ? child.id : '';
+                    const className = typeof child.className === 'string'
+                        ? child.className.trim().split(/\s+/).filter(Boolean).map((name) => `.${name}`).join('')
+                        : '';
+                    const classes = typeof child.className === 'string'
+                        ? child.className.trim().split(/\s+/).filter(Boolean)
+                        : [];
+                    const lastClass = classes[classes.length - 1] || '';
+                    return { index, tag, id, className, classes, label: `${index}: ${tag || 'element'}${id ? `#${id}` : ''}${lastClass ? `.${lastClass}` : ''}` };
+                });
+                return;
+            }
             if (!targetId) {
                 // Not an element-ref: resolve whatever element the wired pin
                 // carries (Raw HTML's own structure, a clone's source, ...).
@@ -10206,9 +11419,46 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     }, []);
 
     // ── Keyboard shortcuts (Undo / Redo / Delete) ──────────────────────────
-    const keyboardActionsRef = useRef({ undo: () => {}, redo: () => {}, remove: (_id: string) => {} });
+    useEffect(() => {
+        // The graph editor is opened from a selected Elementor widget or
+        // Gutenberg block. Clear the host selection and focus so Ctrl+D is
+        // handled by this editor instead of duplicating the page element.
+        try {
+            const hostWindow = window as any;
+            const selection = hostWindow.elementor?.selection;
+            if (selection) {
+                if (typeof selection.clear === 'function') selection.clear();
+                else if (typeof selection.deselect === 'function') selection.deselect();
+            }
+            const blockDispatch = hostWindow.wp?.data?.dispatch?.('core/block-editor');
+            if (typeof blockDispatch?.clearSelectedBlock === 'function') blockDispatch.clearSelectedBlock();
+            else if (typeof blockDispatch?.selectBlock === 'function') blockDispatch.selectBlock(null);
+            (document.activeElement as HTMLElement | null)?.blur?.();
+            editorRootRef.current?.focus?.();
+        } catch {
+            // Host selection APIs differ between Elementor/Gutenberg versions.
+        }
+    }, []);
+
+    const keyboardActionsRef = useRef({ undo: () => {}, redo: () => {}, remove: (_id: string) => {}, copy: () => {}, paste: () => {}, duplicate: () => {} });
     // Lambdas: handleDelete is declared further down (render-time TDZ).
-    keyboardActionsRef.current = { undo: () => handleUndo(), redo: () => handleRedo(), remove: (id: string) => handleDelete(id) };
+    keyboardActionsRef.current = {
+        undo: () => handleUndo(),
+        redo: () => handleRedo(),
+        remove: (id: string) => handleDelete(id),
+        copy: () => { void copySelected(); },
+        paste: () => { void navigator.clipboard?.readText().then((text) => {
+            try {
+                const parsed = JSON.parse(text);
+                if (parsed?.kind === 'nodelogic-graph-selection') {
+                    pasteSelection({ elements: parsed.elements || [], connections: parsed.connections || [] });
+                    return;
+                }
+            } catch { /* use internal clipboard */ }
+            pasteSelection();
+        }).catch(() => pasteSelection()); },
+        duplicate: () => duplicateSelected(),
+    };
     const blockingDialogOpenRef = useRef(false);
     blockingDialogOpenRef.current = Boolean(startupConflict || recoveryQueue.length > 0 || persistenceDialog);
     useEffect(() => {
@@ -10231,21 +11481,49 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             if (ctrl && !e.shiftKey && e.key.toLowerCase() === 'z') {
                 e.preventDefault();
+                e.stopPropagation();
                 keyboardActionsRef.current.undo();
                 return;
             }
             if (ctrl && (e.shiftKey && e.key.toLowerCase() === 'z') || (ctrl && e.key.toLowerCase() === 'y')) {
                 e.preventDefault();
+                e.stopPropagation();
                 keyboardActionsRef.current.redo();
                 return;
             }
-            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedRef.current && selectedRef.current !== 'main-block') {
+            if (ctrl && e.key.toLowerCase() === 'c') {
                 e.preventDefault();
-                keyboardActionsRef.current.remove(selectedRef.current);
+                e.stopPropagation();
+                keyboardActionsRef.current.copy();
+                return;
+            }
+            if (ctrl && e.key.toLowerCase() === 'v') {
+                e.preventDefault();
+                e.stopPropagation();
+                keyboardActionsRef.current.paste();
+                return;
+            }
+            if (ctrl && e.key.toLowerCase() === 'd') {
+                e.preventDefault();
+                e.stopPropagation();
+                keyboardActionsRef.current.duplicate();
+                return;
+            }
+            if (ctrl && e.key.toLowerCase() === 'x') {
+                e.preventDefault();
+                if (selectedIdsRef.current.size > 0 && window.confirm('Delete the selected nodes?')) {
+                    handleDeleteMany(selectedEditableIds());
+                }
+                return;
+            }
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIdsRef.current.size > 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (window.confirm('Delete the selected nodes?')) handleDeleteMany(selectedEditableIds());
             }
         };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
+        window.addEventListener('keydown', handleKeyDown, true);
+        return () => window.removeEventListener('keydown', handleKeyDown, true);
     }, []);
     // ───────────────────────────────────────────────────────────────────────
 
@@ -10255,6 +11533,52 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
      * MAIN locally -> host commits MAIN + HISTORY in one update -> adopt.
      * Any failure before the commit leaves MAIN, HISTORY and WORK untouched.
      */
+    const handleCompile = async () => {
+        if (!persistenceEnabled || !onCompileRef.current) return;
+        if (startupConflict || hasDynamicInputGapErrors || dbPendingSignCount > 0 || hasUnsignedDbChanges()) {
+            setCompileStatus('error');
+            setTemplateInfo('Compile blocked: resolve the graph validation errors first.');
+            return;
+        }
+
+        const content = currentWorkContent();
+        const structure = validateGraphContent(content, { strict: true });
+        if (!structure.ok) {
+            setCompileStatus('error');
+            setTemplateInfo(`Compile blocked: ${structure.errors[0] || 'invalid graph structure'}`);
+            return;
+        }
+
+        let compiledFormula = '';
+        try {
+            compiledFormula = buildGraphFormulaFromState(elementsRef.current, connectionsRef.current) || '';
+        } catch (error) {
+            setCompileStatus('error');
+            setTemplateInfo(`Compile failed: ${(error as Error)?.message || String(error)}`);
+            return;
+        }
+
+        const now = Date.now();
+        const state: SavedState = {
+            elements: cloneCanvasElements(elementsRef.current),
+            connections: cloneConnections(connectionsRef.current),
+            formula: compiledFormula,
+            customNodeUi: customNodeUiRef.current ? normalizeCustomNodeUiState(customNodeUiRef.current) : null,
+            groups: groupsRef.current,
+            updatedAt: now,
+            formatVersion: GRAPH_FORMAT_VERSION,
+        };
+        try {
+            const accepted = await onCompileRef.current({ state, history: historyEntriesRef.current, historyLimit });
+            if (accepted === false) throw new Error('The server rejected the compiled graph.');
+            setCompileStatus('compiled');
+            setTemplateInfo('Graph compiled on the server.');
+        } catch (error) {
+            setCompileStatus('error');
+            setTemplateInfo(`Compile failed: ${(error as Error)?.message || String(error)}`);
+        }
+    };
+
     const handlePublish = () => {
         if (!persistenceEnabled) return;
         if (startupConflict) {
@@ -10317,6 +11641,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             connections: cloneConnections(connectionsRef.current),
             formula: nextFormula,
             customNodeUi: customNodeUiRef.current ? normalizeCustomNodeUiState(customNodeUiRef.current) : null,
+            groups: groupsRef.current,
             updatedAt: now,
             formatVersion: GRAPH_FORMAT_VERSION,
             revision: plan.revision,
@@ -10797,6 +12122,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { passOnlyOnEvent: true };
             case 'fallback-event':
                 return { fallbackEventValue: '', fallbackEventDurationMs: 3000 };
+            case 'wait':
+                return {};
             case 'raw-html':
                 return { rawHtml: '<div class="nl-card">\n  <h3>Title</h3>\n  <p style="color: #334155">Text</p>\n</div>', rawHtmlSlots: [] };
             case 'set-parent':
@@ -10805,6 +12132,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return { clonePlacement: 'after' };
             case 'elements-by-class':
                 return { classNames: '' };
+            case 'find-child':
+                return { childSelector: '' };
             case 'debug-console-log':
             case 'debug-console-warn':
             case 'debug-message-log':
@@ -10848,6 +12177,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             case 'array-contains':
             case 'array-length':
                 return { arrayItemType: 'number', arrayItemSchema: [] };
+            case 'array-for-each-context':
+                return { arrayItemType: 'number', arrayItemSchema: [], arrayContextMode: 'current', arrayContextBoundaryMode: 'empty' };
+            case 'array-for-each-multi':
+                return { arrayItemType: 'number', arrayItemSchema: [], arrayMultiCount: 2 };
             case 'array-reduce':
                 return { arrayItemType: 'number', arrayItemSchema: [], arrayReduceOperation: 'sum' as const, arrayReduceInitial: '0' };
             default:
@@ -10855,27 +12188,176 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
     };
 
-    const handleDelete = (elementId: string) => {
-        if (elementId === 'main-block') {
-            return;
-        }
+    const handleDeleteMany = (elementIds: string[]) => {
+        const ids = new Set(elementIds.filter((id) => id && id !== 'main-block'));
+        if (ids.size === 0) return;
         // One undo step: both mutations below run in the same tick.
         // Drop the node's wires first, then recompute downstream value types
         // against the post-delete connection set — matching every other mutation
         // path so a node that fed a now-deleted source doesn't keep a stale type.
         const nextConnections = (connectionsRef.current || []).filter(
-            (connection) => connection.fromId !== elementId && connection.toId !== elementId
+            (connection) => !ids.has(connection.fromId) && !ids.has(connection.toId)
         );
         setConnections(nextConnections);
         setElements((prev) =>
-            updateElementValueTypes(prev.filter((element) => element.id !== elementId), nextConnections)
+            updateElementValueTypes(prev.filter((element) => !ids.has(element.id)), nextConnections)
         );
-        if (selectedRef.current === elementId) {
-            const fallback = (elementsRef.current || []).find(
-                (element) => element.id !== elementId && element.id !== 'main-block'
-            );
-            setSelected(fallback ? fallback.id : null);
+        updateGroups((prev) => prev
+            .map((group) => ({ ...group, memberIds: group.memberIds.filter((id) => !ids.has(id)) }))
+            .filter((group) => group.memberIds.length > 0));
+        const remaining = (elementsRef.current || []).find((element) => !ids.has(element.id) && element.id !== 'main-block');
+        setSelected(remaining ? remaining.id : null);
+        setSelectedIds(new Set(remaining ? [remaining.id] : []));
+    };
+
+    const handleDelete = (elementId: string) => handleDeleteMany([elementId]);
+
+    const setSelection = (ids: string[], primary = ids[ids.length - 1] || null) => {
+        const next = new Set(ids.filter(Boolean));
+        selectedIdsRef.current = next;
+        setSelectedIds(next);
+        setSelected(primary);
+    };
+
+    const selectedEditableIds = () => Array.from(selectedIdsRef.current).filter((id) => id !== 'main-block');
+
+    const graphClipboardRef = useRef<{ elements: CanvasElement[]; connections: Connection[] } | null>(null);
+    const copySelected = async () => {
+        const ids = new Set(selectedEditableIds());
+        if (!ids.size) return;
+        const copiedElements = elementsRef.current.filter((element) => ids.has(element.id));
+        const copiedConnections = connectionsRef.current.filter((connection) => ids.has(connection.fromId) && ids.has(connection.toId));
+        graphClipboardRef.current = { elements: copiedElements, connections: copiedConnections };
+        try {
+            await navigator.clipboard?.writeText(JSON.stringify({
+                kind: 'nodelogic-graph-selection',
+                elements: copiedElements,
+                connections: copiedConnections,
+            }));
+        } catch { /* internal clipboard remains available */ }
+        showInfoNotice(`${copiedElements.length} node${copiedElements.length === 1 ? '' : 's'} copied.`);
+    };
+
+    const pasteSelection = (payload = graphClipboardRef.current) => {
+        if (!payload || payload.elements.length === 0) return;
+        const canvasRect = canvasRef.current?.getBoundingClientRect();
+        const cursorWorld = canvasRect
+            ? { x: (lastCanvasPointRef.current.x - canvasRect.left - offsetXRef.current) / zoomRef.current, y: (lastCanvasPointRef.current.y - canvasRect.top - offsetYRef.current) / zoomRef.current }
+            : null;
+        const minX = Math.min(...payload.elements.map((element) => element.x));
+        const minY = Math.min(...payload.elements.map((element) => element.y));
+        const pasteDx = cursorWorld ? cursorWorld.x - minX : 32;
+        const pasteDy = cursorWorld ? cursorWorld.y - minY : 32;
+        const idMap = new Map<string, string>();
+        const pastedElements = payload.elements.map((element) => {
+            const nextId = makeLocalId();
+            idMap.set(element.id, nextId);
+            return {
+                ...element,
+                id: nextId,
+                name: element.name,
+                x: element.x + pasteDx,
+                y: element.y + pasteDy,
+                data: element.data ? JSON.parse(JSON.stringify(element.data)) : {},
+            };
+        });
+        const pastedConnections = payload.connections
+            .map((connection) => {
+                const fromId = idMap.get(connection.fromId);
+                const toId = idMap.get(connection.toId);
+                return fromId && toId ? { ...connection, id: makeLocalId(), fromId, toId } : null;
+            })
+            .filter(Boolean) as Connection[];
+        const nextElements = updateElementValueTypes([...elementsRef.current, ...pastedElements], [...connectionsRef.current, ...pastedConnections]);
+        setConnections([...connectionsRef.current, ...pastedConnections]);
+        setElements(nextElements);
+        setSelection(pastedElements.map((element) => element.id), pastedElements[pastedElements.length - 1]?.id || null);
+        graphClipboardRef.current = { elements: pastedElements, connections: pastedConnections };
+    };
+
+    const duplicateSelected = () => pasteSelection((() => {
+        const ids = new Set(selectedEditableIds());
+        return {
+            elements: elementsRef.current.filter((element) => ids.has(element.id)),
+            connections: connectionsRef.current.filter((connection) => ids.has(connection.fromId) && ids.has(connection.toId)),
+        };
+    })());
+
+    const createGroupFromSelection = () => {
+        const memberIds = selectedEditableIds();
+        if (!memberIds.length) {
+            showInfoNotice('Select at least one node first.');
+            return;
         }
+        const name = window.prompt('Group name', `Group ${groupsRef.current.length + 1}`)?.trim();
+        if (!name) return;
+        const description = window.prompt('Group description (optional)', '') || '';
+        updateGroups((prev) => [...prev, {
+            id: `group-${makeLocalId()}`,
+            name,
+            description,
+            color: '#38bdf8',
+            visible: true,
+            showTerrain: true,
+            memberIds,
+        }]);
+    };
+
+    const boundsForMemberIds = (memberIds: string[], delta: { deltaX: number; deltaY: number } | null = null) => {
+        const members = elements.filter((element) => memberIds.includes(element.id));
+        if (!members.length) return null;
+        const activeDragIds = elementDragRef.current?.elementIds || [];
+        const positions = members.map((element) => ({
+            element,
+            x: element.x + (delta && (selectedIds.has(element.id) || activeDragIds.includes(element.id)) ? delta.deltaX : 0),
+            y: element.y + (delta && (selectedIds.has(element.id) || activeDragIds.includes(element.id)) ? delta.deltaY : 0),
+        }));
+        const left = Math.min(...positions.map(({ x }) => x)) - 28;
+        const top = Math.min(...positions.map(({ y }) => y)) - 46;
+        const right = Math.max(...positions.map(({ element, x }) => x + getNodeWidth(element))) + 28;
+        const bottom = Math.max(...positions.map(({ element, y }) => y + getNodeHeight(element))) + 28;
+        return { left, top, width: Math.max(80, right - left), height: Math.max(60, bottom - top) };
+    };
+
+    const groupBounds = (group: GraphGroupLike) => boundsForMemberIds(group.memberIds);
+
+    const goToGroup = (group: GraphGroupLike) => {
+        const bounds = groupBounds(group);
+        const canvasRect = canvasRef.current?.getBoundingClientRect();
+        if (!bounds || !canvasRect) return;
+
+        setOffsetX((canvasRect.width / 2) - ((bounds.left + (bounds.width / 2)) * zoom));
+        setOffsetY((canvasRect.height / 2) - ((bounds.top + (bounds.height / 2)) * zoom));
+    };
+
+    const finishSelectionGesture = (points: Array<{ x: number; y: number }>) => {
+        const canvasRect = canvasRef.current?.getBoundingClientRect();
+        if (!canvasRect || points.length < 2) return;
+        const insidePolygon = (x: number, y: number) => {
+            let inside = false;
+            for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                const a = points[i];
+                const b = points[j];
+                const crosses = (a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / ((b.y - a.y) || 1e-9) + a.x;
+                if (crosses) inside = !inside;
+            }
+            return inside;
+        };
+        const minX = Math.min(...points.map((point) => point.x));
+        const maxX = Math.max(...points.map((point) => point.x));
+        const minY = Math.min(...points.map((point) => point.y));
+        const maxY = Math.max(...points.map((point) => point.y));
+        const ids = elements
+            .filter((element) => element.id !== 'main-block')
+            .filter((element) => {
+                const centerX = canvasRect.left + offsetX + (element.x + (getNodeWidth(element) / 2)) * zoom;
+                const centerY = canvasRect.top + offsetY + (element.y + (getNodeHeight(element) / 2)) * zoom;
+                return selectionGesture?.type === 'lasso'
+                    ? insidePolygon(centerX, centerY)
+                    : centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY;
+            })
+            .map((element) => element.id);
+        setSelection(ids, ids[ids.length - 1] || null);
     };
 
     // A text selection left over from a drag that started on text (sidebar,
@@ -10921,17 +12403,35 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 return;
             }
 
-            setSelected(elementId);
+            const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+            const currentIds = selectedIdsRef.current;
+            // A selected node is the handle for the whole temporary
+            // selection. Clicking it without a modifier must not collapse
+            // the selection to one node before the drag starts.
+            const dragExistingSelection = !additive && currentIds.size > 1 && currentIds.has(elementId);
+            const nextIds = dragExistingSelection
+                ? new Set(currentIds)
+                : additive
+                ? (currentIds.has(elementId)
+                    ? new Set(Array.from(currentIds).filter((id) => id !== elementId))
+                    : new Set([...currentIds, elementId]))
+                : new Set([elementId]);
+            if (!nextIds.size) nextIds.add(elementId);
+            setSelection(Array.from(nextIds), elementId);
             setIsClick(true);
             setIsDraggingCanvasElement(true);
             isDraggingCanvasElementRef.current = true;
             setDraggedElementId(elementId);
             elementDragRef.current = {
                 elementId,
+                elementIds: Array.from(nextIds),
                 startX: event.clientX,
                 startY: event.clientY,
-                elementX: element.x,
-                elementY: element.y
+                positions: Object.fromEntries(
+                    elementsRef.current
+                        .filter((item) => nextIds.has(item.id))
+                        .map((item) => [item.id, { x: item.x, y: item.y }])
+                )
             };
             const nextDragDelta = { elementId, deltaX: 0, deltaY: 0 };
             dragElementDeltaRef.current = nextDragDelta;
@@ -10939,10 +12439,18 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return;
         }
 
+        if (selectionTool) {
+            setSelectionGesture({ type: selectionTool, points: [{ x: event.clientX, y: event.clientY }] });
+            setIsPanning(false);
+            isPanningRef.current = false;
+            setSelected(null);
+            return;
+        }
+
         setIsPanning(true);
         isPanningRef.current = true;
         setIsClick(true);
-        setSelected(null);
+        setSelection([]);
         lastPanPointRef.current = { x: event.clientX, y: event.clientY };
     };
 
@@ -10962,7 +12470,13 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         }
 
         const nextPoint = { x: event.clientX, y: event.clientY };
+        lastCanvasPointRef.current = nextPoint;
         pendingCanvasMouseRef.current = nextPoint;
+
+        if (selectionGesture) {
+            setSelectionGesture((current) => current ? { ...current, points: [...current.points, nextPoint] } : current);
+            return;
+        }
 
         if (draggedItemRef.current && isDraggingFromSidebarRef.current) {
             const drag = sidebarDragRef.current;
@@ -11054,16 +12568,26 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const handleMouseUp = (event: React.MouseEvent<HTMLElement>) => {
         const nextPoint = { x: event.clientX, y: event.clientY };
 
+        if (selectionGesture) {
+            const finalPoints = [...selectionGesture.points, nextPoint];
+            finishSelectionGesture(finalPoints);
+            setSelectionGesture(null);
+            // Selection tools are one-shot. Keeping lasso active made the
+            // next press on a selected node start another gesture.
+            setSelectionTool(null);
+            pendingCanvasMouseRef.current = nextPoint;
+            return;
+        }
+
         if (isDraggingCanvasElementRef.current && elementDragRef.current) {
             const drag = elementDragRef.current;
             const dx = (event.clientX - drag.startX) / zoomRef.current;
             const dy = (event.clientY - drag.startY) / zoomRef.current;
             if (dx !== 0 || dy !== 0) {
-                setElements((prev) => prev.map((element) => (
-                    element.id === drag.elementId
-                        ? { ...element, x: drag.elementX + dx, y: drag.elementY + dy }
-                        : element
-                )));
+                setElements((prev) => prev.map((element) => {
+                    const start = drag.positions[element.id];
+                    return start ? { ...element, x: start.x + dx, y: start.y + dy } : element;
+                }));
             }
             setDragElementDelta(null);
             dragElementDeltaRef.current = null;
@@ -11119,6 +12643,26 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const sourceValueType = getOutputPinType(sourceElement, sourcePinIndex);
                 const targetAcceptedTypes = getAcceptedTypesForPin(destinationElement, destinationPinIndex);
 
+                // Validate case-default connections to switch/switch-branch
+                if (sourceElement.type === 'case-default' && (destinationElement.type === 'switch' || destinationElement.type === 'switch-branch')) {
+                    // case-default can only connect to the last available case slot
+                    const existingCaseConnections = connectionsRef.current
+                        .filter(c => c.toId === destinationElementId && c.toInput.startsWith('input') && getInputIndex(c.toInput) >= (destinationElement.type === 'switch' ? 1 : 2))
+                        .sort((a, b) => getInputIndex(a.toInput) - getInputIndex(b.toInput));
+                    
+                    const lastOccupiedIndex = existingCaseConnections.length > 0 
+                        ? Math.max(...existingCaseConnections.map(c => getInputIndex(c.toInput)))
+                        : (destinationElement.type === 'switch' ? 0 : 1);
+                    
+                    const expectedNextIndex = lastOccupiedIndex + 1;
+                    
+                    if (destinationPinIndex !== expectedNextIndex) {
+                        showInfoNotice('Case Default can only connect to the last available case slot.');
+                        clearConnectionDrag(false);
+                        return;
+                    }
+                }
+
                 if (arePinTypesCompatible(sourceValueType, targetAcceptedTypes)) {
                     const nextConnections = connectionsRef.current.filter((connection) => (
                         connection.toId !== destinationElementId || connection.toInput !== `input${destinationPinIndex}`
@@ -11162,6 +12706,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         <div
             className="graph-editor"
             ref={editorRootRef}
+            tabIndex={-1}
             onDragStart={(event) => {
                 const target = event.target as HTMLElement | null;
                 if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
@@ -11356,6 +12901,49 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     {floatingNotice}
                 </div>
             )}
+            <div className="nl-toolbox open">
+                    <div className="nl-toolbox-panel">
+                        <div className="nl-graph-title">Logic Graph Editor</div>
+                        <button type="button" title="Copy selected nodes (Ctrl+C)" aria-label="Copy selected nodes" onClick={() => { void copySelected(); }}>⧉<kbd>Ctrl+C</kbd></button>
+                        <button type="button" title="Paste nodes at cursor (Ctrl+V)" aria-label="Paste nodes" onClick={() => pasteSelection()}>▣<kbd>Ctrl+V</kbd></button>
+                        <button type="button" title="Duplicate selected nodes (Ctrl+D)" aria-label="Duplicate selected nodes" onClick={duplicateSelected}>⧇<kbd>Ctrl+D</kbd></button>
+                        <button type="button" onClick={() => {
+                            if (selectedIdsRef.current.size && window.confirm('Delete the selected nodes?')) handleDeleteMany(selectedEditableIds());
+                        }}>⌫<kbd>Ctrl+X</kbd></button>
+                        <button type="button" title="Box select" aria-label="Box select" className={selectionTool === 'box' ? 'active' : ''} onClick={() => setSelectionTool((tool) => tool === 'box' ? null : 'box')}>□</button>
+                        <button type="button" title="Lasso select" aria-label="Lasso select" className={selectionTool === 'lasso' ? 'active' : ''} onClick={() => setSelectionTool((tool) => tool === 'lasso' ? null : 'lasso')}>⌁</button>
+                        <button type="button" title="Select and move a whole group" aria-label="Group select" className={selectionTool === 'group' ? 'active' : ''} onClick={() => setSelectionTool((tool) => tool === 'group' ? null : 'group')}>◉</button>
+                        <button type="button" title="Create group from selected nodes" aria-label="Create group" onClick={createGroupFromSelection}>◎</button>
+                        <button type="button" title="Groups" aria-label="Groups" className={groupPanelOpen ? 'active' : ''} onClick={() => setGroupPanelOpen((open) => !open)}>☷</button>
+                        {onRequestClose && <button type="button" className="nl-toolbox-close" title="Close graph editor" aria-label="Close graph editor" onClick={onRequestClose}>×</button>}
+                        {groupPanelOpen && !selectedGroupId && (
+                            <div className="nl-group-list">
+                                <div className="nl-group-list-title">Groups</div>
+                                {groups.length === 0 && <div className="nl-group-empty">No groups yet</div>}
+                                {groups.map((group) => (
+                                    <button type="button" key={group.id} onClick={() => setSelectedGroupId(group.id)}>
+                                        <span className="nl-group-dot" style={{ background: group.color || '#38bdf8' }} />{group.name}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        {groupPanelOpen && selectedGroupId && (() => {
+                            const group = groups.find((item) => item.id === selectedGroupId);
+                            if (!group) return null;
+                            return (
+                                <div className="nl-group-settings">
+                                    <div className="nl-group-settings-head"><span>Group settings</span><button type="button" onClick={() => setSelectedGroupId(null)}>×</button></div>
+                                    <input value={group.name} onChange={(event) => updateGroups((prev) => prev.map((item) => item.id === group.id ? { ...item, name: event.target.value } : item))} />
+                                    <textarea value={group.description || ''} placeholder="Description" onChange={(event) => updateGroups((prev) => prev.map((item) => item.id === group.id ? { ...item, description: event.target.value } : item))} />
+                                    <label><input type="color" value={group.color || '#38bdf8'} onChange={(event) => updateGroups((prev) => prev.map((item) => item.id === group.id ? { ...item, color: event.target.value } : item))} /> Terrain color</label>
+                                    <label><input type="checkbox" checked={group.visible !== false} onChange={(event) => updateGroups((prev) => prev.map((item) => item.id === group.id ? { ...item, visible: event.target.checked } : item))} /> Show group</label>
+                                    <button type="button" className="nl-group-go-to" onClick={() => goToGroup(group)}>Go to</button>
+                                    <button type="button" onClick={() => { updateGroups((prev) => prev.filter((item) => item.id !== group.id)); setSelectedGroupId(null); }}>Remove group</button>
+                                </div>
+                            );
+                        })()}
+                    </div>
+            </div>
             <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
                 <button className="toggle-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
                     {sidebarOpen ? '\u25C0' : '\u25B6'}
@@ -11403,6 +12991,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                     title={hasDynamicInputGapErrors ? 'Fix dynamic input gaps before saving.' : 'Save the working copy to the block (publishes it to the page when the page is updated)'}
                                 >
                                     Save Graph
+                                </button>
+                            )}
+                            {!templateMode && !customNodeMode && onCompile && (
+                                <button
+                                    onClick={() => { void handleCompile(); }}
+                                    disabled={Boolean(startupConflict || hasDynamicInputGapErrors)}
+                                    style={{ ...buttonStyle, marginTop: '6px', backgroundColor: compileStatus === 'compiled' ? '#15803d' : compileStatus === 'error' ? '#b91c1c' : '#2563eb' }}
+                                    title="Validate and compile this graph into the server-side runtime artifact"
+                                >
+                                    {compileStatus === 'compiled' ? '✓ Compiled' : compileStatus === 'new' ? 'Compile changes' : compileStatus === 'error' ? 'Compile failed' : 'Compile Graph'}
                                 </button>
                             )}
 
@@ -12191,6 +13789,91 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         overflow: 'hidden'
                     }}
                 >
+                    {selectionGesture && canvasRef.current && (() => {
+                        const rect = canvasRef.current.getBoundingClientRect();
+                        const local = selectionGesture.points.map((point) => `${point.x - rect.left},${point.y - rect.top}`).join(' ');
+                        const box = selectionGesture.type === 'box'
+                            ? { x: Math.min(...selectionGesture.points.map((point) => point.x)) - rect.left, y: Math.min(...selectionGesture.points.map((point) => point.y)) - rect.top, width: Math.abs(selectionGesture.points[selectionGesture.points.length - 1].x - selectionGesture.points[0].x), height: Math.abs(selectionGesture.points[selectionGesture.points.length - 1].y - selectionGesture.points[0].y) }
+                            : null;
+                        return (
+                            <svg className="nl-selection-overlay" width="100%" height="100%">
+                                {box ? <rect x={box.x} y={box.y} width={box.width} height={box.height} /> : <polyline points={local} />}
+                            </svg>
+                        );
+                    })()}
+                    {selectedIds.size > 1 && (() => {
+                        const memberIds = Array.from(selectedIds).filter((id) => id !== 'main-block');
+                        const bounds = boundsForMemberIds(memberIds, dragElementDelta);
+                        if (!bounds) return null;
+                        return (
+                            <div
+                                className="nl-selection-terrain"
+                                style={{
+                                    left: `${bounds.left * zoom + offsetX}px`,
+                                    top: `${bounds.top * zoom + offsetY}px`,
+                                    width: `${bounds.width * zoom}px`,
+                                    height: `${bounds.height * zoom}px`,
+                                    pointerEvents: 'auto',
+                                }}
+                                aria-hidden="true"
+                                onMouseDown={(event) => {
+                                    const memberIds = Array.from(selectedIds).filter((id) => id !== 'main-block');
+                                    if (event.button !== 0 || memberIds.length < 2) return;
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    const positions = Object.fromEntries(
+                                        elementsRef.current
+                                            .filter((element) => memberIds.includes(element.id))
+                                            .map((element) => [element.id, { x: element.x, y: element.y }])
+                                    );
+                                    const primaryId = memberIds[memberIds.length - 1] || '';
+                                    setSelection(memberIds, primaryId || null);
+                                    setIsDraggingCanvasElement(true);
+                                    isDraggingCanvasElementRef.current = true;
+                                    setDraggedElementId(primaryId || null);
+                                    elementDragRef.current = {
+                                        elementId: primaryId,
+                                        elementIds: memberIds,
+                                        startX: event.clientX,
+                                        startY: event.clientY,
+                                        positions,
+                                    };
+                                    const nextDragDelta = { elementId: primaryId, deltaX: 0, deltaY: 0 };
+                                    dragElementDeltaRef.current = nextDragDelta;
+                                    setDragElementDelta(nextDragDelta);
+                                }}
+                            />
+                        );
+                    })()}
+                    {groups.filter((group) => group.visible !== false).map((group) => {
+                        const groupIsMoving = group.memberIds.some((id) => selectedIds.has(id));
+                        const bounds = boundsForMemberIds(group.memberIds, groupIsMoving ? dragElementDelta : null);
+                        if (!bounds) return null;
+                        return (
+                            <div
+                                key={`terrain-${group.id}`}
+                                className="nl-group-terrain"
+                                style={{ left: `${bounds.left * zoom + offsetX}px`, top: `${bounds.top * zoom + offsetY}px`, width: `${bounds.width * zoom}px`, height: `${bounds.height * zoom}px`, borderColor: group.color || '#38bdf8', background: `${group.color || '#38bdf8'}18`, boxShadow: `0 0 0 2px ${group.color || '#38bdf8'}35, 0 0 26px ${group.color || '#38bdf8'}18`, pointerEvents: selectionTool === 'group' ? 'auto' : 'none' }}
+                                title={group.description || group.name}
+                                onMouseDown={(event) => {
+                                    if (selectionTool !== 'group') return;
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    const memberIds = group.memberIds.filter((id) => elementsRef.current.some((element) => element.id === id));
+                                    const positions = Object.fromEntries(elementsRef.current.filter((element) => memberIds.includes(element.id)).map((element) => [element.id, { x: element.x, y: element.y }]));
+                                    setSelection(memberIds, memberIds[memberIds.length - 1] || null);
+                                    setIsDraggingCanvasElement(true);
+                                    isDraggingCanvasElementRef.current = true;
+                                    setDraggedElementId(memberIds[memberIds.length - 1] || null);
+                                    elementDragRef.current = { elementId: memberIds[memberIds.length - 1] || '', elementIds: memberIds, startX: event.clientX, startY: event.clientY, positions };
+                                    dragElementDeltaRef.current = { elementId: memberIds[memberIds.length - 1] || '', deltaX: 0, deltaY: 0 };
+                                    setDragElementDelta({ elementId: memberIds[memberIds.length - 1] || '', deltaX: 0, deltaY: 0 });
+                                }}
+                            >
+                                <span style={{ color: group.color || '#38bdf8' }}>{group.name}</span>
+                            </div>
+                        );
+                    })}
                     {/* Render connections */}
                     <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                         {connections.map(conn => {
@@ -12310,6 +13993,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || el.type === 'element-ref'
                             || el.type === 'element-property'
                             || el.type === 'get-children'
+                            || el.type === 'find-child'
                             || el.type === 'output'
                             || el.type === 'constant-boolean'
                             || el.type === 'constant-string'
@@ -12360,7 +14044,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             || isMemoryNodeType(el.type);
                         const calcSegments = el.type === 'calculation' ? (calcFlowByNode[el.id] || []) : [];
                         const calcMarkerId = `calc-flow-arrow-${el.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-                        const activeDragDelta = dragElementDelta?.elementId === el.id ? dragElementDelta : null;
+                        const activeDragMember = Boolean(
+                            dragElementDelta
+                            && elementDragRef.current?.elementIds.includes(el.id)
+                        );
+                        const isVisualSelection = selectedIds.has(el.id) || activeDragMember;
+                        const activeDragDelta = activeDragMember ? dragElementDelta : null;
                         const visualX = el.x + (activeDragDelta?.deltaX || 0);
                         const visualY = el.y + (activeDragDelta?.deltaY || 0);
 
@@ -12368,7 +14057,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         return (
                             <div
                                 key={el.id}
-                                className={`canvas-element type-${el.type} ${nodePinClass} ${isChartDataCarrier ? 'chart-data-carrier' : ''} ${selected === el.id ? 'selected' : ''} ${dynamicInputGapErrors[el.id] ? 'node-error' : ''}`}
+                                    className={`canvas-element type-${el.type} ${nodePinClass} ${isChartDataCarrier ? 'chart-data-carrier' : ''} ${isVisualSelection ? 'selected' : ''} ${dynamicInputGapErrors[el.id] ? 'node-error' : ''}`}
                                 data-element-id={el.id}
                                 style={{ 
                                     left: `${Math.round(visualX * zoom + offsetX)}px`, 
@@ -12388,6 +14077,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                     if (
                                         target.classList.contains('pin')
                                         || target.classList.contains('input-control')
+                                        || !!target.closest('button')
                                         || target.closest('.nl-scroll-guard')
                                     ) {
                                         e.stopPropagation();
@@ -12966,6 +14656,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                     const currentSingle = String(data.elementProperty || '');
                                                     const listExpanded = customPropertyListExpanded.has(nodeId);
                                                     const draft = customPropertyDraft[nodeId] || '';
+                                                    const draftType: DetectedPropertyType = customPropertyDraftType[nodeId] || 'string';
 
                                                     // Single dropdown: detected props + the current key even when it
                                                     // is not (currently) detected, so a migrated legacy manual
@@ -13004,7 +14695,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         const patch: Record<string, unknown> = { elementPropertyMode: nextMode };
                                                         if (nextMode === 'custom' && !Array.isArray(data.elementPropertySelected)) {
                                                             patch.elementPropertySelected = currentSingle
-                                                                ? [{ key: currentSingle, origin: detected.some((p) => p.key === currentSingle) ? 'detected' : 'custom' }]
+                                                                ? [{ key: currentSingle, origin: detected.some((p) => p.key === currentSingle) ? 'detected' : 'custom', type: getElementPropertyKeyType(el, currentSingle) }]
                                                                 : [];
                                                         }
                                                         applyNodeDataChange(nodeId, patch);
@@ -13022,7 +14713,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         commitSelected(
                                                             selectedKeys.has(key)
                                                                 ? selected.filter((entry) => entry.key !== key)
-                                                                : [...selected, { key, origin: 'detected' as const }]
+                                                                : [...selected, { key, origin: 'detected' as const, type: detected.find((property) => property.key === key)?.type }]
                                                         );
                                                     };
                                                     const removeCustom = (key: string) => {
@@ -13035,8 +14726,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             return;
                                                         }
                                                         const origin: 'detected' | 'custom' = detected.some((p) => p.key === key) ? 'detected' : 'custom';
-                                                        commitSelected([...selected, { key, origin }]);
+                                                        commitSelected([...selected, { key, origin, type: draftType }]);
                                                         setCustomPropertyDraft((prev) => ({ ...prev, [nodeId]: '' }));
+                                                        setCustomPropertyDraftType((prev) => ({ ...prev, [nodeId]: 'string' }));
                                                     };
                                                     const toggleExpanded = () => {
                                                         setCustomPropertyListExpanded((prev) => {
@@ -13173,6 +14865,17 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                         }}
                                                                         onClick={(e) => e.stopPropagation()}
                                                                     />
+                                                                    <select
+                                                                        className="input-control"
+                                                                        value={draftType}
+                                                                        onChange={(e) => setCustomPropertyDraftType((prev) => ({ ...prev, [nodeId]: e.target.value as DetectedPropertyType }))}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        aria-label="Custom property type"
+                                                                    >
+                                                                        <option value="string">Type: string</option>
+                                                                        <option value="number">Type: number</option>
+                                                                        <option value="boolean">Type: boolean</option>
+                                                                    </select>
                                                                 </div>
                                                             )}
                                                             </>
@@ -13233,6 +14936,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         else itemByIndex.set(index, { index, label: `${index}: (not in preview)`, selected: true, missing: true });
                                                     });
                                                     const customItems = Array.from(itemByIndex.values()).sort((a, b) => a.index - b.index);
+                                                    
+                                                    const commonality = getGetChildrenCommonality(nodeId);
+                                                    const commonItems = customItems.filter(item => commonality.get(item.index) === 'common');
+                                                    const partialItems = customItems.filter(item => commonality.get(item.index) === 'partial' || !commonality.has(item.index));
 
                                                     const returnAsControl = (
                                                         <div style={{ display: 'flex', gap: '10px', fontSize: '11px', color: '#94a3b8', alignItems: 'center' }}>
@@ -13298,41 +15005,119 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                                                             {mode === 'custom' && (
                                                                 <>
-                                                                    <button
-                                                                        type="button"
-                                                                        className="input-control"
-                                                                        style={{ textAlign: 'left', cursor: 'pointer' }}
-                                                                        onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
-                                                                    >
-                                                                        Children {listExpanded ? '▾' : '▸'} ({selected.length} selected)
-                                                                    </button>
-                                                                    {listExpanded && (
-                                                                        <div className="nl-scroll-guard" style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                                                                            {customItems.length === 0 && (
-                                                                                <div style={{ fontSize: '10px', color: '#94a3b8', padding: '2px 4px' }}>No children detected.</div>
-                                                                            )}
-                                                                            {customItems.map((item) => (
-                                                                                <div
-                                                                                    key={item.index}
-                                                                                    onClick={(e) => { e.stopPropagation(); toggleChild(item.index); }}
-                                                                                    title={item.selected ? 'Click to deselect' : 'Click to select'}
-                                                                                    style={{
-                                                                                        cursor: 'pointer',
-                                                                                        userSelect: 'none',
-                                                                                        fontSize: '11px',
-                                                                                        padding: '3px 6px',
-                                                                                        borderRadius: '3px',
-                                                                                        display: 'flex',
-                                                                                        justifyContent: 'space-between',
-                                                                                        alignItems: 'center',
-                                                                                        background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
-                                                                                        color: item.selected ? '#86efac' : '#fca5a5',
-                                                                                    }}
-                                                                                >
-                                                                                    <span>{item.missing ? '⚠ ' : ''}{item.label}</span>
+                                                                    {commonItems.length > 0 && (
+                                                                        <>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="input-control"
+                                                                                style={{ textAlign: 'left', cursor: 'pointer', background: 'rgba(34,197,94,0.1)' }}
+                                                                                onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+                                                                            >
+                                                                                Common ({commonItems.filter(i => i.selected).length}/{commonItems.length}) {listExpanded ? '▾' : '▸'}
+                                                                            </button>
+                                                                            {listExpanded && (
+                                                                                <div className="nl-scroll-guard" style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                                                    {commonItems.map((item) => (
+                                                                                        <div
+                                                                                            key={item.index}
+                                                                                            onClick={(e) => { e.stopPropagation(); toggleChild(item.index); }}
+                                                                                            title={item.selected ? 'Click to deselect' : 'Click to select'}
+                                                                                            style={{
+                                                                                                cursor: 'pointer',
+                                                                                                userSelect: 'none',
+                                                                                                fontSize: '11px',
+                                                                                                padding: '3px 6px',
+                                                                                                borderRadius: '3px',
+                                                                                                display: 'flex',
+                                                                                                justifyContent: 'space-between',
+                                                                                                alignItems: 'center',
+                                                                                                background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
+                                                                                                color: item.selected ? '#86efac' : '#fca5a5',
+                                                                                            }}
+                                                                                        >
+                                                                                            <span>{item.missing ? '⚠ ' : ''}{item.label}</span>
+                                                                                        </div>
+                                                                                    ))}
                                                                                 </div>
-                                                                            ))}
-                                                                        </div>
+                                                                            )}
+                                                                        </>
+                                                                    )}
+                                                                    {partialItems.length > 0 && (
+                                                                        <>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="input-control"
+                                                                                style={{ textAlign: 'left', cursor: 'pointer', background: 'rgba(239,68,68,0.1)', marginTop: commonItems.length > 0 ? '4px' : '0' }}
+                                                                                onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+                                                                            >
+                                                                                Partial ({partialItems.filter(i => i.selected).length}/{partialItems.length}) {listExpanded ? '▾' : '▸'}
+                                                                            </button>
+                                                                            {listExpanded && (
+                                                                                <div className="nl-scroll-guard" style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                                                    {partialItems.map((item) => (
+                                                                                        <div
+                                                                                            key={item.index}
+                                                                                            onClick={(e) => { e.stopPropagation(); toggleChild(item.index); }}
+                                                                                            title={item.selected ? 'Click to deselect' : 'Click to select'}
+                                                                                            style={{
+                                                                                                cursor: 'pointer',
+                                                                                                userSelect: 'none',
+                                                                                                fontSize: '11px',
+                                                                                                padding: '3px 6px',
+                                                                                                borderRadius: '3px',
+                                                                                                display: 'flex',
+                                                                                                justifyContent: 'space-between',
+                                                                                                alignItems: 'center',
+                                                                                                background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
+                                                                                                color: item.selected ? '#86efac' : '#fca5a5',
+                                                                                            }}
+                                                                                        >
+                                                                                            <span>{item.missing ? '⚠ ' : ''}{item.label}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </>
+                                                                    )}
+                                                                    {commonItems.length === 0 && partialItems.length === 0 && (
+                                                                        <>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="input-control"
+                                                                                style={{ textAlign: 'left', cursor: 'pointer' }}
+                                                                                onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+                                                                            >
+                                                                                Children {listExpanded ? '▾' : '▸'} ({selected.length} selected)
+                                                                            </button>
+                                                                            {listExpanded && (
+                                                                                <div className="nl-scroll-guard" style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                                                    {customItems.length === 0 && (
+                                                                                        <div style={{ fontSize: '10px', color: '#94a3b8', padding: '2px 4px' }}>No children detected.</div>
+                                                                                    )}
+                                                                                    {customItems.map((item) => (
+                                                                                        <div
+                                                                                            key={item.index}
+                                                                                            onClick={(e) => { e.stopPropagation(); toggleChild(item.index); }}
+                                                                                            title={item.selected ? 'Click to deselect' : 'Click to select'}
+                                                                                            style={{
+                                                                                                cursor: 'pointer',
+                                                                                                userSelect: 'none',
+                                                                                                fontSize: '11px',
+                                                                                                padding: '3px 6px',
+                                                                                                borderRadius: '3px',
+                                                                                                display: 'flex',
+                                                                                                justifyContent: 'space-between',
+                                                                                                alignItems: 'center',
+                                                                                                background: item.selected ? 'rgba(34,197,94,0.20)' : 'rgba(239,68,68,0.12)',
+                                                                                                color: item.selected ? '#86efac' : '#fca5a5',
+                                                                                            }}
+                                                                                        >
+                                                                                            <span>{item.missing ? '⚠ ' : ''}{item.label}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </>
                                                                     )}
                                                                     {returnAsControl}
                                                                 </>
@@ -13348,7 +15133,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : el.type === 'event-element' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.eventUseManualId ? (
+                                                    {connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && <div style={{ fontSize: '10px', color: '#86efac' }}>Element: connected</div>}
+                                                    {!connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && (el.data?.eventUseManualId ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -13379,7 +15165,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>
                                                             ))}
                                                         </select>
-                                                    )}
+                                                    ))}
                                                     <select
                                                         className="input-control"
                                                         value={el.data?.eventType || 'click'}
@@ -13399,7 +15185,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
-                                                    <div style={{ marginTop: '8px', paddingTop: '8px', paddingBottom: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', minHeight: '26px' }}>
+                                                    {!connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && <div style={{ marginTop: '8px', paddingTop: '8px', paddingBottom: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', minHeight: '26px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
                                                                 type="checkbox"
@@ -13415,7 +15201,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             />
                                                             Manual ID
                                                         </label>
-                                                    </div>
+                                                    </div>}
                                                 </div>
                                             ) : el.type === 'event-id' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
@@ -13552,7 +15338,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             ))}
                                                         </select>
                                                     )}
-                                                    {isGutenbergHost && (
+                                                    {!connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && isGutenbergHost && (
                                                     <div style={{ marginTop: '6px', borderTop: '1px solid rgba(255,255,255,0.28)', paddingTop: '6px', paddingBottom: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
@@ -13898,7 +15684,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 </div>
                                             ) : (el.type === 'event-element' || el.type === 'event-id') ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
-                                                    {el.data?.eventUseManualId ? (
+                                                    {connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && <div style={{ fontSize: '10px', color: '#86efac' }}>Element: connected</div>}
+                                                    {!connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && (el.data?.eventUseManualId ? (
                                                         <input
                                                             type="text"
                                                             className="input-control"
@@ -13929,7 +15716,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                                 <option key={d.id} value={d.id}>{d.name || d.id} ({d.id})</option>
                                                             ))}
                                                         </select>
-                                                    )}
+                                                    ))}
                                                     <select
                                                         className="input-control"
                                                         value={el.data?.eventType || 'click'}
@@ -13949,7 +15736,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                         <option value="keyup">keyup</option>
                                                         <option value="keydown">keydown</option>
                                                     </select>
-                                                    <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
+                                                    {!connections.some((connection) => connection.toId === el.id && connection.toInput === 'input0') && <div style={{ marginTop: '4px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '4px' }}>
                                                         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer', userSelect: 'none' }}>
                                                             <input
                                                                 type="checkbox"
@@ -13965,7 +15752,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             />
                                                             Manual ID
                                                         </label>
-                                                    </div>
+                                                    </div>}
                                                 </div>
                                             ) : el.type === 'element-ref' || el.type === 'form-data' ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }} onClick={(e) => e.stopPropagation()}>
@@ -14212,8 +15999,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             }}
                                                             title={el.type === 'output' ? 'Action' : `Output ${i + 1}`}
                                                         />
-                                                        <div className="output-label">
-                                                            {getOutputLabel(el, i)}
+                                                        <div className={`output-label ${el.type === 'get-children' ? 'get-children-output-label' : ''}`}>
+                                                            {renderOutputLabel(el, i)}
                                                         </div>
                                                     </div>
                                                 ))}
@@ -14229,12 +16016,22 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                 {inputCount > 0 ? (
                                                     Array.from({ length: inputCount }).map((_, i) => {
                                                         const types = getAcceptedTypesForPin(el, i);
+                                                        // Check if this is case-default Out pin connected to switch-branch
+                                                        const isCaseDefaultOutPin = el.type === 'case-default' && i === 0;
+                                                        const connectedToSwitchBranch = isCaseDefaultOutPin && connections.some((c) => {
+                                                            if (c.fromId !== el.id || c.fromOutput !== 'output0') return false;
+                                                            const targetEl = elements.find(elem => elem.id === c.toId);
+                                                            return targetEl?.type === 'switch-branch';
+                                                        });
+                                                        
                                                         return (
                                                         <div
                                                             key={`input-row-${i}`}
                                                             className="input-row"
                                                             style={
                                                                 isChartDataCarrier
+                                                                    ? { visibility: 'hidden', pointerEvents: 'none' }
+                                                                    : connectedToSwitchBranch
                                                                     ? { visibility: 'hidden', pointerEvents: 'none' }
                                                                     : undefined
                                                             }
@@ -14322,8 +16119,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                                                             }}
                                                             title={el.type === 'output' ? 'Action' : `Output ${i + 1}`}
                                                         />
-                                                        <div className="output-label">
-                                                            {getOutputLabel(el, i)}
+                                                        <div className={`output-label ${el.type === 'get-children' ? 'get-children-output-label' : ''}`}>
+                                                            {renderOutputLabel(el, i)}
                                                         </div>
                                                     </div>
                                                 ))}

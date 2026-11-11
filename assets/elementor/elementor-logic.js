@@ -321,6 +321,8 @@
                 {}
             );
 
+        const compiledGraphHash = String(settings.get('compiled_graph_hash') || '');
+
 
         console.log(
             'NodeLogic: Graph data before mount:',
@@ -339,7 +341,8 @@
             graphHistory: Array.isArray(graphHistory) ? graphHistory : [],
             historyLimit,
             formula,
-            outputConfigs
+            outputConfigs,
+            compiledGraphHash
         };
     }
 
@@ -584,6 +587,34 @@
         }
     }
 
+    async function compileToServer(payload, editorId) {
+        const postId = window.elementor && window.elementor.config && window.elementor.config.document
+            ? window.elementor.config.document.id
+            : 0;
+        const api = window.wpApiSettings || {};
+        const endpoint = (api.root || `${window.location.origin}/wp-json/`).replace(/\/$/, '') + '/nodelogic/v1/logic';
+        if (!postId || !payload || !payload.state || !window.fetch) return false;
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                ...(api.nonce ? { 'X-WP-Nonce': api.nonce } : {}),
+            },
+            body: JSON.stringify({
+                post_id: postId,
+                graph_id: editorId,
+                formula: payload.state.formula || '',
+                graphState: payload.state,
+                outputConfigs: extractOutputConfigs(payload.state),
+            }),
+        });
+        if (!response.ok) return { ok: false };
+        const result = await response.json();
+        return { ok: true, hash: result && result.hash ? String(result.hash) : '' };
+    }
+
 
     function extractOutputConfigs(state) {
 
@@ -758,46 +789,6 @@
 
 
         /*
-         * Header.
-         */
-
-        const header =
-            document.createElement('div');
-
-        header.className =
-            'nodelogic-modal-header';
-
-
-        const title =
-            document.createElement('h2');
-
-        title.textContent =
-            'Logic Graph Editor';
-
-
-        /*
-         * Close button.
-         */
-
-        const closeButton =
-            document.createElement('button');
-
-        closeButton.type =
-            'button';
-
-        closeButton.className =
-            'nodelogic-modal-close';
-
-        closeButton.innerHTML =
-            '&times;';
-
-        closeButton.setAttribute(
-            'aria-label',
-            'Close Logic Editor'
-        );
-
-
-        /*
          * Content.
          */
 
@@ -809,29 +800,9 @@
 
 
         /*
-         * Close.
-         */
-
-        closeButton.addEventListener(
-            'click',
-            function (event) {
-
-                event.preventDefault();
-                event.stopPropagation();
-
-                requestCloseModal();
-            }
-        );
-
-
-        /*
          * Assemble.
          */
 
-        header.appendChild(title);
-        header.appendChild(closeButton);
-
-        modal.appendChild(header);
         modal.appendChild(content);
 
         modalRoot.appendChild(modal);
@@ -963,6 +934,9 @@
                     historyLimit:
                         graphData.historyLimit,
 
+                    initialCompileStatus:
+                        graphData.compiledGraphHash ? 'compiled' : 'not-compiled',
+
 
                     /*
                      * -------------------------------------------------
@@ -1022,6 +996,17 @@
                             );
                         },
 
+                    onCompile:
+                        async function (payload) {
+                            const result = await compileToServer(payload, graphData.editorId);
+                            if (result && result.ok && result.hash && currentContainer) {
+                                updateElementorSettings(currentContainer, {
+                                    compiled_graph_hash: result.hash
+                                });
+                            }
+                            return Boolean(result && result.ok);
+                        },
+
 
                     onHistoryLimitChange:
                         function (limit) {
@@ -1046,6 +1031,9 @@
                             hasUnpublishedChanges =
                                 Boolean(hasUnpublished);
                         },
+
+                    onRequestClose:
+                        requestCloseModal,
 
 
                     /*

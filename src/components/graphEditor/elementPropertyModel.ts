@@ -16,6 +16,8 @@ export type ElementPropertyMode = 'single' | 'all' | 'custom';
 export interface ElementPropertySelectedEntry {
     key: string;
     origin: 'detected' | 'custom';
+    /** User-selected type for manually added properties. */
+    type?: DetectedPropertyType;
 }
 
 export type DetectedPropertyType = 'number' | 'string' | 'boolean';

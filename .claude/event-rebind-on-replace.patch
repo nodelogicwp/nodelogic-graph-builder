@@ -1,0 +1,212 @@
+--- a/frontend.js
++++ b/frontend.js
+@@ -3103,16 +3103,34 @@
+       };
+     }
+     
+-    // Set up event listener only once
+-    if (!window.eventStore[key + '_listener']) {
+-      element.addEventListener(type, () => {
++    // Set up the event listener once PER ELEMENT, not once per key: the id
++    // can later resolve to a brand new node (el.replaceWith(), an Elementor /
++    // AJAX re-render), and a key-only "already bound" flag left the listener
++    // on the old, detached node forever -- the Event node went permanently
++    // deaf. The `${key}_listener` marker records which element is bound (and
++    // how to unbind it), so a replacement moves the listener over while the
++    // same element is never bound twice. The listener reads eventStore[key]
++    // at fire time, so triggeredCount carries on across the swap.
++    const binding = window.eventStore[key + '_listener'];
++    if (!binding || binding.element !== element) {
++      if (binding && typeof binding.remove === "function") binding.remove();
++      const listener = () => {
+         // Increment trigger count for THIS specific event
+         window.eventStore[key].triggeredCount++;
+         window.eventStore[key].lastTriggeredAt = Date.now();
+         // Trigger recalculation
+         scheduleRecalculation();
+-      });
+-      window.eventStore[key + '_listener'] = true;
++      };
++      element.addEventListener(type, listener);
++      window.eventStore[key + '_listener'] = {
++        element,
++        remove: () => {
++          try {
++            element.removeEventListener(type, listener);
++          } catch {}
++        },
++      };
++      window.eventStore[key].element = element;
+     }
+ 
+     // Return event data
+@@ -3690,7 +3708,17 @@
+         if (!sourceEl || nestedActions.length === 0) return;
+ 
+         const nodeKey = getEventActionSignature(actionNode);
+-        if (bindingState.listeners.has(nodeKey)) return; // already bound
++        const existing = bindingState.listeners.get(nodeKey);
++        if (existing) {
++          if (existing.sourceEl === sourceEl) return; // already bound
++          // Same Action->Event node, but its source now resolves to a
++          // DIFFERENT element (the original was replaced by a re-render):
++          // move the listener instead of leaving it on the old node.
++          existing();
++          bindingState.listeners.delete(nodeKey);
++          const idx = bindingState.removers.indexOf(existing);
++          if (idx !== -1) bindingState.removers.splice(idx, 1);
++        }
+ 
+         const listener = () => {
+           try {
+@@ -3723,6 +3751,7 @@
+             sourceEl.removeEventListener(eventType, listener);
+           } catch {}
+         };
++        remove.sourceEl = sourceEl;
+         bindingState.removers.push(remove);
+         bindingState.listeners.set(nodeKey, remove);
+         return;
+@@ -6598,10 +6627,15 @@
+     for (const key in store) {
+       if (!Object.prototype.hasOwnProperty.call(store, key)) continue;
+       const entry = store[key];
+-      // Skips the boolean `${key}_listener` registration markers alongside
++      // Skips the `${key}_listener` registration markers alongside
+       // the real {triggeredCount} entries -- only the latter match this shape.
+       if (entry && typeof entry === "object" && typeof entry.triggeredCount === "number") {
+-        parts.push(`${key}:${entry.triggeredCount}`);
++        // A bound element that has since left the DOM (replaced by a
++        // re-render) must force a fresh evaluation: on a cache hit
++        // __nodeEvent is never called, so it could never move its listener
++        // to the replacement node.
++        const detached = entry.element && entry.element.isConnected === false;
++        parts.push(`${key}:${entry.triggeredCount}${detached ? ":detached" : ""}`);
+       }
+     }
+     parts.sort();
+@@ -7499,6 +7533,11 @@
+             pruneStaleActionListeners(bindingState, collectActionEventKeys(actionNodes, new Set()));
+             registerActionListeners(target, inputEl, actionNodes, bindingKey, bindingState);
+             applyLeafActionNodes(target, inputEl, actionNodes);
++          } else if (Array.from(bindingState.listeners.values()).some((remove) => remove.sourceEl && remove.sourceEl.isConnected === false)) {
++            // Cache hit, but an Action->Event source element was replaced
++            // since its listener was bound: re-register (listeners only, no
++            // leaf actions) so it moves onto the replacement node.
++            registerActionListeners(target, inputEl, actionNodes, bindingKey, bindingState);
+           }
+         } else {
+           removeActionBinding(`${blockScope}::${entryKey}`);
+--- a/tests/chart_api_event_smoke.js
++++ b/tests/chart_api_event_smoke.js
+@@ -26,7 +26,7 @@
+   const errs = []; dom.window.addEventListener('error', (e) => errs.push(e.message));
+   const oce = dom.window.console.error; dom.window.console.error = (...a) => errs.push(a.map(String).join(' '));
+   let src = FRONT; const m = '\n})();'; const i = src.lastIndexOf(m);
+-  src = src.slice(0, i) + '\n;window.__T={renderChartBlock:renderChartBlock,collectChartRecords:collectChartRecords,__nodeApiRequest:__nodeApiRequest,__nodeApiStatus:__nodeApiStatus,safeEvaluateExpression:safeEvaluateExpression,__nodeGetPath:__nodeGetPath,__nodeApiListMapper:__nodeApiListMapper};' + src.slice(i);
++  src = src.slice(0, i) + '\n;window.__T={renderChartBlock:renderChartBlock,collectChartRecords:collectChartRecords,__nodeApiRequest:__nodeApiRequest,__nodeApiStatus:__nodeApiStatus,safeEvaluateExpression:safeEvaluateExpression,__nodeGetPath:__nodeGetPath,__nodeApiListMapper:__nodeApiListMapper,recalc:scheduleRecalculation};' + src.slice(i);
+   const s = dom.window.document.createElement('script'); s.textContent = src; dom.window.document.body.appendChild(s);
+   return { dom, errs };
+ }
+@@ -184,7 +184,100 @@
+   ok('event: DOM replacement of the bound element does not throw', !threw, threw);
+ }
+ 
+-apiTestsDone.then(() => {
++/* ---- Event node survives replacement of its element (re-render) ----
++ * __nodeEvent used to bind once per key and keep the ORIGINAL element, so a
++ * node replaced by a same-id one (replaceWith / Elementor / AJAX re-render)
++ * was never bound: its clicks never counted and the Event went deaf. The
++ * resize dispatch above does nothing (frontend.js has no resize listener),
++ * so this forces a REAL recalc via scheduleRecalculation. */
++const replacementTestsDone = (async () => {
++  const html = `<button id="btn">go</button><span id="sink"></span>
++    <div data-nodelogic-logic="1" id="lb" data-output-configs="{}" style="display:none"></div>`;
++  const { dom, errs } = loadFrontend(html, `
++    window.__btnClickBinds = 0;
++    (function(){
++      var proto = window.EventTarget.prototype, orig = proto.addEventListener;
++      proto.addEventListener = function(type){
++        if (this.id === 'btn' && type === 'click') window.__btnClickBinds++;
++        return orig.apply(this, arguments);
++      };
++    })();`);
++  const doc = dom.window.document;
++  const T = dom.window.__T;
++  doc.getElementById('lb').setAttribute('data-formula',
++    `({ "o": { "__targetId": "sink", "value": __nodeEvent("btn", "click") } })`);
++  doc.dispatchEvent(new dom.window.Event('DOMContentLoaded', { bubbles: true }));
++  await wait(20);
++  const store = () => dom.window.eventStore.btn_click;
++  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
++
++  click(doc.getElementById('btn'));
++  await wait(20);
++  ok('event/replace: original node click counts', store() && store().triggeredCount === 1, store() && store().triggeredCount);
++
++  const fresh = doc.createElement('button'); fresh.id = 'btn'; fresh.textContent = 'go2';
++  doc.getElementById('btn').replaceWith(fresh);
++  T.recalc();
++  await wait(20);
++  ok('event/replace: store now references the replacement node', store().element === fresh, 'still the old node');
++  click(fresh); await wait(20);
++  click(fresh); await wait(20);
++  ok('event/replace: replacement node clicks register (count continues 1 -> 3)', store().triggeredCount === 3, store().triggeredCount);
++
++  // Many further recalcs on the SAME node must not stack listeners on it.
++  const bindsBefore = dom.window.__btnClickBinds;
++  for (let i = 0; i < 5; i++) { T.recalc(); await wait(10); }
++  click(fresh); await wait(20);
++  ok('event/replace: no re-binding of an already-bound node', dom.window.__btnClickBinds === bindsBefore, `${bindsBefore} -> ${dom.window.__btnClickBinds}`);
++  ok('event/replace: one click still counts exactly once', store().triggeredCount === 4, store().triggeredCount);
++  ok('event/replace: no runtime errors', errs.filter((e) => /Cannot read|is not a function/i.test(e)).length === 0, errs.join(';'));
++})();
++
++/* ---- Action->Event listener survives replacement of its source ----
++ * registerActionListeners had the same once-only dedup (keyed by the event
++ * node's signature, not the element it bound to), and a cacheable formula
++ * never even re-ran it after the swap. */
++const actionReplacementTestsDone = (async () => {
++  const html = `<button id="abtn">go</button><span id="asink"></span>
++    <div data-nodelogic-logic="1" id="lb" data-output-configs="{}" style="display:none"></div>`;
++  const { dom, errs } = loadFrontend(html, `
++    window.__abtnClickBinds = 0;
++    (function(){
++      var proto = window.EventTarget.prototype, orig = proto.addEventListener;
++      proto.addEventListener = function(type){
++        if (this.id === 'abtn' && type === 'click') window.__abtnClickBinds++;
++        return orig.apply(this, arguments);
++      };
++    })();`);
++  const doc = dom.window.document;
++  const T = dom.window.__T;
++  doc.getElementById('lb').setAttribute('data-formula',
++    `({ "o": { "__targetId": "asink", actions: [({ type: "event", sourceId: "abtn", eventType: "click", actions: [({ type: "setText", value: "hit" })] })] } })`);
++  doc.dispatchEvent(new dom.window.Event('DOMContentLoaded', { bubbles: true }));
++  await wait(20);
++  const sink = doc.getElementById('asink');
++  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
++
++  click(doc.getElementById('abtn'));
++  await wait(20);
++  ok('action-event/replace: original source click runs the action', sink.textContent === 'hit', JSON.stringify(sink.textContent));
++
++  sink.textContent = '';
++  const fresh = doc.createElement('button'); fresh.id = 'abtn'; fresh.textContent = 'go2';
++  doc.getElementById('abtn').replaceWith(fresh);
++  T.recalc();
++  await wait(20);
++  click(fresh);
++  await wait(20);
++  ok('action-event/replace: replacement source click runs the action', sink.textContent === 'hit', JSON.stringify(sink.textContent));
++
++  const bindsBefore = dom.window.__abtnClickBinds;
++  for (let i = 0; i < 5; i++) { T.recalc(); await wait(10); }
++  ok('action-event/replace: no re-binding of an already-bound source', dom.window.__abtnClickBinds === bindsBefore, `${bindsBefore} -> ${dom.window.__abtnClickBinds}`);
++  ok('action-event/replace: no runtime errors', errs.filter((e) => /Cannot read|is not a function/i.test(e)).length === 0, errs.join(';'));
++})();
++
++Promise.all([apiTestsDone, replacementTestsDone, actionReplacementTestsDone]).then(() => {
+   console.log(`\n${pass} passed, ${fail} failed`);
+   process.exit(fail === 0 ? 0 : 1);
+ });

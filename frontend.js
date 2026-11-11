@@ -1,5 +1,15 @@
-﻿(function () {
-  if (window.sliderCalculatorInitialized) return;
+// NodeLogic Frontend Runtime - Version 1.6.1 - STABLE
+// New in 1.6.1: __nodeArrayGetIndex, __nodeArrayFirstEvent, __nodeArrayEventAggregate
+// Actions deduplication prevents unnecessary re-execution
+// Use Event Processor with passOnlyOnEvent for full event control
+(function () {
+  // Do not let a stale copy of an older plugin/runtime suppress the updated
+  // runtime. The previous generic global guard caused exactly that after a
+  // plugin update when two script copies were present on the page.
+  const NODELOGIC_RUNTIME_VERSION = "1.6.1.legacy-loop-migration-2";
+  if (window.nodelogicRuntimeVersion === NODELOGIC_RUNTIME_VERSION) return;
+  window.nodelogicRuntimeVersion = NODELOGIC_RUNTIME_VERSION;
+  window.sliderCalculatorInitialized = true;
   // Don't run in the Gutenberg editor context
   if (document.body && (document.body.classList.contains('block-editor-page') || document.body.classList.contains('wp-admin'))) return;
   window.sliderCalculatorInitialized = true;
@@ -30,12 +40,22 @@
     tables: [],
     logicBlocks: []
   };
+  // Server-fetched values are the authority. DOM data-* attributes are only a
+  // transport/cache and must never be allowed to replace these values after
+  // the initial load.
+  const authoritativeLogic = new WeakMap();
 
   let recalculationQueued = false;
   let isFirstExecution = true;
   const formulaEvaluationCache = new Map();
   const API_REQUEST_CACHE_TTL = 5000;
   const apiRequestCache = new Map();
+
+  // Diagnostic hooks are intentionally disabled in production builds.
+  const nlNestedDebugValue = (value) => value;
+  const nlNestedDebug = () => {};
+  const nlFormulaAuditValue = (value) => value;
+  const nlFormulaAuditRecord = () => {};
 
   function getFormulaVarRegex(flags = "g") {
     return new RegExp(FORMULA_VAR_SOURCE, flags);
@@ -135,12 +155,17 @@
         }
         if (ch === quote) {
           quote = null;
+          // Preserve a token boundary. Removing a string completely can
+          // concatenate identifiers on either side of it and produce false
+          // security errors (for example nested action metadata keys).
+          out += " ";
         }
         continue;
       }
 
       if (ch === "\"" || ch === "'" || ch === "`") {
         quote = ch;
+        out += " ";
         continue;
       }
 
@@ -159,7 +184,12 @@
 
     // Strip string literals first, then check for injection vectors outside strings
     const stripped = stripStringLiterals(expr);
-    if (stripped.length > 12000) return false;
+    // Loop bodies migrated from older compiled artifacts may be represented
+    // as a bounded numeric code-unit array. That representation is larger
+    // than the executable source itself, but it is still data handled by the
+    // allowlisted AST. The whole-expression ceiling above remains the hard
+    // limit; rejecting at 12 KB made every migrated nested loop invalid.
+    if (stripped.length > 100000) return false;
 
     // Block obvious statement/function injection vectors (outside string literals).
     if (/[;`]/.test(stripped)) return false;
@@ -170,6 +200,15 @@
     // Block access to global/browser/runtime primitives.
     if (/(^|[^A-Za-z0-9_$])(window|document|globalThis|self|Function|constructor|prototype|__proto__|eval|alert|prompt|confirm|fetch|XMLHttpRequest|setTimeout|setInterval)(?=$|[^A-Za-z0-9_$])/i.test(stripped)) {
       return false;
+    }
+
+    // Loop nodes contain a serialized expression as their body argument. The
+    // outer tokenizer cannot reliably inspect escaped quotes from that nested
+    // source, so leave its syntax to the AST parser while retaining the
+    // forbidden-global checks above and the runtime identifier allowlist in
+    // resolveFormulaIdentifier.
+    if (/__nodeArray(?:Multi|Context)?MapGraph\s*\(/.test(expr)) {
+      return true;
     }
 
     const allowedIdentifiers = new Set([
@@ -201,6 +240,8 @@
       "__nodeArrayMap",
       "__nodeArrayFilter",
       "__nodeArrayReduce",
+      "__nodeArrayReduceGraph",
+      "__nodeArrayMultiReduceGraph",
       "__nodeArrayFind",
       "__nodeArrayForEach",
       "__nodeArrayCollect",
@@ -208,10 +249,24 @@
       "__nodeArrayLength",
       "__nodeArrayMerge",
       "__nodeArrayUnique",
+      // NEW in 1.6.1 - Array and Event nodes
+      "__nodeArrayGetIndex",
+      "__nodeArrayFirstEvent",
+      "__nodeArrayEventAggregate",
+      "__nodeArrayFirstEventMulti",
+      "__nodeArrayEventAggregateMulti",
+      // END new 1.6.1
       "__nodeArrayMapGraph",
+      "__nodeArrayContextMapGraph",
       "__nodeArrayFilterGraph",
+      "__nodeArrayForEachMulti",
+      "__nodeArrayMultiMapGraph",
+      "__nodeFormulaBody",
       "__nodeLoopItem",
       "__nodeLoopIndex",
+      "__nodeLoopItemAt",
+      "__nodeLoopMultiItemAt",
+      "__nodeWait",
       "__nodeApiRequest",
       "__nodeApiStatus",
       "__nodeApiListMapper",
@@ -219,7 +274,9 @@
       "__nodeImageFromElement",
       "__nodeGetElement",
       "__nodeGetElementProp",
+      "__nodeCoerceElementProperty",
       "__nodeGetChildren",
+      "__nodeFindChild",
       "__nodeGetChildAt",
       "__nodeGetChildrenSubset",
       "__nodeCountTrue",
@@ -287,9 +344,24 @@
       "__nodeParseRadix",
       // Action node keys used in compiled action plan expressions
       "type",
+      // Internal metadata keys carried by Output and event action payloads.
+      // They are data fields, not executable globals.
+      "__element",
+      "__executeOnLoad",
+      "__targetId",
+      "__nodeId",
+      "__nlSideEffect",
+      // Output/side-effect entry-key prefixes. They are serialized metadata
+      // used for bookkeeping, never values resolved from the global scope.
+      "nlOutEl",
+      "nlOutTarget",
+      "nlSide",
       "sourceId",
       "eventType",
       "actions",
+      "eventGate",
+      "eventGateTrigger",
+      "trigger",
       "className",
       "pattern",
       "min",
@@ -317,11 +389,33 @@
       "toString", "toFixed", "toLocaleString"
     ]);
 
-    const identifiers = stripped.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) || [];
-    for (const id of identifiers) {
+    // Inspect tokenizer output instead of scanning raw text. The regex scan
+    // used previously could see string contents (class selectors, labels,
+    // generated Output keys) as executable identifiers when nested formulas
+    // contained escaped quotes.
+    let tokens;
+    try {
+      tokens = tokenizeFormulaExpression(expr);
+    } catch (error) {
+      try {
+        console.warn('NodeLogic: formula tokenization failed; graph evaluation skipped.', error, 'Expression:', expr.substring(0, 300));
+      } catch {}
+      return false;
+    }
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token || token.type !== "identifier") continue;
+      const previous = tokens[index - 1];
+      const next = tokens[index + 1];
+      const isMemberName = previous?.type === "punct" && previous.value === ".";
+      const isObjectKey = next?.type === "punct" && next.value === ":"
+        && previous?.type === "punct" && (previous.value === "{" || previous.value === ",");
+      if (isMemberName || isObjectKey) continue;
+      const id = token.value;
       if (/^o\d+$/.test(id)) continue;
       if (allowedIdentifiers.has(id)) continue;
       if (allowedMathMembers.has(id)) continue;
+      console.error('NodeLogic: Identifier "' + id + '" is not allowed', 'Expression:', expr.substring(0, 200));
       return false;
     }
 
@@ -727,6 +821,47 @@
     }, result);
   }
 
+  function __nodeArrayReduceGraph(arrayValue, bodyExpression, operation) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const expression = toSafeString(bodyExpression).trim();
+    const product = toSafeString(operation).trim() === "product";
+    let result = product ? 1 : 0;
+    if (!expression) return result;
+    list.forEach((item, index) => {
+      const value = nlWithActiveLoopItem(item, () => safeEvaluateExpression(expression, {
+        __nodeLoopItem: item,
+        __nodeLoopIndex: index,
+        __nodeLoopItemAt: (offset) => list[index + Number(offset)],
+      }), index);
+      const number = Number(value && value.valid ? value.value : value);
+      const safeNumber = Number.isFinite(number) ? number : 0;
+      result = product ? result * safeNumber : result + safeNumber;
+    });
+    return result;
+  }
+
+  function __nodeArrayMultiReduceGraph(arrayValues, bodyExpression, operation) {
+    const lists = Array.isArray(arrayValues) ? arrayValues.map((value) => Array.isArray(value) ? value : []) : [];
+    const length = lists.reduce((max, list) => Math.max(max, list.length), 0);
+    const expression = toSafeString(bodyExpression).trim();
+    const product = toSafeString(operation).trim() === "product";
+    let result = product ? 1 : 0;
+    for (let index = 0; index < length; index++) {
+      const items = lists.map((list) => list[index]);
+      const active = items.find((item) => item && typeof item === "object" && item.nodeType === 1);
+      const value = nlWithActiveLoopItem(active, () => safeEvaluateExpression(expression, {
+        __nodeLoopItem: items[0],
+        __nodeLoopIndex: index,
+        __nodeLoopItemAt: (offset) => items[Number(offset) || 0],
+        __nodeLoopMultiItemAt: (itemIndex) => items[Number(itemIndex)],
+      }), index);
+      const number = Number(value && value.valid ? value.value : value);
+      const safeNumber = Number.isFinite(number) ? number : 0;
+      result = product ? result * safeNumber : result + safeNumber;
+    }
+    return result;
+  }
+
   function __nodeArrayFind(arrayValue, searchValue, fieldPath) {
     const list = Array.isArray(arrayValue) ? arrayValue : [];
     const indexes = list.reduce((matches, item, index) => {
@@ -739,6 +874,90 @@
 
   function __nodeArrayForEach(arrayValue) {
     return Array.isArray(arrayValue) ? arrayValue.slice() : [];
+  }
+
+  function __nodeArrayForEachMulti(arrayValues) {
+    return Array.isArray(arrayValues) ? arrayValues.map((value) => Array.isArray(value) ? value : []) : [];
+  }
+
+  function __nodeFormulaBody(codeUnits) {
+    if (!Array.isArray(codeUnits)) return "";
+    let output = "";
+    for (const unit of codeUnits) {
+      const number = Number(unit);
+      if (Number.isFinite(number) && number >= 0 && number <= 65535) {
+        output += String.fromCharCode(number);
+      }
+    }
+    return output;
+  }
+
+  function __nodeArrayMultiMapGraph(arrayValues, bodyExpression) {
+    const lists = Array.isArray(arrayValues)
+      ? arrayValues.map((value) => Array.isArray(value) ? value : [])
+      : [];
+    const expression = toSafeString(bodyExpression).trim();
+    nlNestedDebug("loop.map.start", { kind: "ForEachMulti", path: nlActiveLoopPath.join("."), inputCount: lists.length, inputLengths: lists.map((list) => list.length), inputs: nlNestedDebugValue(arrayValues), body: expression });
+    if (!expression || lists.length === 0) return [];
+    const length = lists.reduce((max, list) => Math.max(max, list.length), 0);
+    const results = [];
+    for (let index = 0; index < length; index++) {
+      const items = lists.map((list) => list[index]);
+      const active = items.find((item) => item && typeof item === "object" && item.nodeType === 1);
+      nlNestedDebug("loop.map.iteration", { kind: "ForEachMulti", path: nlActiveLoopPath.concat([index]).join("."), index, items: nlNestedDebugValue(items), active: nlNestedDebugValue(active) });
+      results.push(nlWithActiveLoopItem(active, () => {
+        const result = safeEvaluateExpression(expression, {
+          __nodeLoopItem: items[0],
+          __nodeLoopIndex: index,
+          __nodeLoopItemAt: (offset) => items[Number(offset) || 0],
+          __nodeLoopMultiItemAt: (itemIndex) => items[Number(itemIndex)],
+        });
+        nlNestedDebug("loop.map.body", { kind: "ForEachMulti", path: nlActiveLoopPath.join("."), index, valid: result.valid, value: nlNestedDebugValue(result.value) });
+        if (!result.valid) nlNestedDebug("evaluation.invalid", { kind: "ForEachMulti", path: nlActiveLoopPath.join("."), index, body: expression });
+        return result.valid ? result.value : undefined;
+      }, index));
+    }
+    nlNestedDebug("loop.map.end", { kind: "ForEachMulti", path: nlActiveLoopPath.join("."), length: results.length, output: nlNestedDebugValue(results) });
+    return results;
+  }
+
+  window.nodelogicWaitState = window.nodelogicWaitState || {};
+  window.nodelogicWaitObjectIds = window.nodelogicWaitObjectIds || new WeakMap();
+  let nodelogicWaitObjectSequence = 0;
+  function nlWaitSignature(value) {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    if (typeof value !== "object") return `${typeof value}:${String(value)}`;
+    if (Array.isArray(value)) return `array:[${value.map(nlWaitSignature).join(",")}]`;
+    if (!value.nodeType && typeof value !== "function") {
+      try {
+        return `object-json:${JSON.stringify(value, (key, nested) => nested && nested.nodeType ? nlWaitSignature(nested) : nested)}`;
+      } catch {
+        // Fall through to identity for non-serialisable objects.
+      }
+    }
+    let id = window.nodelogicWaitObjectIds.get(value);
+    if (!id) {
+      id = `object:${++nodelogicWaitObjectSequence}`;
+      window.nodelogicWaitObjectIds.set(value, id);
+    }
+    return id;
+  }
+  function __nodeWait(nodeId, value, milliseconds, blockScope) {
+    const safeMs = Math.max(0, Math.min(86400000, Number(milliseconds) || 0));
+    const key = `${toSafeString(blockScope) || "noscope"}::${toSafeString(nodeId)}`;
+    let state = window.nodelogicWaitState[key];
+    const valueSignature = nlWaitSignature(value);
+    const sameValue = state && state.valueSignature === valueSignature;
+    if (!state || !sameValue) {
+      state = window.nodelogicWaitState[key] = { value, valueSignature, readyAt: Date.now() + safeMs, timer: null };
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        scheduleRecalculation();
+      }, safeMs);
+    }
+    return Date.now() >= state.readyAt ? state.value : undefined;
   }
 
   function __nodeArrayCollect(itemValue) {
@@ -767,7 +986,7 @@
     const seenRefs = new Set();
     return list.filter((item) => {
       if (item && typeof item === "object") {
-        // Live DOM nodes (and any non-serialisable object) dedup by identity —
+        // Live DOM nodes (and any non-serialisable object) dedup by identity �
         // JSON.stringify(<element>) is "{}" for every element and would collapse
         // an Array<element> to a single item.
         if (item.nodeType || typeof item.tagName === "string") {
@@ -794,6 +1013,231 @@
     });
   }
 
+  function __nodeArrayGetIndex(arrayValue, indexValue) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const index = Number(indexValue);
+    if (!Number.isFinite(index)) return undefined;
+    
+    const intIndex = Math.trunc(index);
+    // Support negative indexes (count from end)
+    const actualIndex = intIndex < 0 ? list.length + intIndex : intIndex;
+    
+    // Out of bounds check
+    if (actualIndex < 0 || actualIndex >= list.length) return undefined;
+    
+    return list[actualIndex];
+  }
+
+  function __nodeArrayFirstEvent(arrayValue, eventExpression, valueExpression, nodeId) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const eventExpr = toSafeString(eventExpression).trim();
+    const valueExpr = toSafeString(valueExpression).trim();
+    if (!eventExpr || !valueExpr) return undefined;
+    
+    // Track consumed state per event key AND last returned value
+    // A collector inside an outer loop must own independent consumption state
+    // for every outer item. Without the loop path, item 1 consumes the same
+    // event state as item 0 and later clicks appear in the wrong row.
+    const stateKey = nlLoopScopedEventKey(`__firstEvent_${nodeId}`);
+    if (!window[stateKey]) {
+      window[stateKey] = { consumed: {}, lastValue: undefined };
+    }
+    const state = window[stateKey];
+    const consumed = state.consumed;
+    
+    let firstIndex = -1;
+    let firstValue = undefined;
+    let found = false;
+    
+    // Evaluate each item to find the FIRST one with a NEW trigger (not already consumed)
+    for (let index = 0; index < list.length; index++) {
+      if (found) break; // Stop after finding first NEW trigger
+      
+      const item = list[index];
+      
+      nlWithActiveLoopItem(item, () => {
+        // Build full context with loop item and index
+        const loopContext = {
+          __nodeLoopItem: item,
+          __nodeLoopIndex: index,
+          // For Each Context expressions use this resolver for Item,
+          // Previous and Next outputs. The ordinary For Each path only needs
+          // __nodeLoopItem, which is why this omission was previously hidden.
+          __nodeLoopItemAt: (offset) => list[index + Number(offset)],
+        };
+        
+        // Evaluate event expression to get the event object
+        const eventResult = safeEvaluateExpression(eventExpr, loopContext);
+        
+        // Source events live in eventStore, but Event OR/AND can return a
+        // synthetic event object that carries triggeredCount directly. Both
+        // forms are valid collector inputs. Multi-match element queries may
+        // additionally produce an array of event objects.
+        if (eventResult.valid && eventResult.value && typeof eventResult.value === 'object') {
+          const eventCandidates = Array.isArray(eventResult.value)
+            ? eventResult.value
+            : [eventResult.value];
+          for (const eventObj of eventCandidates) {
+            if (found || !eventObj || typeof eventObj !== 'object' || !eventObj.eventKey) continue;
+            const sourceEvent = window.eventStore[eventObj.eventKey];
+            const rawCount = sourceEvent && typeof sourceEvent.triggeredCount === 'number'
+              ? sourceEvent.triggeredCount
+              : eventObj.triggeredCount;
+            const currentCount = Number(rawCount) || 0;
+            const consumedCount = consumed[eventObj.eventKey] || 0;
+            if (currentCount > consumedCount) {
+              const valueResult = safeEvaluateExpression(valueExpr, loopContext);
+              firstIndex = index;
+              firstValue = valueResult.valid ? valueResult.value : undefined;
+              found = true;
+              consumed[eventObj.eventKey] = currentCount;
+            }
+          }
+        }
+      }, index);
+    }
+    
+    // If found new trigger, update last value and return it
+    if (found) {
+      state.lastValue = firstValue;
+      return firstValue;
+    }
+    
+    // No new trigger - return last value (sticky behavior for multiple connections)
+    return state.lastValue;
+  }
+
+  // Event Aggregator - sums triggeredCount from all subgraph events
+  function __nodeArrayEventAggregate(arrayValue, eventExpression, nodeId) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const expression = toSafeString(eventExpression).trim();
+    const aggregateKey = nlLoopScopedEventKey(`__aggregate_${nodeId}`);
+    if (!expression) return { eventKey: aggregateKey, triggeredCount: 0 };
+    
+    let totalTriggeredCount = 0;
+    
+    // Evaluate event expression for each item and sum triggeredCounts
+    // IMPORTANT: Check triggeredCount directly from eventStore to avoid consumption issues
+    list.forEach((item, index) => {
+      nlWithActiveLoopItem(item, () => {
+        const result = safeEvaluateExpression(expression, {
+          __nodeLoopItem: item,
+          __nodeLoopIndex: index,
+          __nodeLoopItemAt: (offset) => list[index + Number(offset)],
+        });
+        
+        // If result is an event object, get triggeredCount from source eventStore
+        if (result.valid && result.value && typeof result.value === 'object') {
+          const eventObj = result.value;
+          
+          // Try to get from eventStore first (most reliable)
+          if (eventObj.eventKey && window.eventStore[eventObj.eventKey]) {
+            const sourceEvent = window.eventStore[eventObj.eventKey];
+            totalTriggeredCount += sourceEvent.triggeredCount || 0;
+          } else if (typeof eventObj.triggeredCount === 'number') {
+            // Fallback to direct property
+            totalTriggeredCount += eventObj.triggeredCount;
+          }
+        }
+      }, index);
+    });
+    
+    // Store the aggregated event in eventStore
+    if (!window.eventStore[aggregateKey]) {
+      window.eventStore[aggregateKey] = {
+        eventKey: aggregateKey,
+        triggeredCount: 0
+      };
+    }
+    
+    // IMPORTANT: Only update if count changed to avoid invalidating evaluation cache
+    const previousCount = window.eventStore[aggregateKey].triggeredCount;
+    if (previousCount !== totalTriggeredCount) {
+      window.eventStore[aggregateKey].triggeredCount = totalTriggeredCount;
+      // Only update timestamp when count actually changes
+      if (totalTriggeredCount > 0) {
+        window.eventStore[aggregateKey].lastTriggeredAt = Date.now();
+      }
+    }
+    
+    return window.eventStore[aggregateKey];
+  }
+
+  function __nodeArrayFirstEventMulti(arrayValues, eventExpression, valueExpression, nodeId) {
+    const lists = Array.isArray(arrayValues) ? arrayValues.map((value) => Array.isArray(value) ? value : []) : [];
+    const length = lists.reduce((max, list) => Math.max(max, list.length), 0);
+    const eventExpr = toSafeString(eventExpression).trim();
+    const valueExpr = toSafeString(valueExpression).trim();
+    const stateKey = nlLoopScopedEventKey(`__firstEventMulti_${nodeId}`);
+    const state = window[stateKey] || (window[stateKey] = { consumed: {}, lastValue: undefined });
+    if (!eventExpr || !valueExpr) return state.lastValue;
+    for (let index = 0; index < length; index++) {
+      const items = lists.map((list) => list[index]);
+      const active = items.find((item) => item && typeof item === "object" && item.nodeType === 1);
+      let found;
+      nlWithActiveLoopItem(active, () => {
+        const context = {
+          __nodeLoopItem: items[0],
+          __nodeLoopIndex: index,
+          __nodeLoopItemAt: (offset) => items[Number(offset) || 0],
+          __nodeLoopMultiItemAt: (itemIndex) => items[Number(itemIndex)],
+        };
+        const eventResult = safeEvaluateExpression(eventExpr, context);
+        const candidates = eventResult.valid && eventResult.value && typeof eventResult.value === "object"
+          ? (Array.isArray(eventResult.value) ? eventResult.value : [eventResult.value]) : [];
+        for (const eventObj of candidates) {
+          if (!eventObj || !eventObj.eventKey) continue;
+          const sourceEvent = window.eventStore[eventObj.eventKey];
+          const current = Number(sourceEvent?.triggeredCount ?? eventObj.triggeredCount) || 0;
+          if (current > (state.consumed[eventObj.eventKey] || 0)) {
+            const result = safeEvaluateExpression(valueExpr, context);
+            found = result.valid ? result.value : undefined;
+            state.consumed[eventObj.eventKey] = current;
+            return;
+          }
+        }
+      }, index);
+      if (found !== undefined) {
+        state.lastValue = found;
+        return found;
+      }
+    }
+    return state.lastValue;
+  }
+
+  function __nodeArrayEventAggregateMulti(arrayValues, eventExpression, nodeId) {
+    const lists = Array.isArray(arrayValues) ? arrayValues.map((value) => Array.isArray(value) ? value : []) : [];
+    const length = lists.reduce((max, list) => Math.max(max, list.length), 0);
+    const expression = toSafeString(eventExpression).trim();
+    // Multi aggregation can itself run inside an outer For Each. Keep one
+    // event stream per active outer path instead of sharing one global event
+    // counter between all rows.
+    const aggregateKey = nlLoopScopedEventKey(`__aggregate_${nodeId}`);
+    let total = 0;
+    for (let index = 0; index < length; index++) {
+      const items = lists.map((list) => list[index]);
+      const active = items.find((item) => item && typeof item === "object" && item.nodeType === 1);
+      nlWithActiveLoopItem(active, () => {
+        const result = safeEvaluateExpression(expression, {
+          __nodeLoopItem: items[0],
+          __nodeLoopIndex: index,
+          __nodeLoopItemAt: (offset) => items[Number(offset) || 0],
+          __nodeLoopMultiItemAt: (itemIndex) => items[Number(itemIndex)],
+        });
+        const value = result.valid ? result.value : null;
+        const candidates = Array.isArray(value) ? value : [value];
+        candidates.forEach((eventObj) => {
+          if (!eventObj || typeof eventObj !== "object") return;
+          const sourceEvent = eventObj.eventKey && window.eventStore[eventObj.eventKey];
+          total += Number(sourceEvent?.triggeredCount ?? eventObj.triggeredCount) || 0;
+        });
+      }, index);
+    }
+    window.eventStore[aggregateKey] = window.eventStore[aggregateKey] || { eventKey: aggregateKey, triggeredCount: 0 };
+    window.eventStore[aggregateKey].triggeredCount = total;
+    return window.eventStore[aggregateKey];
+  }
+
   // Runs `run()` with nlActiveLoopItemElement set to `item` (when it's a live
   // element) for the duration of the call, restoring the previous value
   // afterward (correct for nested maps/filters too, via plain save/restore --
@@ -805,9 +1249,11 @@
     const prevPath = nlActiveLoopPath;
     nlActiveLoopItemElement = (item && typeof item === "object" && item.nodeType === 1) ? item : null;
     nlActiveLoopPath = prevPath.concat([Number.isInteger(index) ? index : 0]);
+    nlNestedDebug("loop.context.enter", { path: nlActiveLoopPath.join("."), index: Number.isInteger(index) ? index : 0, item: nlNestedDebugValue(item), parentPath: prevPath.join(".") });
     try {
       return run();
     } finally {
+      nlNestedDebug("loop.context.exit", { path: nlActiveLoopPath.join("."), index: Number.isInteger(index) ? index : 0 });
       nlActiveLoopItemElement = prev;
       nlActiveLoopPath = prevPath;
     }
@@ -816,11 +1262,41 @@
   function __nodeArrayMapGraph(arrayValue, bodyExpression) {
     const list = Array.isArray(arrayValue) ? arrayValue : [];
     const expression = toSafeString(bodyExpression).trim();
+    nlNestedDebug("loop.map.start", { kind: "ForEach", path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(arrayValue), length: list.length, body: expression });
     if (!expression) return list.slice();
-    return list.map((item, index) => nlWithActiveLoopItem(item, () => {
+    const mapped = list.map((item, index) => nlWithActiveLoopItem(item, () => {
       const result = safeEvaluateExpression(expression, { __nodeLoopItem: item, __nodeLoopIndex: index });
+      nlNestedDebug("loop.map.body", { kind: "ForEach", path: nlActiveLoopPath.join("."), index, valid: result.valid, value: nlNestedDebugValue(result.value) });
+      if (!result.valid) nlNestedDebug("evaluation.invalid", { kind: "ForEach", path: nlActiveLoopPath.join("."), index, body: expression });
       return result.valid ? result.value : undefined;
     }, index));
+    nlNestedDebug("loop.map.end", { kind: "ForEach", path: nlActiveLoopPath.join("."), length: mapped.length, output: nlNestedDebugValue(mapped) });
+    return mapped;
+  }
+
+  function __nodeArrayContextMapGraph(arrayValue, bodyExpression, offsets, boundaryMode) {
+    const list = Array.isArray(arrayValue) ? arrayValue : [];
+    const expression = toSafeString(bodyExpression).trim();
+    const requestedOffsets = Array.isArray(offsets) && offsets.length > 0 ? offsets.map(Number) : [0];
+    if (!expression) return [];
+    return list.reduce((results, item, index) => {
+      const contextItems = requestedOffsets.map((offset) => list[index + offset]);
+      // In skip mode an edge iteration disappears entirely. In empty mode the
+      // iteration must still run with its valid current item: only the missing
+      // Previous/Next output is undefined. This is important for graphs that
+      // use Item (i) to bind an event while optionally reading a neighbour;
+      // suppressing the whole body would incorrectly lose index 0 and the last
+      // index even though their current items are valid.
+      const hasMissingContext = contextItems.some((value) => value === undefined);
+      if (hasMissingContext && toSafeString(boundaryMode).trim() === "skip") return results;
+      const result = nlWithActiveLoopItem(item, () => safeEvaluateExpression(expression, {
+        __nodeLoopItem: item,
+        __nodeLoopIndex: index,
+        __nodeLoopItemAt: (offset) => list[index + Number(offset)],
+      }), index);
+      results.push(result.valid ? result.value : undefined);
+      return results;
+    }, []);
   }
 
   function __nodeArrayFilterGraph(arrayValue, predicateExpression) {
@@ -1384,13 +1860,30 @@
     // to NEVER firing when nothing is wired to Trigger at all -- forgetting
     // to wire it should mean "nothing happens", not "an email on every
     // recalculation".
-    if (!trigger || typeof trigger !== "object" || !trigger.eventKey) return false;
+    if (!trigger || typeof trigger !== "object" || !trigger.eventKey) {
+      nlNestedDebug("event.consume.skip", { path: nlActiveLoopPath.join("."), consumedKey, trigger: nlNestedDebugValue(trigger) });
+      return false;
+    }
     const currentCount = trigger.triggeredCount || 0;
-    const consumedCount = window.eventProcessorConsumed[consumedKey] || 0;
+    // Event gates inside For Each / For Each Context need independent
+    // consumption state per iteration. Without this, item 0 consumes the
+    // shared gate state and later items require extra clicks to catch up.
+    // The same Action Event Gate node can be evaluated for several Output
+    // entries in one loop pass. Its node id alone is not enough: @0 and @1
+    // from Event OR are different event streams and must not consume each
+    // other. Include the concrete trigger event key first, then the active
+    // runtime loop path when one exists.
+    const eventScopedKey = `${consumedKey}::${toSafeString(trigger.eventKey)}`;
+    const loopKey = Array.isArray(nlActiveLoopPath) && nlActiveLoopPath.length
+      ? `${eventScopedKey}@${nlActiveLoopPath.join('.')}`
+      : eventScopedKey;
+    const consumedCount = window.eventProcessorConsumed[loopKey] || 0;
     if (currentCount > consumedCount) {
-      window.eventProcessorConsumed[consumedKey] = currentCount;
+      window.eventProcessorConsumed[loopKey] = currentCount;
+      nlNestedDebug("event.consume.accept", { path: nlActiveLoopPath.join("."), loopKey, eventKey: trigger.eventKey, currentCount, previousCount: consumedCount });
       return true;
     }
+    nlNestedDebug("event.consume.reject", { path: nlActiveLoopPath.join("."), loopKey, eventKey: trigger.eventKey, currentCount, consumedCount });
     return false;
   }
 
@@ -2275,12 +2768,28 @@
     }
   }
 
+  function __nodeCoerceElementProperty(value, requestedType) {
+    const type = toSafeString(requestedType).trim();
+    if (value === null || value === undefined) return value;
+    if (type === "number") {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+    if (type === "boolean") {
+      if (typeof value === "boolean") return value;
+      const text = toSafeString(value).trim().toLowerCase();
+      if (text === "false" || text === "0" || text === "no" || text === "off" || text === "") return false;
+      return true;
+    }
+    return toSafeString(value);
+  }
+
   // Page builders wrap a block's real content in a structural element that
   // carries no authored meaning. Elementor renders every widget as
-  //   <div class="elementor-element" id="my-id"><div class="elementor-widget-container">…content…</div></div>
+  //   <div class="elementor-element" id="my-id"><div class="elementor-widget-container">�content�</div></div>
   // and flex containers add an inner <div class="e-con-inner">. "The children
   // of my-id" means the children of that content, not a one-item list holding
-  // the wrapper — and the editor preview shows it that way. Descend through
+  // the wrapper � and the editor preview shows it that way. Descend through
   // such a wrapper while it is the element's only child. Bounded; a no-op on
   // Gutenberg / plain markup (the wrapper classes never appear there).
   const NL_TRANSPARENT_CONTAINER_CLASSES = [
@@ -2355,24 +2864,36 @@
   // included; a lone structural wrapper is stepped through. Operates on the
   // element's OWN document, so an element resolved from a same-origin iframe
   // yields that iframe's children (no main-document lookup). Returns [] on any
-  // failure (including a cross-origin / unresolved reference) — never throws.
+  // failure (including a cross-origin / unresolved reference) � never throws.
   function __nodeGetChildren(elementRef) {
     try {
       const resolved = nlResolveElementRef(elementRef);
-      if (!nlIsElement(resolved)) return [];
+      if (!nlIsElement(resolved)) {
+        nlNestedDebug("dom.getChildren.invalid-input", { path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(elementRef), resolved: nlNestedDebugValue(resolved) });
+        return [];
+      }
       let node = resolved;
       for (let hop = 0; hop < 6; hop++) {
         const real = nlRenderedChildElements(node);
-        if (real.length !== 1 || !real[0].classList) return real;
+        if (real.length !== 1 || !real[0].classList) {
+          nlNestedDebug("dom.getChildren.result", { path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(elementRef), resolved: nlNestedDebugValue(resolved), length: real.length, children: nlNestedDebugValue(real) });
+          return real;
+        }
         let isWrapper = false;
         for (let i = 0; i < NL_TRANSPARENT_CONTAINER_CLASSES.length; i++) {
           if (real[0].classList.contains(NL_TRANSPARENT_CONTAINER_CLASSES[i])) { isWrapper = true; break; }
         }
-        if (!isWrapper) return real;
+        if (!isWrapper) {
+          nlNestedDebug("dom.getChildren.result", { path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(elementRef), resolved: nlNestedDebugValue(resolved), length: real.length, children: nlNestedDebugValue(real) });
+          return real;
+        }
         node = real[0];
       }
-      return nlRenderedChildElements(node);
+      const result = nlRenderedChildElements(node);
+      nlNestedDebug("dom.getChildren.result", { path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(elementRef), resolved: nlNestedDebugValue(resolved), length: result.length, children: nlNestedDebugValue(result) });
+      return result;
     } catch {
+      nlNestedDebug("dom.getChildren.exception", { path: nlActiveLoopPath.join("."), input: nlNestedDebugValue(elementRef) });
       return [];
     }
   }
@@ -2411,6 +2932,55 @@
       return out;
     } catch {
       return [];
+    }
+  }
+
+  // Find descendants of an element by a simple id (#id) or class (.class).
+  // IDs return one element; classes return the element itself when unique and
+  // an array when multiple descendants match.
+  function __nodeFindChild(elementRef, selectorValue) {
+    try {
+      const selector = toSafeString(selectorValue).trim();
+      nlNestedDebug("dom.findChild.start", { path: nlActiveLoopPath.join("."), selector, input: nlNestedDebugValue(elementRef) });
+      if ((!/^#[A-Za-z0-9_-]+$/.test(selector) && !/^\.[A-Za-z0-9_-]+$/.test(selector))) {
+        nlNestedDebug("dom.findChild.invalid-selector", { path: nlActiveLoopPath.join("."), selector });
+        return null;
+      }
+
+      // In a For Each subgraph an element-producing expression can reach this
+      // node before the loop body is lowered, which means the runtime may see
+      // the whole source array rather than the currently active item. Search
+      // every real parent in that array. Items without the selector simply
+      // contribute no result (e.g. the fourth item in a partially matching
+      // For Each), while direct children and deeper descendants are handled by
+      // the same querySelectorAll call.
+      const parents = Array.isArray(elementRef)
+        ? elementRef.filter((item) => nlIsElement(item))
+        : [nlResolveElementRef(elementRef)].filter((item) => nlIsElement(item));
+      if (!parents.length) {
+        nlNestedDebug("dom.findChild.no-parent", { path: nlActiveLoopPath.join("."), selector, input: nlNestedDebugValue(elementRef) });
+        return null;
+      }
+
+      const matches = [];
+      const seen = new Set();
+      parents.forEach((parent) => {
+        Array.from(parent.querySelectorAll(selector)).forEach((el) => {
+          if (nlIsElementorEditorChrome(el) || seen.has(el)) return;
+          seen.add(el);
+          matches.push(el);
+        });
+      });
+      if (!matches.length) {
+        nlNestedDebug("dom.findChild.no-match", { path: nlActiveLoopPath.join("."), selector, parents: nlNestedDebugValue(parents) });
+        return null;
+      }
+      const result = matches.length === 1 ? matches[0] : matches;
+      nlNestedDebug("dom.findChild.result", { path: nlActiveLoopPath.join("."), selector, matchCount: matches.length, result: nlNestedDebugValue(result) });
+      return result;
+    } catch {
+      nlNestedDebug("dom.findChild.exception", { path: nlActiveLoopPath.join("."), selector: toSafeString(selectorValue), input: nlNestedDebugValue(elementRef) });
+      return null;
     }
   }
 
@@ -2910,7 +3480,7 @@
     const id = el.id ? `#${el.id}` : "";
     const classes = el.classList && el.classList.length ? `.${Array.from(el.classList).slice(0, 3).join(".")}` : "";
     const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
-    return `<${tag}${id}${classes}>${text ? ` "${text.length > 60 ? `${text.slice(0, 60)}…` : text}"` : ""}`;
+    return `<${tag}${id}${classes}>${text ? ` "${text.length > 60 ? `${text.slice(0, 60)}�` : text}"` : ""}`;
   }
 
   // Readable, depth/size-limited structure of any graph value.
@@ -2921,24 +3491,24 @@
     const closePad = "  ".repeat(level);
     if (value === undefined) return "undefined";
     if (value === null) return "null";
-    if (typeof value === "string") return JSON.stringify(value.length > 1000 ? `${value.slice(0, 1000)}…` : value);
+    if (typeof value === "string") return JSON.stringify(value.length > 1000 ? `${value.slice(0, 1000)}�` : value);
     if (typeof value === "number" || typeof value === "boolean") return String(value);
     if (typeof value === "function") return "[function]";
     if (typeof value !== "object") return String(value);
     if (nlIsElement(value)) return nlDebugElementSummary(value);
     if (visited.has(value)) return "[circular]";
-    if (level >= 5) return Array.isArray(value) ? `Array(${value.length}) […]` : "{…}";
+    if (level >= 5) return Array.isArray(value) ? `Array(${value.length}) [�]` : "{�}";
     visited.add(value);
     if (Array.isArray(value)) {
       if (!value.length) return "[]";
       const shown = value.slice(0, 50).map((item, index) => `${pad}${index}: ${nlDebugFormat(item, level + 1, visited)}`);
-      if (value.length > 50) shown.push(`${pad}… ${value.length - 50} more`);
+      if (value.length > 50) shown.push(`${pad}� ${value.length - 50} more`);
       return `Array(${value.length}) [\n${shown.join(",\n")}\n${closePad}]`;
     }
     const keys = Object.keys(value);
     if (!keys.length) return "{}";
     const shown = keys.slice(0, 50).map((key) => `${pad}${key}: ${nlDebugFormat(value[key], level + 1, visited)}`);
-    if (keys.length > 50) shown.push(`${pad}… ${keys.length - 50} more keys`);
+    if (keys.length > 50) shown.push(`${pad}� ${keys.length - 50} more keys`);
     return `{\n${shown.join(",\n")}\n${closePad}}`;
   }
 
@@ -2988,14 +3558,14 @@
     box.style.cssText = `position:relative;padding:10px 32px 10px 12px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.3);border:1px solid ${warning ? "#f59e0b" : "#60a5fa"};background:${warning ? "#451a03" : "#0f172a"};color:${warning ? "#fde68a" : "#e2e8f0"};`;
     const title = document.createElement("div");
     title.style.cssText = "font-weight:700;margin-bottom:4px;font-family:system-ui,sans-serif;";
-    title.textContent = `${warning ? "⚠ " : ""}${label}`;
+    title.textContent = `${warning ? "? " : ""}${label}`;
     const body = document.createElement("pre");
     body.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;";
     body.textContent = text;
     const close = document.createElement("button");
     close.type = "button";
     close.setAttribute("aria-label", "Close");
-    close.textContent = "×";
+    close.textContent = "�";
     close.style.cssText = "position:absolute;top:4px;right:6px;background:none;border:none;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;";
     close.addEventListener("click", () => box.remove());
     box.appendChild(title);
@@ -3007,13 +3577,24 @@
 
   function __nodeDebug(nodeId, kind, label, value, trigger, hasTrigger, everyone, blockScope) {
     try {
-      if (!nlDebugCanShow(everyone === true)) return value;
+      const visible = nlDebugCanShow(everyone === true);
+      nlNestedDebug("debug.enter", { nodeId, kind, label: toSafeString(label), path: nlActiveLoopPath.join("."), visible, hasTrigger, value: nlNestedDebugValue(value) });
+      if (!visible) {
+        nlNestedDebug("debug.hidden", { nodeId, path: nlActiveLoopPath.join("."), reason: everyone === true ? "runtime-debug-config" : "audience-permission" });
+        return value;
+      }
       const key = nlDomInstanceKey(blockScope, nodeId);
       if (hasTrigger) {
-        if (!nlConsumeEventOnce(trigger, `${key}::debug`)) return value;
+        if (!nlConsumeEventOnce(trigger, `${key}::debug`)) {
+          nlNestedDebug("debug.suppressed", { nodeId, path: nlActiveLoopPath.join("."), reason: "trigger-already-consumed", key });
+          return value;
+        }
       } else {
         const signature = nlDebugSignature(value);
-        if (nlDebugLast.get(key) === signature) return value;
+        if (nlDebugLast.get(key) === signature) {
+          nlNestedDebug("debug.suppressed", { nodeId, path: nlActiveLoopPath.join("."), reason: "same-value", key });
+          return value;
+        }
         nlDebugLast.set(key, signature);
       }
       // Burst guard: a value that changes on every pass must not flood.
@@ -3028,6 +3609,7 @@
           burst.noted = true;
           console.warn(`[NodeLogic] ${title}: more than ${NL_DEBUG_BURST_LIMIT} outputs in ${NL_DEBUG_BURST_WINDOW_MS / 1000}s -- further ones are skipped for now.`);
         }
+        nlNestedDebug("debug.suppressed", { nodeId, path: nlActiveLoopPath.join("."), reason: "burst-limit", key });
         return value;
       }
       burst.times.push(now);
@@ -3036,6 +3618,7 @@
       else if (kind === "message") nlDebugShowMessage(title, text, false);
       else if (kind === "message-warn") nlDebugShowMessage(title, text, true);
       else console.log(`[NodeLogic] ${title}:`, value, `\n${text}`);
+      nlNestedDebug("debug.emit", { nodeId, path: nlActiveLoopPath.join("."), key, label: title, kind });
     } catch {
       // debugging must never break the graph
     }
@@ -3178,7 +3761,7 @@
     if (leftScalar === rightScalar) return true;
 
     // Anything still an object (a live DOM node, an array, a plain object) only
-    // matches by reference identity — never by string coercion. Every DOM
+    // matches by reference identity � never by string coercion. Every DOM
     // element JSON-stringifies to "{}" and an <a> stringifies to "", so string
     // comparison would report unrelated elements as equal (breaking
     // array-contains / array-find over Array<element>).
@@ -3226,27 +3809,45 @@
     // lookup, and no ID is written to the DOM. Otherwise, handle both ID
     // (with or without #) and selectors, plus the canonical NodeLogic data-*
     // attribute fallbacks and same-origin preview frames.
-    const isLiveRef = nlIsElement(elementIdOrRef);
+    // Find Child returns one live Element for a single match, but an
+    // Array<Element> when the selector matches several descendants.  Event
+    // Element must accept both shapes; coercing the array to a string turns it
+    // into "[object HTML...],..." and silently makes the event impossible to
+    // resolve on the frontend.
+    const liveElements = Array.isArray(elementIdOrRef)
+      ? elementIdOrRef.filter((item) => nlIsElement(item))
+      : (nlIsElement(elementIdOrRef) ? [elementIdOrRef] : []);
+    const isLiveRef = liveElements.length > 0;
     const id = isLiveRef ? "" : toSafeString(elementIdOrRef).trim();
     if (!isLiveRef && !id) return null;
-    const element = isLiveRef ? elementIdOrRef : resolveNodeElement(id);
+    const resolvedElements = isLiveRef
+      ? liveElements
+      : [resolveNodeElement(id)].filter((item) => nlIsElement(item));
 
-    if (!element) {
+    if (!resolvedElements.length) {
+      nlNestedDebug("event.element.not-found", { path: nlActiveLoopPath.join("."), type, input: nlNestedDebugValue(elementIdOrRef) });
       console.warn(`Element not found: ${id}`);
       return null;
     }
+
+    const element = resolvedElements[0];
 
     // The registry key must stay stable across recalculations for the SAME
     // element -- an id string when one exists (unchanged from before), or a
     // generated-but-stable id (nlEnsureElementId) for a live reference with
     // none, so an id-less child gets its own persistent registration instead
     // of colliding with every other id-less element under the same event type.
-    const key = `${isLiveRef ? nlEnsureElementId(element) : id}_${type}`;
+    const key = `${isLiveRef
+      ? (resolvedElements.length === 1
+        ? nlEnsureElementId(element)
+        : `__array_${resolvedElements.map((item) => nlEnsureElementId(item)).join('|')}`)
+      : id}_${type}`;
     
     // Initialize event data if not exists
     if (!window.eventStore[key]) {
       window.eventStore[key] = { 
-        element, 
+        element,
+        elements: resolvedElements,
         type, 
         triggeredCount: 0,
         eventKey: key
@@ -3255,14 +3856,37 @@
     
     // Set up event listener only once
     if (!window.eventStore[key + '_listener']) {
-      element.addEventListener(type, () => {
-        // Increment trigger count for THIS specific event
-        window.eventStore[key].triggeredCount++;
-        window.eventStore[key].lastTriggeredAt = Date.now();
-        // Trigger recalculation
+      const listener = () => {
+        // Increment trigger count for THIS specific event.  A multi-match
+        // Find Child result intentionally shares one aggregate event object,
+        // so Event Processor receives one firing regardless of which matched
+        // descendant was clicked.
+        const eventData = window.eventStore[key];
+        if (!eventData) return;
+        eventData.triggeredCount++;
+        eventData.lastTriggeredAt = Date.now();
+        nlNestedDebug("event.element.fire", { path: nlActiveLoopPath.join("."), eventKey: key, type, element: nlNestedDebugValue(element) , triggeredCount: eventData.triggeredCount });
         scheduleRecalculation();
-      });
-      window.eventStore[key + '_listener'] = true;
+      };
+      resolvedElements.forEach((target) => target.addEventListener(type, listener));
+      const registration = { elements: resolvedElements, listener, type };
+      // Browsers do not emit a native `change` event when JavaScript changes
+      // textContent/HTML. NodeLogic can change those values through Output or
+      // Action nodes, so Event Element(change) also observes DOM content
+      // mutations. MutationObserver batches one graph write into one event and
+      // therefore avoids firing once per child node mutation.
+      if (type === "change" && typeof MutationObserver !== "undefined") {
+        const observer = new MutationObserver((mutations) => {
+          if (!mutations.some((mutation) => mutation.type === "childList" || mutation.type === "characterData")) return;
+          nlNestedDebug("event.element.mutation", { eventKey: key, type, mutationCount: mutations.length, elements: nlNestedDebugValue(resolvedElements) });
+          listener();
+        });
+        resolvedElements.forEach((target) => {
+          try { observer.observe(target, { childList: true, characterData: true, subtree: true }); } catch { /* detached/cross-document target */ }
+        });
+        registration.observer = observer;
+      }
+      window.eventStore[key + '_listener'] = registration;
     }
 
     // Return event data
@@ -3319,6 +3943,13 @@
   }
 
   function nlEventTriggeredCount(eventValue) {
+    // Event OR accepts a single event, an empty/missing event, or an array of
+    // event values produced by an element query. Missing entries must be
+    // ignored; one valid event input must remain fully active even when the
+    // other input resolves to null.
+    if (Array.isArray(eventValue)) {
+      return eventValue.reduce((total, item) => total + nlEventTriggeredCount(item), 0);
+    }
     return (eventValue && typeof eventValue === "object" && typeof eventValue.triggeredCount === "number")
       ? eventValue.triggeredCount
       : 0;
@@ -3326,22 +3957,36 @@
 
   // Event OR: fires (its own triggeredCount increments) whenever EITHER
   // input event's triggeredCount has increased since this node last saw it.
-  // State is per-node (keyed by the graph node's own id) so two Event OR
-  // nodes never share bookkeeping.
+  // Keep one observation state per loop path. Several Outputs can evaluate the
+  // same OR node during one pass; repeated evaluation must not create extra
+  // firings from already-seen cumulative counters.
   window.eventCombinerState = window.eventCombinerState || {};
+  function nlLoopScopedEventKey(baseKey) {
+    return Array.isArray(nlActiveLoopPath) && nlActiveLoopPath.length
+      ? `${baseKey}@${nlActiveLoopPath.join('.')}`
+      : baseKey;
+  }
   function __nodeEventOr(nodeId, eventA, eventB) {
-    const key = `nlEventOr:${toSafeString(nodeId)}`;
+    const key = nlLoopScopedEventKey(`nlEventOr:${toSafeString(nodeId)}`);
     let state = window.eventCombinerState[key];
     if (!state) state = window.eventCombinerState[key] = { lastA: 0, lastB: 0, count: 0 };
 
     const curA = nlEventTriggeredCount(eventA);
     const curB = nlEventTriggeredCount(eventB);
     let fired = false;
-    if (curA > state.lastA) { fired = true; state.lastA = curA; }
-    if (curB > state.lastB) { fired = true; state.lastB = curB; }
+    if (curA > state.lastA) {
+      fired = true;
+      state.lastA = curA;
+    }
+    if (curB > state.lastB) {
+      fired = true;
+      state.lastB = curB;
+    }
     if (fired) state.count++;
 
-    return { eventKey: key, triggeredCount: state.count };
+    const result = { eventKey: key, triggeredCount: state.count };
+    nlNestedDebug("event.or", { path: nlActiveLoopPath.join("."), nodeId, key, inputA: nlNestedDebugValue(eventA), inputB: nlNestedDebugValue(eventB), curA, curB, state: { ...state }, result });
+    return result;
   }
 
   // Fallback Event: shows Main for `holdMs` from the moment it APPEARS, then
@@ -3404,8 +4049,11 @@
   // evaluation that observes a new firing), that pending firing is dropped --
   // a later firing of either side starts a fresh window instead of ever
   // silently carrying a stale "half fired" state forward.
+  // Event AND keeps pending-side state for its time window. OR deliberately
+  // does not use this store, because it must be safe across multiple Outputs.
+  window.eventCombinerState = window.eventCombinerState || {};
   function __nodeEventAnd(nodeId, eventA, eventB, windowMs) {
-    const key = `nlEventAnd:${toSafeString(nodeId)}`;
+    const key = nlLoopScopedEventKey(`nlEventAnd:${toSafeString(nodeId)}`);
     let state = window.eventCombinerState[key];
     if (!state) state = window.eventCombinerState[key] = { lastA: 0, lastB: 0, pendingSide: null, pendingAt: 0, count: 0 };
 
@@ -3444,23 +4092,31 @@
   // Track if we're currently in an active event flow
   window.activeEventFlow = false;
 
-  function __nodeEventProcessor(eventData, value, passOnlyOnEvent) {
+  function __nodeEventProcessor(eventData, value, passOnlyOnEvent, nodeId) {
     // If passOnlyOnEvent is false (default), always pass the value
     if (!passOnlyOnEvent) {
       return value;
     }
-    
-    // Check if THIS SPECIFIC event was triggered
-    if (eventData && typeof eventData === 'object' && eventData.eventKey) {
-      const key = eventData.eventKey;
-      const currentCount = eventData.triggeredCount || 0;
+
+    // Event Element can be fed by an Array/For Each Context output. In that
+    // case the value is an array of event objects (with undefined entries for
+    // empty boundary items), not one event object. Treat every event object as
+    // an independent source and pass the payload once when any source has a
+    // new firing. The old implementation silently rejected the whole array.
+    const eventList = Array.isArray(eventData) ? eventData : [eventData];
+    for (const event of eventList) {
+      if (!event || typeof event !== 'object' || !event.eventKey) continue;
+
+      // Create a unique consumption key per node instance AND event source so
+      // one Event Processor can consume multiple items without collisions.
+      const key = nodeId
+        ? `eventProcessor::${nodeId}::${event.eventKey}`
+        : event.eventKey;
+      const currentCount = Number(event.triggeredCount) || 0;
       const consumedCount = window.eventProcessorConsumed[key] || 0;
-      
-      // If event was triggered since last consumption, pass the value
+
       if (currentCount > consumedCount) {
-        // Mark this event as consumed for this evaluation
         window.eventProcessorConsumed[key] = currentCount;
-        // Mark that we're in active event flow
         window.activeEventFlow = true;
         return value;
       }
@@ -3668,9 +4324,15 @@
 
       const applyClass = (node) => {
         if (actionType === "addClass") {
-          node.classList.add(className);
+          // Only add if not already present
+          if (!node.classList.contains(className)) {
+            node.classList.add(className);
+          }
         } else if (actionType === "removeClass") {
-          node.classList.remove(className);
+          // Only remove if present
+          if (node.classList.contains(className)) {
+            node.classList.remove(className);
+          }
         } else {
           node.classList.toggle(className);
         }
@@ -5316,6 +5978,9 @@
       const parser = createFormulaParser(tokens);
       ast = parser.parse();
     } catch (e) {
+      try {
+        console.warn('NodeLogic: formula AST parse failed.', e, 'Expression:', String(expr).substring(0, 500));
+      } catch {}
       ast = null;
     }
 
@@ -5328,6 +5993,116 @@
 
     formulaAstCache.set(expr, ast);
     return ast;
+  }
+
+  // Older compiled artifacts stored loop bodies as a quoted formula string.
+  // Nested object/action formulas could contain escaped quotes which made the
+  // outer formula impossible to tokenize after a plugin update. Migrate those
+  // legacy call arguments in memory before parsing; the resulting expression
+  // still goes through the same allowlisted AST evaluator.
+  function repairLegacyLoopBodyEncoding(expression) {
+    const source = String(expression || "");
+    const targets = {
+      __nodeArrayMapGraph: [1],
+      __nodeArrayContextMapGraph: [1],
+      __nodeArrayMultiMapGraph: [1],
+      __nodeArrayFilterGraph: [1],
+      __nodeArrayReduceGraph: [1],
+      __nodeArrayMultiReduceGraph: [1],
+      __nodeArrayEventAggregate: [1],
+      __nodeArrayEventAggregateMulti: [1],
+      __nodeArrayFirstEvent: [1, 2],
+      __nodeArrayFirstEventMulti: [1, 2],
+      // Older artifacts also embedded Raw HTML without escaping attribute
+      // quotes (for example class="nl-card"). Treat its HTML argument as a
+      // legacy literal for the same safe in-memory migration.
+      __nodeRawHtml: [1],
+    };
+    const decodeLegacyBody = (argument) => {
+      const trimmed = String(argument || "").trim();
+      if (trimmed.length < 2 || trimmed[0] !== '"' || trimmed[trimmed.length - 1] !== '"') return null;
+      let body = trimmed.slice(1, -1);
+      let decoded = "";
+      for (let index = 0; index < body.length; index += 1) {
+        if (body[index] !== "\\" || index + 1 >= body.length) {
+          decoded += body[index];
+          continue;
+        }
+        const ref = { value: index + 1 };
+        decoded += decodeFormulaEscape(body[index + 1], body, ref);
+        index = ref.value;
+      }
+      body = decoded;
+      return `__nodeFormulaBody([${Array.from(body).map((char) => char.charCodeAt(0)).join(',')}])`;
+    };
+    const splitArguments = (text) => {
+      const parts = [];
+      let start = 0;
+      let round = 0;
+      let square = 0;
+      let curly = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === '(') round += 1;
+        else if (char === ')') round -= 1;
+        else if (char === '[') square += 1;
+        else if (char === ']') square -= 1;
+        else if (char === '{') curly += 1;
+        else if (char === '}') curly -= 1;
+        else if (char === ',' && round === 0 && square === 0 && curly === 0) {
+          parts.push(text.slice(start, index));
+          start = index + 1;
+        }
+      }
+      parts.push(text.slice(start));
+      return parts;
+    };
+
+    let output = source;
+    let searchFrom = 0;
+    let changed = false;
+    while (searchFrom < output.length) {
+      let foundName = null;
+      let foundAt = output.length;
+      Object.keys(targets).forEach((name) => {
+        const at = output.indexOf(`${name}(`, searchFrom);
+        if (at >= 0 && at < foundAt) {
+          foundAt = at;
+          foundName = name;
+        }
+      });
+      if (!foundName) break;
+
+      const open = foundAt + foundName.length;
+      let depth = 1;
+      let close = -1;
+      for (let index = open + 1; index < output.length; index += 1) {
+        if (output[index] === '(') depth += 1;
+        else if (output[index] === ')' && --depth === 0) {
+          close = index;
+          break;
+        }
+      }
+      if (close < 0) break;
+      const args = splitArguments(output.slice(open + 1, close));
+      let callChanged = false;
+      targets[foundName].forEach((argumentIndex) => {
+        const decoded = decodeLegacyBody(args[argumentIndex]);
+        if (decoded) {
+          args[argumentIndex] = decoded;
+          callChanged = true;
+        }
+      });
+      if (callChanged) {
+        const replacement = `${foundName}(${args.join(',')})`;
+        output = output.slice(0, foundAt) + replacement + output.slice(close + 1);
+        searchFrom = foundAt + replacement.length;
+        changed = true;
+      } else {
+        searchFrom = close + 1;
+      }
+    }
+    return changed ? output : source;
   }
 
   function createFormulaEvalContext(extraContext = {}) {
@@ -5356,6 +6131,8 @@
       __nodeArrayMap,
       __nodeArrayFilter,
       __nodeArrayReduce,
+      __nodeArrayReduceGraph,
+      __nodeArrayMultiReduceGraph,
       __nodeArrayFind,
       __nodeArrayForEach,
       __nodeArrayCollect,
@@ -5363,10 +6140,22 @@
       __nodeArrayLength,
       __nodeArrayMerge,
       __nodeArrayUnique,
+      __nodeArrayGetIndex,
+      __nodeArrayFirstEvent,
+      __nodeArrayEventAggregate,
+      __nodeArrayFirstEventMulti,
+      __nodeArrayEventAggregateMulti,
       __nodeArrayMapGraph,
+      __nodeArrayContextMapGraph,
       __nodeArrayFilterGraph,
+      __nodeArrayForEachMulti,
+      __nodeArrayMultiMapGraph,
+      __nodeFormulaBody,
       __nodeLoopItem: extraContext.__nodeLoopItem,
       __nodeLoopIndex: extraContext.__nodeLoopIndex,
+      __nodeLoopItemAt: extraContext.__nodeLoopItemAt,
+      __nodeLoopMultiItemAt: extraContext.__nodeLoopMultiItemAt,
+      __nodeWait: (nodeId, value, milliseconds) => __nodeWait(nodeId, value, milliseconds, extraContext.__nodeBlockScope),
       __nodeApiRequest,
       __nodeApiStatus,
       __nodeApiListMapper,
@@ -5374,7 +6163,9 @@
       __nodeImageFromElement,
       __nodeGetElement,
       __nodeGetElementProp,
+      __nodeCoerceElementProperty,
       __nodeGetChildren,
+      __nodeFindChild,
       __nodeGetChildAt,
       __nodeGetChildrenSubset,
       __nodeToBase,
@@ -5684,11 +6475,25 @@
 
   function safeEvaluateExpression(expr, extraContext = {}) {
     try {
-      if (!isPreparedExpressionSafe(expr)) {
+      let sourceExpression = expr;
+      // Repair legacy nested-loop strings before the safety pass as well: the
+      // old escaped representation is not tokenizable by design.
+      const repairedExpression = repairLegacyLoopBodyEncoding(sourceExpression);
+      if (repairedExpression !== sourceExpression) {
+        sourceExpression = repairedExpression;
+      }
+      if (!isPreparedExpressionSafe(sourceExpression)) {
         return { valid: false, value: undefined };
       }
 
-      const ast = getCachedFormulaAst(expr);
+      let ast = getCachedFormulaAst(sourceExpression);
+      if (!ast) {
+        const repairedExpression = repairLegacyLoopBodyEncoding(sourceExpression);
+        if (repairedExpression !== sourceExpression) {
+          sourceExpression = repairedExpression;
+          ast = getCachedFormulaAst(sourceExpression);
+        }
+      }
       if (!ast) {
         return { valid: false, value: undefined };
       }
@@ -5712,6 +6517,9 @@
       const value = evalFormulaNode(ast, context, 0);
       return { valid: true, value };
     } catch (e) {
+      try {
+        console.warn('NodeLogic: formula evaluation failed; graph evaluation skipped.', e, 'Expression:', String(expr).substring(0, 300));
+      } catch {}
       return { valid: false, value: undefined };
     }
   }
@@ -6779,21 +7587,51 @@
   // SAME cache entry every time: the formula would only ever be evaluated
   // once (for whichever recalculation first produced that key) and every
   // later occurrence of the event would silently reuse that stale, frozen
-  // result forever. Folding every event's triggeredCount into the cache key
-  // makes a genuinely new event occurrence always force a fresh evaluation.
-  function getEventStoreSignature() {
+  // Extract event keys that are actually used in a formula
+  // This allows per-formula cache invalidation instead of global
+  function extractEventKeysFromFormula(formula) {
+    const keys = new Set();
+    
+    // Match event function calls: __nodeEvent, __nodePageLoadEvent, __nodeTimerEvent, etc.
+    // Also match eventStore references
+    const eventFunctionPattern = /__node(?:Event|PageLoadEvent|TimerEvent|CustomEvent|HoverEvent|EventOr|EventAnd|FallbackEvent|ArrayEventAggregate)\(/g;
+    
+    // If formula contains event functions, we need to check eventStore
+    const hasEventFunctions = eventFunctionPattern.test(formula);
+    
+    // Check for direct eventStore references (used by Event Aggregator, First Event Collector)
+    const hasEventStoreRef = formula.includes('window.eventStore') || formula.includes('eventStore[');
+    
+    if (hasEventFunctions || hasEventStoreRef) {
+      // For now, return null to indicate "needs full eventStore"
+      // In future, we could parse the actual event keys from function args
+      return null;
+    }
+    
+    // If no event functions, return empty set (doesn't depend on any events)
+    return keys;
+  }
+
+  // Get event store signature for specific event keys (or all if null)
+  function getEventStoreSignature(eventKeys = null) {
     const store = window.eventStore;
     if (!store) return "";
     const parts = [];
+    
     for (const key in store) {
       if (!Object.prototype.hasOwnProperty.call(store, key)) continue;
       const entry = store[key];
       // Skips the boolean `${key}_listener` registration markers alongside
       // the real {triggeredCount} entries -- only the latter match this shape.
       if (entry && typeof entry === "object" && typeof entry.triggeredCount === "number") {
-        parts.push(`${key}:${entry.triggeredCount}`);
+        // If eventKeys is null, include all events (backward compatible)
+        // If eventKeys is provided, only include events in the set
+        if (eventKeys === null || eventKeys.size === 0 || eventKeys.has(key)) {
+          parts.push(`${key}:${entry.triggeredCount}`);
+        }
       }
     }
+    
     parts.sort();
     return parts.join(",");
   }
@@ -7122,15 +7960,42 @@
   function applyLogicBlocks() {
     if (!DOM.logicBlocks.length) return;
     const values = getAllDynamicValues();
-    // Computed once per pass (matches `values` above): every logic block's
-    // cache key folds this in, so any event firing anywhere forces a fresh
-    // evaluation for every block that could be affected by it.
-    const eventStoreSignature = getEventStoreSignature();
+    // NOTE: eventStoreSignature is now computed per-block (see below), using only
+    // the events actually referenced in that block's formula. This allows
+    // unrelated blocks to maintain their evaluation cache when an event they
+    // don't use fires elsewhere, preventing unnecessary re-execution.
     const activeActionTargets = new Set();
 
     DOM.logicBlocks.forEach((block, blockIndex) => {
-      const formula = (block.dataset.formula || "").trim();
+      const authoritative = authoritativeLogic.get(block);
+      const serverRenderedBlock = Boolean(String(block.dataset.postId || '').trim());
+      if (serverRenderedBlock && (!authoritative || block.hasAttribute('data-formula') || block.hasAttribute('data-output-configs'))) {
+        // A changed hidden element is not a new graph. Disable this block and
+        // remove bindings created by its last trusted evaluation.
+        const blockScope = `${String(block.dataset.editorId || "").trim() || "noid"}#${blockIndex}`;
+        Object.keys(window.nodelogicActionBindings || {}).forEach((key) => {
+          if (key.startsWith(`${blockScope}::`)) removeActionBinding(key);
+        });
+        try { console.warn("NodeLogic: graph changed outside WordPress and was blocked."); } catch {}
+        nlFormulaAuditRecord("graph.blocked", {
+          blockIndex,
+          reason: !authoritative ? "missing-authority" : "mutable-dom-formula-attributes",
+          hasDataFormula: block.hasAttribute('data-formula'),
+          hasDataOutputConfigs: block.hasAttribute('data-output-configs'),
+        });
+        return;
+      }
+      const formula = serverRenderedBlock
+        ? authoritative.formula
+        : (block.dataset.formula || "").trim();
       if (!formula) return;
+
+      nlFormulaAuditRecord("evaluation.start", {
+        blockIndex,
+        formulaLength: formula.length,
+        formulaHead: formula.slice(0, 900),
+        serverRenderedBlock,
+      });
 
       // An Output entry's bookkeeping key (entryKey, below) is derived ONLY
       // from that Output NODE's own graph id -- unique within the graph that
@@ -7165,13 +8030,20 @@
       // into one binding scope.
       const blockScope = `${String(block.dataset.editorId || "").trim() || "noid"}#${blockIndex}`;
 
+      nlNestedDebug("graph.pass.start", {
+        blockIndex,
+        blockScope,
+        formulaLength: formula.length,
+        formula
+      });
+
       // Reset active event flow for this logic block
       window.activeEventFlow = false;
 
       // Parse output configs
       let outputConfigs = {};
       try {
-        const configsRaw = block.dataset.outputConfigs || "{}";
+        const configsRaw = serverRenderedBlock ? authoritative.outputConfigs : (block.dataset.outputConfigs || "{}");
         outputConfigs = JSON.parse(configsRaw);
       } catch (e) {
         // Ignore parse errors
@@ -7191,6 +8063,12 @@
       } catch {
         valuesSignature = "";
       }
+      
+      // Extract event keys used in this formula to compute a scoped event signature
+      // This allows cache to remain valid when unrelated events fire
+      const relevantEventKeys = extractEventKeysFromFormula(formula);
+      const eventStoreSignature = getEventStoreSignature(relevantEventKeys);
+      
       // blockScope is folded into the cache key too: a formula that reads
       // block-scoped memory (__nodeMemoryGet/Set with the default 'widget'
       // scope) produces a DIFFERENT result per logic block even when the
@@ -7207,6 +8085,7 @@
       // -- so only actions computed by a genuinely FRESH evaluation this pass
       // are (re-)applied below; see isFreshEvaluation.
       const isFreshEvaluation = !evaluation;
+      
       if (!evaluation) {
         const usesDomInstances = formula.indexOf("__nodeRawHtml") !== -1 || formula.indexOf("__nodeCloneElement") !== -1;
         if (usesDomInstances) nlBeginDomPass(blockScope);
@@ -7224,7 +8103,7 @@
         if (usesDomInstances && evaluation.valid) nlSweepDomInstances(blockScope);
         // An Output "Element" pin resolves to a live DOM node inside the result
         // (raw.__element). That node can be replaced between recalculations, so
-        // its evaluation must NOT be cached — a stale entry would hand a
+        // its evaluation must NOT be cached � a stale entry would hand a
         // detached node to the value / action path. Everything else caches as
         // before.
         const entryHoldsElement = (v) =>
@@ -7287,7 +8166,31 @@
           formulaEvaluationCache.set(evaluationKey, evaluation);
         }
       }
-      if (!evaluation.valid || !evaluation.value || typeof evaluation.value !== "object") return;
+      if (!evaluation.valid || !evaluation.value || typeof evaluation.value !== "object") {
+        nlFormulaAuditRecord("evaluation.invalid", {
+          blockIndex,
+          valid: evaluation.valid,
+          value: nlFormulaAuditValue(evaluation.value),
+          preparedHead: String(evaluation.prepared || "").slice(0, 900),
+        });
+        nlNestedDebug("graph.pass.invalid", { blockIndex, blockScope, valid: evaluation.valid, value: nlNestedDebugValue(evaluation.value), prepared: evaluation.prepared || "" });
+        return;
+      }
+
+      nlFormulaAuditRecord("evaluation.result", {
+        blockIndex,
+        valid: evaluation.valid,
+        value: nlFormulaAuditValue(evaluation.value),
+        outputConfigKeys: Object.keys(outputConfigs || {}).slice(0, 30),
+      });
+
+      nlNestedDebug("graph.pass.evaluation", {
+        blockIndex,
+        blockScope,
+        valid: evaluation.valid,
+        value: nlNestedDebugValue(evaluation.value),
+        cache: !isFreshEvaluation
+      });
 
       const map = evaluation.value;
       // An Output node driven by a For Each loop yields an ARRAY of per-item
@@ -7295,17 +8198,33 @@
       // one synthetic key per item so every iteration is applied independently;
       // action-binding keys stay unique so iterations can't clobber each other.
       const outputEntries = [];
-      Object.keys(map).forEach(key => {
-        const value = map[key];
+      const flattenOutputValue = (key, value, path = []) => {
         if (Array.isArray(value)) {
-          value.forEach((item, itemIndex) => {
-            if (item && typeof item === "object") {
-              outputEntries.push([`${key}#${itemIndex}`, item]);
-            }
-          });
-        } else {
-          outputEntries.push([key, value]);
+          value.forEach((item, itemIndex) => flattenOutputValue(key, item, [...path, itemIndex]));
+          return;
         }
+        if (value && typeof value === "object") {
+          outputEntries.push([path.length ? `${key}#${path.join(".")}` : key, value]);
+        }
+      };
+      Object.keys(map).forEach(key => flattenOutputValue(key, map[key]));
+      nlNestedDebug("graph.outputs.flattened", {
+        blockIndex,
+        blockScope,
+        rootKeys: Object.keys(map),
+        outputEntryCount: outputEntries.length,
+        entries: outputEntries.map(([key, raw]) => ({ key, raw: nlNestedDebugValue(raw) }))
+      });
+      nlFormulaAuditRecord("outputs.flattened", {
+        blockIndex,
+        rootKeys: Object.keys(map),
+        outputEntryCount: outputEntries.length,
+        entries: outputEntries.slice(0, 30).map(([key, raw]) => ({
+          key,
+          payloadKeys: raw && typeof raw === "object" ? Object.keys(raw).slice(0, 30) : [],
+          hasElement: Boolean(raw && raw.__element && raw.__element.nodeType === 1),
+          actionCount: Array.isArray(raw && raw.actions) ? raw.actions.length : 0,
+        })),
       });
       outputEntries.forEach(([entryKey, raw]) => {
         if (!raw || typeof raw !== "object") return;
@@ -7321,19 +8240,33 @@
             : null;
 
         // entryKey is unique PER OUTPUT NODE (never the target id/element
-        // identity — two different Output nodes can target the same element).
+        // identity � two different Output nodes can target the same element).
         // The actual DOM target id to look up lives inside the payload
         // (__targetId), falling back to entryKey for formulas compiled before
         // that field existed, where entryKey WAS the literal target id.
         const targetId = typeof raw.__targetId === "string" && raw.__targetId ? raw.__targetId : entryKey;
 
-        // Check if this output should execute on first load
+        // Check if this output should execute
         const config = outputConfigs[targetId] || {};
         const executeOnLoad = elementInstance
           ? (raw.__executeOnLoad !== false)
           : (config.executeOnLoad !== false); // Default true
-        if (isFirstExecution && !executeOnLoad) {
-          return; // Skip this output on first execution
+        
+        // Check if this output has actions with event triggers
+        const actionNodes = Array.isArray(raw.actions) ? raw.actions : [];
+        const hasEventTriggers = actionNodes.some(action => {
+          if (!action || typeof action !== "object") return false;
+          // Check if action has event trigger (eventGate type uses 'trigger' field)
+          return action.type === "eventGate" && action.trigger !== undefined;
+        });
+        
+        // Skip output if executeOnLoad is false AND we're not in an active event flow
+        // AND it doesn't have event triggers in actions
+        // This prevents outputs with executeOnLoad=false from executing when unrelated
+        // events fire elsewhere in the same logic block
+        if (!executeOnLoad && !window.activeEventFlow && !hasEventTriggers) {
+          nlNestedDebug("output.skip", { entryKey, targetId, reason: "executeOnLoad=false", path: nlActiveLoopPath.join(".") });
+          return; // Skip this output unless it's triggered by an event
         }
 
         // Find target element
@@ -7343,7 +8276,11 @@
           || document.querySelector(`[data-nodelogic-chart-id="${CSS.escape(targetId)}"]`)
           || document.querySelector(`[data-nodelogic-custom-element-id="${CSS.escape(targetId)}"]`)
           || document.querySelector(`[data-slider-id="${CSS.escape(targetId)}"]`);
-        if (!target) return;
+        if (!target) {
+          nlNestedDebug("output.target-not-found", { entryKey, targetId, path: nlActiveLoopPath.join("."), raw: nlNestedDebugValue(raw) });
+          return;
+        }
+        nlNestedDebug("output.apply", { entryKey, targetId, path: nlActiveLoopPath.join("."), target: nlNestedDebugValue(target), actions: nlNestedDebugValue(actionNodes), payload: nlNestedDebugValue(raw) });
 
         // Resolve actual input if we got a container div
         let inputEl = target;
@@ -7370,7 +8307,7 @@
           }
         }
         // The Element-pin payload carries meta keys (__element/__executeOnLoad),
-        // so its "raw" object is never a structured chart/zip payload — use the
+        // so its "raw" object is never a structured chart/zip payload � use the
         // extracted value. (Structured targets are NodeLogic blocks addressed by id.)
         const structuredValue = (!elementInstance && shouldPreserveStructuredPayload(raw)) ? raw : payload.value;
         const arrayListRoot = target.matches("[data-nodelogic-array-list='1'], .nodelogic-array-list");
@@ -7654,7 +8591,7 @@
             updateSliderUI(sliderContainer);
           }
         }
-        const actionNodes = Array.isArray(raw.actions) ? raw.actions : [];
+        // actionNodes already defined earlier for event trigger check
         if (actionNodes.length > 0) {
           // Bookkeeping (listener registration / dedup / cleanup) is keyed by
           // bindingKey = this logic block's own stable identity + entryKey
@@ -7685,16 +8622,30 @@
           // because this pass happened to hash to the same evaluationKey; a
           // brand new binding still needs its listeners/actions applied once
           // even on a cache hit, since nothing has been applied to it yet.
-          if (isFreshEvaluation || bindingJustCreated) {
+          
+          const actionsSignature = JSON.stringify(actionNodes);
+          const lastActionsSignature = bindingState.lastActionsSignature;
+          const actionsChanged = lastActionsSignature !== actionsSignature;
+
+          // Listener registration is structural and must stay deduplicated.
+          // Applying leaf actions is occurrence-driven: a fresh event can
+          // legitimately produce the exact same action JSON as the previous
+          // event, and it still has to run (e.g. Set Text or Toggle Class on
+          // every click). The old actionsChanged gate dropped all repeats.
+          if (actionsChanged || bindingJustCreated) {
             pruneStaleActionListeners(bindingState, collectActionEventKeys(actionNodes, new Set()));
             registerActionListeners(target, inputEl, actionNodes, bindingKey, bindingState);
+            // Remember this actions signature for next pass
+            bindingState.lastActionsSignature = actionsSignature;
+          }
+          if (isFreshEvaluation || bindingJustCreated) {
             applyLeafActionNodes(target, inputEl, actionNodes);
           }
         } else {
           removeActionBinding(`${blockScope}::${entryKey}`);
         }
         if (raw["custom-css"] !== undefined) {
-          // Apply raw CSS string via cssText append â€” parse key:value pairs
+          // Apply raw CSS string via cssText append — parse key:value pairs
           const css = toSafeString(raw["custom-css"]).trim();
           if (css) {
             css.split(";").forEach(rule => {
@@ -7848,10 +8799,117 @@
   // =====================
   // INIT
   // =====================
+  async function loadAuthoritativeLogic() {
+    const endpoint = window.nodelogicFrontendConfig && window.nodelogicFrontendConfig.logicEndpoint;
+    if (!DOM.logicBlocks.length) return;
+    if (!endpoint) {
+      // Legacy/test-only blocks have no server identity. Real rendered plugin
+      // blocks always carry data-post-id and therefore fail closed below.
+      DOM.logicBlocks.forEach((block) => {
+        if (!block.dataset.postId) {
+          authoritativeLogic.set(block, {
+            formula: (block.dataset.formula || '').trim(),
+            outputConfigs: block.dataset.outputConfigs || '{}',
+          });
+        }
+      });
+      return;
+    }
+
+    await Promise.all(DOM.logicBlocks.map(async (block) => {
+      const postId = String(block.dataset.postId || '').trim();
+      const editorId = String(block.dataset.editorId || '').trim();
+      const graphId = String(block.dataset.graphId || editorId || '').trim();
+      if (!/^\d+$/.test(postId) || Number(postId) <= 0 || !editorId) {
+        authoritativeLogic.delete(block);
+        return;
+      }
+
+      try {
+        const url = new URL(endpoint, window.location.href);
+        url.searchParams.set('post_id', postId);
+        url.searchParams.set('editor_id', editorId);
+        url.searchParams.set('graph_id', graphId);
+        const response = await fetch(url.toString(), {
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`server returned ${response.status} for graph ${graphId} on post ${postId}`);
+        const source = await response.json();
+        const rawFormula = typeof source.formula === 'string' ? source.formula.trim() : '';
+        const normalizedFormula = repairLegacyLoopBodyEncoding(rawFormula);
+        nlFormulaAuditRecord("authority.loaded", {
+          blockIndex: DOM.logicBlocks.indexOf(block),
+          postId,
+          editorId,
+          graphId,
+          status: response.status,
+          rawFormulaLength: rawFormula.length,
+          rawFormulaHead: rawFormula.slice(0, 700),
+          normalizedFormulaLength: normalizedFormula.length,
+          normalizedFormulaHead: normalizedFormula.slice(0, 700),
+          migrated: normalizedFormula !== rawFormula,
+          outputConfigType: Array.isArray(source.outputConfigs) ? "array" : typeof source.outputConfigs,
+          outputConfigKeys: source.outputConfigs && typeof source.outputConfigs === "object" ? Object.keys(source.outputConfigs).slice(0, 30) : [],
+        });
+        authoritativeLogic.set(block, {
+          formula: normalizedFormula,
+          outputConfigs: JSON.stringify(
+            source.outputConfigs && typeof source.outputConfigs === 'object'
+              ? source.outputConfigs
+              : {}
+          ),
+        });
+      } catch (error) {
+        // Fail closed: never execute a formula supplied only by a mutable DOM
+        // attribute when the authoritative WordPress source is unavailable.
+        authoritativeLogic.delete(block);
+        nlFormulaAuditRecord("authority.failed", {
+          blockIndex: DOM.logicBlocks.indexOf(block),
+          postId,
+          editorId,
+          graphId,
+          error: String(error && error.message || error),
+        });
+        try {
+          console.warn('NodeLogic: authoritative graph could not be loaded; logic block disabled.', error);
+        } catch {}
+      }
+    }));
+  }
+
   function init() {
     cacheDOM();
-    bindEvents();
-    recalculateAll();
+    nlFormulaAuditRecord("dom.scan", {
+      logicBlockCount: DOM.logicBlocks.length,
+      logicBlocks: DOM.logicBlocks.map((block, index) => ({
+        index,
+        tag: String(block.tagName || "").toLowerCase(),
+        id: block.id || "",
+        postId: block.dataset.postId || "",
+        editorId: block.dataset.editorId || "",
+        graphId: block.dataset.graphId || "",
+        hasFormula: block.hasAttribute("data-formula"),
+        hasOutputConfigs: block.hasAttribute("data-output-configs"),
+      })),
+      endpoint: Boolean(window.nodelogicFrontendConfig && window.nodelogicFrontendConfig.logicEndpoint),
+    });
+    const endpoint = window.nodelogicFrontendConfig && window.nodelogicFrontendConfig.logicEndpoint;
+    const legacyOnly = !endpoint && DOM.logicBlocks.every((block) => !String(block.dataset.postId || '').trim());
+    if (legacyOnly) {
+      DOM.logicBlocks.forEach((block) => authoritativeLogic.set(block, {
+        formula: (block.dataset.formula || '').trim(),
+        outputConfigs: block.dataset.outputConfigs || '{}',
+      }));
+      bindEvents();
+      recalculateAll();
+      return;
+    }
+    loadAuthoritativeLogic().then(() => {
+      bindEvents();
+      recalculateAll();
+    });
   }
 
   if (document.readyState === "complete" || document.readyState === "interactive") {
@@ -7861,4 +8919,7 @@
   }
 })();
 
+
+
+// Version update to force cache refresh
 

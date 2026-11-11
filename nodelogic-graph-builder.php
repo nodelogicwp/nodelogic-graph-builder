@@ -3,7 +3,7 @@
  * Plugin Name: NodeLogic Graph Builder
  * Description: Visual no-code calculator and workflow builder for Gutenberg blocks with conditional logic, dynamic content, and reusable presets.
  * Plugin URI: https://nodelogicwp.com
- * Version: 1.6.0
+ * Version: 1.6.1
  * Author: Volodymyr Diadiunov
  * Author URI: https://nodelogicwp.com
  * License: GPL-2.0-or-later
@@ -18,8 +18,260 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('NODELOGIC_VERSION')) {
-    define('NODELOGIC_VERSION', '1.6.0');
+    define('NODELOGIC_VERSION', '1.6.1');
 }
+
+/**
+ * Return the persisted logic for a rendered block/widget.
+ *
+ * The DOM is deliberately not used as the authority for the runtime formula:
+ * it is user-editable in DevTools. This endpoint reads the saved post data.
+ */
+if (!function_exists('nodelogic_find_gutenberg_logic_block')) {
+    function nodelogic_find_gutenberg_logic_block(array $blocks, string $editor_id): ?array
+    {
+        foreach ($blocks as $block) {
+            if (($block['blockName'] ?? '') === 'custom/nodelogic-logic') {
+                $attributes = is_array($block['attrs'] ?? null) ? $block['attrs'] : [];
+                if ((string) ($attributes['editorId'] ?? '') === $editor_id) {
+                    return [
+                        'formula' => is_string($attributes['formula'] ?? null) ? $attributes['formula'] : '',
+                        'outputConfigs' => is_array($attributes['outputConfigs'] ?? null) ? $attributes['outputConfigs'] : [],
+                    ];
+                }
+            }
+
+            $inner = is_array($block['innerBlocks'] ?? null) ? $block['innerBlocks'] : [];
+            $found = nodelogic_find_gutenberg_logic_block($inner, $editor_id);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+
+        return null;
+    }
+}
+
+if (!function_exists('nodelogic_find_elementor_logic_widget')) {
+    function nodelogic_find_elementor_logic_widget($nodes, string $editor_id): ?array
+    {
+        if (!is_array($nodes)) {
+            return null;
+        }
+
+        foreach ($nodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            if (($node['widgetType'] ?? '') === 'nodelogic_logic_widget') {
+                $settings = is_array($node['settings'] ?? null) ? $node['settings'] : [];
+                if ((string) ($settings['editor_id'] ?? '') === $editor_id) {
+                    $output_configs = $settings['output_configs'] ?? [];
+                    if (is_string($output_configs)) {
+                        $output_configs = json_decode($output_configs, true);
+                    }
+                    return [
+                        'formula' => is_string($settings['formula'] ?? null) ? $settings['formula'] : '',
+                        'outputConfigs' => is_array($output_configs) ? $output_configs : [],
+                    ];
+                }
+            }
+
+            $found = nodelogic_find_elementor_logic_widget($node['elements'] ?? [], $editor_id);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+
+        return null;
+    }
+}
+
+if (!function_exists('nodelogic_compiled_graphs')) {
+    function nodelogic_compiled_graphs(int $post_id): array
+    {
+        $stored = get_post_meta($post_id, '_nodelogic_compiled_graphs', true);
+        return is_array($stored) ? $stored : [];
+    }
+}
+
+if (!function_exists('nodelogic_compiled_graph_registry')) {
+    function nodelogic_compiled_graph_registry(): array
+    {
+        $stored = get_option('_nodelogic_compiled_graph_registry', []);
+        return is_array($stored) ? $stored : [];
+    }
+}
+
+if (!function_exists('nodelogic_compile_graph_payload')) {
+    function nodelogic_compile_graph_payload(array $payload)
+    {
+        $formula = is_string($payload['formula'] ?? null) ? trim($payload['formula']) : '';
+        $graph_state = is_array($payload['graphState'] ?? null) ? $payload['graphState'] : [];
+        $output_configs = is_array($payload['outputConfigs'] ?? null) ? $payload['outputConfigs'] : [];
+
+        if ($formula === '' || strlen($formula) > 262144) {
+            return new WP_Error('nodelogic_invalid_formula', 'The graph formula is empty or too large.', ['status' => 400]);
+        }
+        if (count($graph_state) > 10000 || count($output_configs) > 10000) {
+            return new WP_Error('nodelogic_graph_too_large', 'The graph is too large.', ['status' => 400]);
+        }
+
+        $canonical = wp_json_encode([
+            'formula' => $formula,
+            'graphState' => $graph_state,
+            'outputConfigs' => $output_configs,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return [
+            'formula' => $formula,
+            'graphState' => $graph_state,
+            'outputConfigs' => $output_configs,
+            'hash' => hash('sha256', (string) $canonical),
+            'compiledAt' => time(),
+            'version' => 1,
+        ];
+    }
+}
+
+add_action('rest_api_init', function () {
+    register_rest_route('nodelogic/v1', '/logic', [
+        [
+        'methods' => 'GET',
+        'permission_callback' => '__return_true',
+        'args' => [
+            'post_id' => [
+                'required' => true,
+                'sanitize_callback' => 'absint',
+                'validate_callback' => static function ($value): bool {
+                    return (int) $value > 0;
+                },
+            ],
+            'editor_id' => [
+                'required' => false,
+                'sanitize_callback' => 'sanitize_text_field',
+                'validate_callback' => static function ($value): bool {
+                    return is_string($value) && $value !== '' && strlen($value) <= 190;
+                },
+            ],
+            'graph_id' => [
+                'required' => false,
+                'sanitize_callback' => 'sanitize_key',
+            ],
+        ],
+        'callback' => static function (WP_REST_Request $request) {
+            $post_id = (int) $request->get_param('post_id');
+            $graph_id = sanitize_key((string) $request->get_param('graph_id'));
+            $editor_id = (string) $request->get_param('editor_id');
+            $post = get_post($post_id);
+
+            $can_read_unpublished = $post && current_user_can('read_post', $post_id);
+            if (
+                !$post
+                || !is_post_type_viewable($post->post_type)
+                || ($post->post_status !== 'publish' && !$can_read_unpublished)
+            ) {
+                return new WP_Error('nodelogic_not_found', 'Logic source not found.', ['status' => 404]);
+            }
+
+            if ($graph_id !== '') {
+                $compiled = nodelogic_compiled_graphs($post_id);
+                $artifact = isset($compiled[$graph_id]) && is_array($compiled[$graph_id])
+                    ? $compiled[$graph_id]
+                    : null;
+                if ($artifact === null) {
+                    $registry = nodelogic_compiled_graph_registry();
+                    $artifact = isset($registry[$graph_id]) && is_array($registry[$graph_id])
+                        ? $registry[$graph_id]
+                        : null;
+                }
+                if ($artifact === null) {
+                    return new WP_Error('nodelogic_not_compiled', 'This graph has not been compiled.', ['status' => 404]);
+                }
+                $owner_id = (int) ($artifact['postId'] ?? $post_id);
+                $owner = get_post($owner_id);
+                $owner_readable = $owner && is_post_type_viewable($owner->post_type)
+                    && ($owner->post_status === 'publish' || current_user_can('read_post', $owner_id));
+                if (!$owner_readable) {
+                    return new WP_Error('nodelogic_not_found', 'Logic source not found.', ['status' => 404]);
+                }
+                return rest_ensure_response([
+                    'graphId' => $graph_id,
+                    'formula' => (string) ($artifact['formula'] ?? ''),
+                    'outputConfigs' => is_array($artifact['outputConfigs'] ?? null) ? $artifact['outputConfigs'] : [],
+                    'hash' => (string) ($artifact['hash'] ?? ''),
+                    'version' => (int) ($artifact['version'] ?? 1),
+                ]);
+            }
+
+            $result = null;
+            $blocks = parse_blocks((string) $post->post_content);
+            $result = nodelogic_find_gutenberg_logic_block($blocks, $editor_id);
+
+            if ($result === null) {
+                $elementor_data = get_post_meta($post_id, '_elementor_data', true);
+                $decoded = is_string($elementor_data) ? json_decode($elementor_data, true) : null;
+                $result = nodelogic_find_elementor_logic_widget($decoded, $editor_id);
+            }
+
+            if ($result === null) {
+                return new WP_Error('nodelogic_not_found', 'Logic source not found.', ['status' => 404]);
+            }
+
+            return rest_ensure_response([
+                'formula' => $result['formula'],
+                'outputConfigs' => $result['outputConfigs'],
+            ]);
+        },
+        ],
+        [
+            'methods' => 'POST',
+            'permission_callback' => static function (WP_REST_Request $request): bool {
+                return current_user_can('edit_post', (int) $request->get_param('post_id'));
+            },
+            'args' => [
+                'post_id' => ['required' => true, 'sanitize_callback' => 'absint'],
+                'graph_id' => ['required' => true, 'sanitize_callback' => 'sanitize_key'],
+                'formula' => ['required' => true],
+                'graphState' => ['required' => false],
+                'outputConfigs' => ['required' => false],
+            ],
+            'callback' => static function (WP_REST_Request $request) {
+                $post_id = (int) $request->get_param('post_id');
+                $graph_id = sanitize_key((string) $request->get_param('graph_id'));
+                if ($post_id <= 0 || $graph_id === '' || strlen($graph_id) > 190) {
+                    return new WP_Error('nodelogic_invalid_compile_target', 'Invalid compile target.', ['status' => 400]);
+                }
+
+                $artifact = nodelogic_compile_graph_payload([
+                    'formula' => $request->get_param('formula'),
+                    'graphState' => $request->get_param('graphState'),
+                    'outputConfigs' => $request->get_param('outputConfigs'),
+                ]);
+                if (is_wp_error($artifact)) {
+                    return $artifact;
+                }
+
+                $compiled = nodelogic_compiled_graphs($post_id);
+                $artifact['postId'] = $post_id;
+                $compiled[$graph_id] = $artifact;
+                update_post_meta($post_id, '_nodelogic_compiled_graphs', $compiled);
+                $registry = nodelogic_compiled_graph_registry();
+                $registry[$graph_id] = $artifact;
+                update_option('_nodelogic_compiled_graph_registry', $registry, false);
+
+                return rest_ensure_response([
+                    'graphId' => $graph_id,
+                    'formula' => $artifact['formula'],
+                    'outputConfigs' => $artifact['outputConfigs'],
+                    'hash' => $artifact['hash'],
+                    'version' => $artifact['version'],
+                ]);
+            },
+        ],
+    ]);
+});
 
 if (!function_exists('nodelogic_graph_builder_block_comment')) {
     function nodelogic_graph_builder_block_comment(string $block_name, array $attributes = [], string $inner_content = ''): string
@@ -394,6 +646,9 @@ add_action('wp_enqueue_scripts', function () {
     // carries false -- the safe direction.
     wp_add_inline_script(
         'nodelogic-frontend',
+        'window.nodelogicFrontendConfig = ' . wp_json_encode([
+            'logicEndpoint' => rest_url('nodelogic/v1/logic'),
+        ]) . ';' .
         'window.nodelogicFrontendDebug = ' . wp_json_encode(['canDebug' => is_user_logged_in() && current_user_can('edit_posts')]) . ';',
         'before'
     );

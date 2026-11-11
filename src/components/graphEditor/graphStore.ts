@@ -66,6 +66,17 @@ export interface GraphContent {
     elements: GraphNodeLike[];
     connections: GraphEdgeLike[];
     customNodeUi?: unknown;
+    groups?: GraphGroupLike[];
+}
+
+export interface GraphGroupLike {
+    id: string;
+    name: string;
+    description?: string;
+    color?: string;
+    visible?: boolean;
+    showTerrain?: boolean;
+    memberIds: string[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -192,6 +203,7 @@ export interface CanonicalGraph {
     elements: Array<Record<string, unknown>>;
     connections: Array<Record<string, unknown>>;
     customNodeUi: unknown;
+    groups: Array<Record<string, unknown>>;
 }
 
 /**
@@ -214,6 +226,7 @@ export const canonicalizeGraph = (content: Partial<GraphContent> | null | undefi
         elements: elementKeys.map((entry) => entry.node),
         connections: connections.map((entry) => entry.edge),
         customNodeUi: canonicalCustomUi(content?.customNodeUi),
+        groups: toList(content?.groups).filter(isRecord).map((group) => canonicalValue(group) as Record<string, unknown>),
     };
 };
 
@@ -239,6 +252,15 @@ export const pickGraphContent = (raw: unknown): GraphContent => {
         elements: toList(record.elements).filter(isRecord) as GraphNodeLike[],
         connections: toList(record.connections).filter(isRecord) as GraphEdgeLike[],
         customNodeUi: record.customNodeUi ?? null,
+        groups: toList(record.groups).filter(isRecord).map((group) => ({
+            id: String(group.id || ''),
+            name: String(group.name || 'Group'),
+            description: String(group.description || ''),
+            color: String(group.color || '#38bdf8'),
+            visible: group.visible !== false,
+            showTerrain: group.showTerrain !== false,
+            memberIds: toList(group.memberIds).map(String).filter(Boolean),
+        })).filter((group) => group.id && group.memberIds.length > 0) as GraphGroupLike[],
     };
 };
 
@@ -444,6 +466,41 @@ export const validateGraphContent = (raw: unknown, options: { strict: boolean })
             ? `${plural(dangling, 'connection')} pointing to missing nodes ${dangling === 1 ? 'was' : 'were'} removed.`
             : `${plural(dangling, 'connection')} point${dangling === 1 ? 's' : ''} to missing nodes.`);
     }
+
+    // A data-flow graph must remain acyclic.  A feedback edge such as
+    // For Each -> Collect Results -> Merge -> the same For Each would make
+    // expression lowering recurse forever (or repeatedly rebuild the same
+    // collection at runtime).  Catch the cycle at graph validation time so it
+    // cannot be saved as a graph that can never terminate.
+    const adjacency = new Map<string, string[]>();
+    connections.forEach((connection) => {
+        if (!nodeIds.has(connection.fromId) || !nodeIds.has(connection.toId)) return;
+        const outgoing = adjacency.get(connection.fromId) || [];
+        outgoing.push(connection.toId);
+        adjacency.set(connection.fromId, outgoing);
+    });
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const cycleNodes: string[] = [];
+    const visit = (id: string): boolean => {
+        if (visiting.has(id)) {
+            cycleNodes.push(id);
+            return true;
+        }
+        if (visited.has(id)) return false;
+        visiting.add(id);
+        let found = false;
+        for (const next of adjacency.get(id) || []) {
+            if (visit(next)) found = true;
+        }
+        visiting.delete(id);
+        visited.add(id);
+        return found;
+    };
+    for (const id of nodeIds) visit(id);
+    if (cycleNodes.length > 0) {
+        report(`Potential infinite loop: graph contains a feedback cycle (${Array.from(new Set(cycleNodes)).slice(0, 5).join(' -> ')}).`);
+    }
     if (raw.customNodeUi !== undefined && raw.customNodeUi !== null && !isRecord(raw.customNodeUi)) {
         warnings.push('Custom node UI settings are invalid and were ignored.');
     }
@@ -453,7 +510,7 @@ export const validateGraphContent = (raw: unknown, options: { strict: boolean })
         errors,
         warnings,
         content: errors.length === 0
-            ? { elements, connections, customNodeUi: isRecord(raw.customNodeUi) ? raw.customNodeUi : null }
+            ? { elements, connections, customNodeUi: isRecord(raw.customNodeUi) ? raw.customNodeUi : null, groups: pickGraphContent(raw).groups }
             : null,
     };
 };

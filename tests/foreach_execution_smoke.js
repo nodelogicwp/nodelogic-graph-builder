@@ -160,12 +160,44 @@ function forEachSetTextGraph(elId, setValueSource) {
       cn('c7', 'out', 'output0', 'st', 'input0'),
     ];
     const f = await gen(els, conns);
-    const { errs } = run(f, `<div data-nodelogic-id="outer"><div><span>x</span></div></div>`);
+    const { doc, errs } = run(f, `<div data-nodelogic-id="outer"><div><span>x</span></div></div>`);
     ok('6 nested: generates a formula and does not crash the runtime',
       typeof f === 'string' && errs.filter((e) => /Cannot read|is not a function|SyntaxError|Maximum call/i.test(e)).length === 0,
       JSON.stringify(f) + ' | ' + errs.join(';'));
+    ok('6 nested: inner item is actually processed', doc.querySelector('span')?.textContent === 'N', doc.querySelector('span')?.textContent);
   }
   // 7. For Each fed a non-array (element, not array) -> no iteration, no crash
+  // 7a. For Each Multi -> Find Child -> Get Children -> nested For Each must
+  // execute the inner body once for every item of every outer item.
+  {
+    const els = [
+      mk('p1', 'element-ref', { elementUseManualId: true, customElementId: 'p1' }),
+      mk('p2', 'element-ref', { elementUseManualId: true, customElementId: 'p2' }),
+      mk('p3', 'element-ref', { elementUseManualId: true, customElementId: 'p3' }),
+      mk('a1', 'get-children', { getChildrenMode: 'all', getChildrenReturnAs: 'children' }),
+      mk('a2', 'get-children', { getChildrenMode: 'all', getChildrenReturnAs: 'children' }),
+      mk('a3', 'get-children', { getChildrenMode: 'all', getChildrenReturnAs: 'children' }),
+      mk('multi', 'array-for-each-multi', { arrayMultiCount: 3 }),
+      mk('find', 'find-child', { childSelector: '.options' }),
+      mk('gc2', 'get-children', { getChildrenMode: 'all', getChildrenReturnAs: 'children' }),
+      mk('inner', 'array-for-each', {}),
+      mk('out', 'output', { outputTargetElementPin: true }),
+      mk('st', 'action-set-text', { valueText: 'N' }),
+    ];
+    const conns = [
+      cn('m1', 'p1', 'output0', 'a1', 'input0'), cn('m2', 'p2', 'output0', 'a2', 'input0'), cn('m3', 'p3', 'output0', 'a3', 'input0'),
+      cn('m4', 'a1', 'output0', 'multi', 'input0'), cn('m5', 'a2', 'output0', 'multi', 'input1'), cn('m6', 'a3', 'output0', 'multi', 'input2'),
+      cn('m7', 'multi', 'output0', 'find', 'input0'), cn('m8', 'find', 'output0', 'gc2', 'input0'), cn('m9', 'gc2', 'output0', 'inner', 'input0'),
+      cn('m10', 'inner', 'output0', 'out', 'input0'), cn('m11', 'out', 'output0', 'st', 'input0'),
+    ];
+    const f = await gen(els, conns);
+    const { doc, errs } = run(f,
+      '<div data-nodelogic-id="p1"><div class="item"><section class="options"><i>a</i><i>b</i></section></div><div class="item"><section class="options"><i>c</i><i>d</i></section></div><div class="item"><section class="options"><i>e</i><i>f</i></section></div></div>' +
+      '<div data-nodelogic-id="p2"></div><div data-nodelogic-id="p3"></div>');
+    ok('7a nested Multi: all inner items are processed', JSON.stringify(texts(doc, 'i')) === JSON.stringify(['N', 'N', 'N', 'N', 'N', 'N']), JSON.stringify(texts(doc, 'i')) + ' | ' + JSON.stringify(f));
+    ok('7a nested Multi: no runtime error', errs.filter((e) => /Cannot read|is not a function|SyntaxError|Maximum call/i.test(e)).length === 0, errs.join(';'));
+  }
+  // 8. For Each fed a non-array (element, not array) -> no iteration, no crash
   {
     const els = [
       mk('elref', 'element-ref', { elementUseManualId: true, customElementId: 't' }),

@@ -4,7 +4,7 @@ Tags: calculator, gutenberg, no-code, conditional logic, workflow builder
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.6.0
+Stable tag: 1.6.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,13 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 
 == Changelog ==
 
+= 1.6.1 =
+* New: Array Get Item by Index node - retrieve array items by index (supports negative indices).
+* New: First Event Collector node - returns value from first triggered event in For Each subgraphs.
+* New: Event Aggregator node - sums triggeredCount from all For Each subgraph events.
+* Fixed: Event nodes can now trigger multiple times and connect to multiple targets.
+* Fixed: Event Processor payload input now accepts element type.
+
 = 1.6.0 =
 * New: version history for every logic graph. Save Graph keeps 0-10 previous versions (set per block / widget) that you can preview, compare and restore.
 * New: automatic working copy. Your edits are stored in the browser while you work; the page keeps its current graph until you click Save Graph, and unsaved work survives closing the editor or a browser crash (recovery is offered only when the content really differs).
@@ -118,6 +125,9 @@ All modern browsers (Chrome, Firefox, Safari, Edge). The graph editor is optimiz
 * Added/kept readable source files in `src/` and documented source location
 
 == Upgrade Notice ==
+
+= 1.6.1 =
+Adds new array and event nodes for advanced calculator workflows. Events can now trigger multiple times, and Event Processor accepts element types. Existing graphs keep working.
 
 = 1.6.0 =
 Adds version history, an automatic working copy with crash recovery, and JSON import / export to the graph editor, plus new element, event and debug nodes and fixes for nodes that ignored their settings. Existing graphs keep working.

@@ -159,6 +159,15 @@ add_action('elementor/init', function () {
                 );
 
                 $this->add_control(
+                    'compiled_graph_hash',
+                    [
+                        'label' => 'Compiled Graph Hash',
+                        'type' => \Elementor\Controls_Manager::HIDDEN,
+                        'default' => '',
+                    ]
+                );
+
+                $this->add_control(
                     'open_editor_button',
                     [
                         'label' => 'Logic Graph Editor',
@@ -186,8 +195,6 @@ add_action('elementor/init', function () {
                 }
 
                 $graph_state = $settings['graph_state'] ?? '{}';
-                $formula = $settings['formula'] ?? '';
-                $output_configs = $settings['output_configs'] ?? '{}';
 
                 if (\Elementor\Plugin::$instance->editor->is_edit_mode()) {
                     ?>
@@ -207,10 +214,8 @@ add_action('elementor/init', function () {
                     class="nodelogic-logic-block"
                     data-nodelogic-logic="1"
                     data-editor-id="<?php echo esc_attr($editor_id); ?>"
-                    data-graph-state="<?php echo esc_attr($graph_state); ?>"
-                    data-formula="<?php echo esc_attr($formula); ?>"
-                    data-output-configs="<?php echo esc_attr($output_configs); ?>"
-                    data-post-id="<?php echo esc_attr((string) (get_the_ID() ?: 0)); ?>"
+                    data-graph-id="<?php echo esc_attr(sanitize_key($editor_id)); ?>"
+                    data-post-id="<?php echo esc_attr((string) (get_the_ID() ?: get_queried_object_id() ?: 0)); ?>"
                     style="display:none;"
                 ></div>
 

@@ -305,7 +305,9 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
 /* GraphEditor Component Styles */
 .graph-editor {
     display: flex;
+    position: relative;
     height: 87vh;
+    min-height: 0;
     background-color: #1a1a1a;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', sans-serif;
 }
@@ -317,6 +319,8 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     display: flex;
     flex-direction: column;
     min-width: 0;
+    padding-top: 42px;
+    box-sizing: border-box;
 }
 
 .sidebar.open {
@@ -419,6 +423,8 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     flex: 1;
     display: flex;
     overflow: hidden;
+    padding-top: 42px;
+    box-sizing: border-box;
 }
 
 .canvas {
@@ -577,6 +583,14 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     gap: 8px;
     min-height: 34px;
     position: relative;
+}
+
+/* For Each Context has two stacked selects inside its single Array input.
+   Keep the actual row height in sync with graphEditor.tsx pin geometry so the
+   input pin is centered on the visible control instead of floating above it. */
+.canvas-element.type-array-for-each-context .input-row {
+    min-height: 67px;
+    height: 67px;
 }
 
 .input-label {
@@ -1686,6 +1700,10 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     right: auto;
 }
 
+.canvas-element .get-children-output-label {
+    pointer-events: auto;
+}
+
 .canvas-element .input-row-special.calc-op-row {
     gap: 0;
     justify-content: center;
@@ -2311,4 +2329,227 @@ input[type=range]{-webkit-appearance:none;appearance:none;background:none;border
     display: grid;
     place-items: center;
     min-height: 120px;
+}
+.nl-toolbox {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5000;
+  font-size: 12px;
+  min-height: 42px;
+  background: #252a31;
+  border-bottom: 1px solid #3b424c;
+  box-shadow: 0 3px 12px rgba(0,0,0,.28);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 3px 8px;
+  box-sizing: border-box;
+}
+.nl-toolbox-toggle {
+  width: 34px;
+  height: 32px;
+  border: 1px solid rgba(148,163,184,.45);
+  border-radius: 4px;
+  background: #303740;
+  color: #e2e8f0;
+  cursor: pointer;
+  box-shadow: none;
+  flex: 0 0 auto;
+}
+.nl-toolbox-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: 100%;
+  max-height: none;
+  overflow: visible;
+  margin: 4px 0 2px;
+  padding: 0 0 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #e5e7eb;
+}
+.nl-toolbox-title {
+  color: #9aa6b2;
+  font-weight: 700;
+  margin: 0 5px 0 2px;
+  white-space: nowrap;
+}
+.nl-graph-title {
+  position: absolute;
+  left: 14px;
+  color: #f1f5f9;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.nl-toolbox-close {
+  position: absolute !important;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 32px !important;
+  width: 32px !important;
+  height: 30px !important;
+  padding: 0 !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.nl-toolbox-panel > button,
+.nl-group-editor button {
+  width: auto;
+  margin: 0;
+  min-width: 36px;
+  height: 32px;
+  padding: 5px 9px;
+  border: 1px solid rgba(148,163,184,.25);
+  border-radius: 4px;
+  background: #303740;
+  color: #e5e7eb;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 16px;
+}
+.nl-toolbox-panel > button:hover,
+.nl-toolbox-toggle:hover,
+.nl-group-editor button:hover { background: #3b4652; }
+.nl-toolbox-panel > button.active {
+  background: #2563eb;
+  border-color: #60a5fa;
+  color: #fff;
+}
+.nl-toolbox-panel kbd {
+  display: none;
+  color: #94a3b8;
+  font-size: 10px;
+  margin-left: 12px;
+}
+.nl-group-editor {
+  position: absolute;
+  top: 40px;
+  width: 245px;
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid rgba(148,163,184,.22);
+  border-radius: 7px;
+  background: #20252c;
+}
+.nl-group-list,
+.nl-group-settings {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 230px;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid #3b424c;
+  border-radius: 7px;
+  background: #20252c;
+  box-shadow: 0 12px 28px rgba(0,0,0,.4);
+}
+.nl-group-list-title { color: #cbd5e1; font-weight: 700; margin: 2px 4px 6px; }
+.nl-group-list button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border: 0; border-radius: 4px; background: transparent; color: #e5e7eb; text-align: left; cursor: pointer; }
+.nl-group-list button:hover { background: #303740; }
+.nl-group-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.nl-group-empty { padding: 6px 4px; color: #94a3b8; font-size: 11px; }
+.nl-group-settings-head { display: flex; align-items: center; justify-content: space-between; color: #cbd5e1; font-weight: 700; margin-bottom: 7px; }
+.nl-group-settings-head button { border: 0; background: transparent; color: #cbd5e1; font-size: 18px; cursor: pointer; }
+.nl-group-settings input[type="text"],
+.nl-group-settings textarea { width: 100%; box-sizing: border-box; margin-bottom: 5px; padding: 5px; border: 1px solid rgba(148,163,184,.3); border-radius: 5px; background: #0f172a; color: #e5e7eb; font-size: 11px; }
+.nl-group-settings textarea { min-height: 42px; resize: vertical; }
+.nl-group-settings label { display: block; margin: 5px 0; color: #cbd5e1; font-size: 10px; }
+.nl-group-settings > button { width: 100%; margin-top: 5px; padding: 6px; border: 1px solid rgba(248,113,113,.4); border-radius: 5px; background: rgba(127,29,29,.35); color: #fecaca; cursor: pointer; }
+.nl-group-settings > button.nl-group-go-to { border-color: rgba(96,165,250,.55); background: rgba(30,64,175,.4); color: #dbeafe; }
+.nl-group-editor input[type="text"],
+.nl-group-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 5px;
+  padding: 5px;
+  border: 1px solid rgba(148,163,184,.3);
+  border-radius: 5px;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-size: 11px;
+}
+.nl-group-editor textarea { min-height: 42px; resize: vertical; }
+.nl-group-editor label { display: block; margin: 4px 0; color: #cbd5e1; font-size: 10px; }
+.nl-group-terrain {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  border: 2px solid;
+  border-radius: 28px 44px 34px 52px;
+  transform: rotate(-.35deg);
+  padding: 8px 12px;
+  box-sizing: border-box;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: .85;
+}
+.nl-selection-terrain {
+  position: absolute;
+  z-index: 0;
+  pointer-events: auto;
+  cursor: grab;
+  border: 1px dashed rgba(125, 211, 252, .9);
+  border-radius: 26px 38px 30px 44px;
+  background: rgba(56, 189, 248, .08);
+  box-shadow: 0 0 0 1px rgba(125, 211, 252, .25), 0 0 22px rgba(56, 189, 248, .12);
+  transform: rotate(.25deg);
+  box-sizing: border-box;
+}
+.nl-selection-terrain:active { cursor: grabbing; }
+.nl-selection-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 450;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.nodelogic-gutenberg-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  width: 100vw;
+  height: 100vh;
+  background: #1a1a1a;
+}
+.nodelogic-gutenberg-shell,
+.nodelogic-gutenberg-shell > .graph-editor,
+.nodelogic-modal,
+.nodelogic-modal-content,
+.nodelogic-modal-content > .graph-editor {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  box-sizing: border-box;
+}
+.nodelogic-modal { background: #1a1a1a; }
+.nodelogic-modal-content { overflow: hidden; }
+.nl-selection-overlay rect,
+.nl-selection-overlay polyline {
+  fill: rgba(56, 189, 248, .12);
+  stroke: #38bdf8;
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
 }
